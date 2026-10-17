@@ -14,6 +14,7 @@ endif()
 add_library(rcre STATIC
     src/core/arena.c
     src/core/tensor.c
+    src/core/adapt.c
 )
 
 target_include_directories(rcre PUBLIC
@@ -31,3 +32,7 @@ add_test(NAME test_arena COMMAND test_arena)
 add_executable(test_tensor_strides tests/test_tensor_strides.c)
 target_link_libraries(test_tensor_strides PRIVATE rcre)
 add_test(NAME test_tensor_strides COMMAND test_tensor_strides)
+
+add_executable(test_adapt_spec tests/test_adapt_spec.c)
+target_link_libraries(test_adapt_spec PRIVATE rcre)
+add_test(NAME test_adapt_spec COMMAND test_adapt_spec)
