@@ -206,6 +206,97 @@ RCRE_NODISCARD int rcre_tensor_adapt(const RCRE_Tensor* src,
                                     RCRE_Arena* arena, 
                                     RCRE_Tensor* dst);
 
+/* ========================================================================= */
+/* Concurrency & Threadpool Engine (THR-REQ-01 to THR-REQ-03)                */
+/* ========================================================================= */
+
+typedef struct RCRE_ThreadPool RCRE_ThreadPool;
+
+typedef void (*rcre_task_fn)(void* arg, size_t task_id);
+typedef void (*rcre_tile_fn)(void* arg, size_t y_start, size_t y_end, size_t x_start, size_t x_end);
+
+/**
+ * @brief Creates a C23 / POSIX work-stealing threadpool with persistent workers.
+ * @param num_threads Number of worker threads (0 = auto-detect hardware concurrency).
+ */
+RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads);
+
+/**
+ * @brief Executes a 1D parallel-for loop across threadpool workers.
+ */
+void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task_fn task, void* arg);
+
+/**
+ * @brief Partitions 2D spatial dimensions into cache-friendly rectangular tiles.
+ */
+void rcre_threadpool_parallel_for_2d(RCRE_ThreadPool* pool, size_t height, size_t width, 
+                                     size_t tile_h, size_t tile_w, 
+                                     rcre_tile_fn tile_fn, void* arg);
+
+/**
+ * @brief Shuts down worker threads and destroys the threadpool.
+ */
+void rcre_threadpool_destroy(RCRE_ThreadPool* pool);
+
+/* ========================================================================= */
+/* Computer Vision Reference Primitives (CV-REQ-01 to CV-REQ-03)             */
+/* ========================================================================= */
+
+/**
+ * @brief Converts 3-channel RGB image to 1-channel Grayscale using Rec.601 luma.
+ */
+RCRE_NODISCARD int rcre_cv_rgb_to_gray(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
+ * @brief Swaps color channels between RGB and BGR in-place or into destination.
+ */
+RCRE_NODISCARD int rcre_cv_bgr_to_rgb(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
+ * @brief Separable 2D Gaussian blur with reflection padding.
+ */
+RCRE_NODISCARD int rcre_cv_gaussian_blur(const RCRE_Tensor* src, RCRE_Tensor* dst, 
+                                         float sigma, RCRE_Arena* arena);
+
+/**
+ * @brief Computes 3x3 horizontal (dx) and vertical (dy) Sobel spatial derivatives.
+ */
+RCRE_NODISCARD int rcre_cv_sobel(const RCRE_Tensor* src, RCRE_Tensor* dst_dx, 
+                                 RCRE_Tensor* dst_dy, RCRE_Arena* arena);
+
+/* ========================================================================= */
+/* Classical Machine Learning Primitives (ML-REQ-01)                         */
+/* ========================================================================= */
+
+/**
+ * @brief Fits an Ordinary Least Squares (OLS) regression model: w = (X^T X)^-1 X^T y.
+ * @param X Matrix of shape [N, D] (F32).
+ * @param y Vector of shape [N, 1] (F32).
+ * @param weights Output vector of shape [D, 1] (F32).
+ */
+RCRE_NODISCARD int rcre_ml_ols_fit(const RCRE_Tensor* X, const RCRE_Tensor* y, 
+                                   RCRE_Tensor* weights, RCRE_Arena* arena);
+
+/**
+ * @brief Fits Logistic Regression via Gradient Descent with Cross-Entropy Loss.
+ */
+RCRE_NODISCARD int rcre_ml_logistic_fit(const RCRE_Tensor* X, const RCRE_Tensor* y, 
+                                        RCRE_Tensor* weights, float lr, 
+                                        size_t epochs, RCRE_Arena* arena);
+
+/**
+ * @brief Fits Linear Soft-Margin SVM via Pegasos Subgradient Descent.
+ */
+RCRE_NODISCARD int rcre_ml_pegasos_svm_fit(const RCRE_Tensor* X, const RCRE_Tensor* y, 
+                                           RCRE_Tensor* weights, float lambda_reg, 
+                                           size_t epochs, RCRE_Arena* arena);
+
+/**
+ * @brief Computes linear model inference: y_pred = X * weights.
+ */
+RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tensor* weights, 
+                                          RCRE_Tensor* preds);
+
 #ifdef __cplusplus
 }
 #endif

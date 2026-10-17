@@ -15,6 +15,10 @@ add_library(rcre STATIC
     src/core/arena.c
     src/core/tensor.c
     src/core/adapt.c
+    src/core/threadpool.c
+    src/cv/color.c
+    src/cv/filter.c
+    src/ml/linear.c
 )
 
 target_include_directories(rcre PUBLIC
@@ -22,17 +26,26 @@ target_include_directories(rcre PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
+find_package(Threads REQUIRED)
+target_link_libraries(rcre PUBLIC Threads::Threads)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(rcre PUBLIC m)
+endif()
+
 # Enable Testing
 enable_testing()
 
-add_executable(test_arena tests/test_arena.c)
-target_link_libraries(test_arena PRIVATE rcre)
-add_test(NAME test_arena COMMAND test_arena)
+set(TESTS
+    test_arena
+    test_tensor_strides
+    test_adapt_spec
+    test_threadpool
+    test_cv_filters
+    test_ml_linear
+)
 
-add_executable(test_tensor_strides tests/test_tensor_strides.c)
-target_link_libraries(test_tensor_strides PRIVATE rcre)
-add_test(NAME test_tensor_strides COMMAND test_tensor_strides)
-
-add_executable(test_adapt_spec tests/test_adapt_spec.c)
-target_link_libraries(test_adapt_spec PRIVATE rcre)
-add_test(NAME test_adapt_spec COMMAND test_adapt_spec)
+foreach(test_name ${TESTS})
+    add_executable(${test_name} tests/${test_name}.c)
+    target_link_libraries(${test_name} PRIVATE rcre)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
