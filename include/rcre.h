@@ -297,6 +297,56 @@ RCRE_NODISCARD int rcre_ml_pegasos_svm_fit(const RCRE_Tensor* X, const RCRE_Tens
 RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tensor* weights, 
                                           RCRE_Tensor* preds);
 
+/* ========================================================================= */
+/* Hardware Abstraction Layer & SIMD Dispatch (HAL-REQ-01 to HAL-REQ-04)     */
+/* ========================================================================= */
+
+typedef enum {
+    RCRE_CPU_FEAT_SCALAR      = (1 << 0),
+    RCRE_CPU_FEAT_NEON        = (1 << 1),
+    RCRE_CPU_FEAT_AVX2        = (1 << 2),
+    RCRE_CPU_FEAT_FMA         = (1 << 3),
+    RCRE_CPU_FEAT_AVX512F     = (1 << 4),
+    RCRE_CPU_FEAT_WASM_SIMD   = (1 << 5)
+} RCRE_CpuFeatures;
+
+typedef void (*rcre_gemm_fn)(size_t M, size_t N, size_t K, float alpha, 
+                             const float* A, size_t lda, 
+                             const float* B, size_t ldb, 
+                             float beta, float* C, size_t ldc);
+
+typedef float (*rcre_dot_fn)(const float* x, const float* y, size_t n);
+
+typedef void (*rcre_axpy_fn)(size_t n, float alpha, const float* x, float* y);
+
+typedef void (*rcre_rgb_to_gray_u8_fn)(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
+
+typedef struct RCRE_HalDispatch {
+    const char*            backend_name;
+    uint32_t               cpu_features;
+    rcre_gemm_fn           gemm_f32;
+    rcre_dot_fn            dot_f32;
+    rcre_axpy_fn           axpy_f32;
+    rcre_rgb_to_gray_u8_fn rgb_to_gray_u8;
+} RCRE_HalDispatch;
+
+extern RCRE_HalDispatch rcre_hal;
+
+/**
+ * @brief Probes host hardware and initializes dynamic SIMD dispatch table.
+ */
+void rcre_hal_init(void);
+
+/**
+ * @brief Returns bitmask of detected CPU SIMD features.
+ */
+uint32_t rcre_cpu_get_features(void);
+
+/**
+ * @brief Returns human-readable CPU brand/model string.
+ */
+const char* rcre_cpu_get_brand(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -156,21 +156,14 @@ RCRE_NODISCARD int rcre_ml_logistic_fit(const RCRE_Tensor* X, const RCRE_Tensor*
 
         for (size_t i = 0; i < N; ++i) {
             const float* row = &X_data[i * D];
-            float z = 0.0f;
-            for (size_t d = 0; d < D; ++d) {
-                z += row[d] * w_data[d];
-            }
+            float z = rcre_hal.dot_f32(row, w_data, D);
 
             float error = sigmoidf(z) - y_data[i];
-            for (size_t d = 0; d < D; ++d) {
-                grad[d] += error * row[d];
-            }
+            rcre_hal.axpy_f32(D, error, row, grad);
         }
 
-        /* Parameter update */
-        for (size_t d = 0; d < D; ++d) {
-            w_data[d] -= lr * (grad[d] * inv_N);
-        }
+        /* Parameter update: w = w - (lr / N) * grad */
+        rcre_hal.axpy_f32(D, -lr * inv_N, grad, w_data);
     }
 
     return RCRE_OK;
@@ -200,10 +193,7 @@ RCRE_NODISCARD int rcre_ml_pegasos_svm_fit(const RCRE_Tensor* X, const RCRE_Tens
             t++;
 
             const float* row = &X_data[i * D];
-            float dot = 0.0f;
-            for (size_t d = 0; d < D; ++d) {
-                dot += row[d] * w_data[d];
-            }
+            float dot = rcre_hal.dot_f32(row, w_data, D);
 
             float y_i = (y_data[i] > 0.0f) ? 1.0f : -1.0f;
             float margin = y_i * dot;
@@ -237,12 +227,7 @@ RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tenso
     float* p_data = (float*)preds->data;
 
     for (size_t i = 0; i < N; ++i) {
-        const float* row = &X_data[i * D];
-        float acc = 0.0f;
-        for (size_t d = 0; d < D; ++d) {
-            acc += row[d] * w_data[d];
-        }
-        p_data[i] = acc;
+        p_data[i] = rcre_hal.dot_f32(&X_data[i * D], w_data, D);
     }
 
     return RCRE_OK;

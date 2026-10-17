@@ -37,6 +37,13 @@ RCRE_NODISCARD int rcre_cv_rgb_to_gray(const RCRE_Tensor* src, RCRE_Tensor* dst)
         const uint8_t* in = (const uint8_t*)src->data;
         uint8_t* out = (uint8_t*)dst->data;
 
+        /* Fast contiguous hardware SIMD dispatch */
+        if (src_stride_y == width * 3 && src_stride_x == 3 &&
+            dst_stride_y == width && dst_stride_x == 1) {
+            rcre_hal.rgb_to_gray_u8(in, out, height * width);
+            return RCRE_OK;
+        }
+
         for (size_t y = 0; y < height; ++y) {
             for (size_t x = 0; x < width; ++x) {
                 size_t in_idx = y * src_stride_y + x * src_stride_x;

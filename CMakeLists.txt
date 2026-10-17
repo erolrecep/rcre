@@ -19,10 +19,16 @@ add_library(rcre STATIC
     src/cv/color.c
     src/cv/filter.c
     src/ml/linear.c
+    src/hal/cpu_probe.c
+    src/hal/hal_dispatch.c
+    src/hal/kernels_scalar.c
+    src/hal/kernels_neon.c
+    src/hal/kernels_avx2.c
 )
 
 target_include_directories(rcre PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/hal>
     $<INSTALL_INTERFACE:include>
 )
 
@@ -42,6 +48,7 @@ set(TESTS
     test_threadpool
     test_cv_filters
     test_ml_linear
+    test_hal
 )
 
 foreach(test_name ${TESTS})
