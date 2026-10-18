@@ -298,6 +298,105 @@ RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tenso
                                           RCRE_Tensor* preds);
 
 /* ========================================================================= */
+/* Clustering & Dimensionality Reduction (ML-REQ-02)                         */
+/* ========================================================================= */
+
+/**
+ * @brief Fits k-Means clustering via k-Means++ initialization & Lloyd iterations.
+ * @param X Matrix of shape [N, D] (F32).
+ * @param k Number of clusters.
+ * @param max_iter Maximum iterations (e.g. 100).
+ * @param centroids Output matrix of shape [K, D] (F32).
+ * @param labels Optional output vector of shape [N, 1] (I32 or F32).
+ */
+RCRE_NODISCARD int rcre_ml_kmeans_fit(const RCRE_Tensor* X, size_t k, size_t max_iter,
+                                      RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                      RCRE_Arena* arena);
+
+/**
+ * @brief Predicts closest cluster centroid index for input samples.
+ */
+RCRE_NODISCARD int rcre_ml_kmeans_predict(const RCRE_Tensor* X, const RCRE_Tensor* centroids,
+                                          RCRE_Tensor* labels);
+
+/**
+ * @brief Computes top K Principal Components via covariance power iteration.
+ * @param X Input matrix [N, D] (F32).
+ * @param components Output matrix [K, D] representing top K principal eigenvectors.
+ * @param mean Output vector [D, 1] representing feature means.
+ */
+RCRE_NODISCARD int rcre_ml_pca_fit(const RCRE_Tensor* X, size_t k, 
+                                   RCRE_Tensor* components, RCRE_Tensor* mean,
+                                   RCRE_Arena* arena);
+
+/**
+ * @brief Projects data onto fitted principal components: X_proj = (X - mean) * components^T.
+ */
+RCRE_NODISCARD int rcre_ml_pca_transform(const RCRE_Tensor* X, const RCRE_Tensor* components,
+                                         const RCRE_Tensor* mean, RCRE_Tensor* X_proj);
+
+/* ========================================================================= */
+/* Modern Tabular Ensemble: Flat-Array GBDT Inference (ML-REQ-03)            */
+/* ========================================================================= */
+
+typedef struct RCRE_TreeNode {
+    uint32_t feature_idx;     /* Feature index to split on */
+    float    threshold;       /* Numerical split threshold */
+    uint32_t left_child;      /* Node index for x <= threshold */
+    uint32_t right_child;     /* Node index for x > threshold */
+    float    leaf_value;      /* Prediction value if is_leaf is true */
+    bool     is_leaf;
+} RCRE_TreeNode;
+
+typedef struct RCRE_GBDTModel {
+    const RCRE_TreeNode* nodes;     /* Flat array of nodes for all trees */
+    const size_t*        tree_roots;/* Starting node index for each tree */
+    size_t               num_trees;
+    size_t               num_nodes;
+    float                base_score;
+    bool                 is_binary_classification;
+} RCRE_GBDTModel;
+
+/**
+ * @brief Fast zero-allocation GBDT ensemble inference over flat-array nodes.
+ */
+RCRE_NODISCARD int rcre_ml_gbdt_predict(const RCRE_GBDTModel* model, 
+                                        const RCRE_Tensor* X, 
+                                        RCRE_Tensor* preds);
+
+/* ========================================================================= */
+/* Similarity & Fast Vector Search: HNSW Graph Index (ML-REQ-04)             */
+/* ========================================================================= */
+
+typedef struct RCRE_HNSWIndex RCRE_HNSWIndex;
+
+typedef enum {
+    RCRE_METRIC_L2     = 0,
+    RCRE_METRIC_COSINE = 1
+} RCRE_MetricType;
+
+/**
+ * @brief Allocates an HNSW vector index inside caller scratchpad arena.
+ */
+RCRE_NODISCARD RCRE_HNSWIndex* rcre_hnsw_create(size_t dim, size_t max_elements, 
+                                                size_t M, size_t ef_construction, 
+                                                RCRE_MetricType metric, 
+                                                RCRE_Arena* arena);
+
+/**
+ * @brief Inserts a vector with an external ID into the HNSW graph.
+ */
+RCRE_NODISCARD int rcre_hnsw_insert(RCRE_HNSWIndex* index, const float* vector, size_t id, 
+                                    RCRE_Arena* scratch);
+
+/**
+ * @brief Searches for k nearest neighbors to a query vector.
+ */
+RCRE_NODISCARD int rcre_hnsw_search(const RCRE_HNSWIndex* index, const float* query, 
+                                    size_t k, size_t* out_ids, float* out_distances, 
+                                    size_t ef_search, RCRE_Arena* scratch);
+
+/* ========================================================================= */
 /* Hardware Abstraction Layer & SIMD Dispatch (HAL-REQ-01 to HAL-REQ-04)     */
 /* ========================================================================= */
 

@@ -19,11 +19,15 @@ add_library(rcre STATIC
     src/cv/color.c
     src/cv/filter.c
     src/ml/linear.c
+    src/ml/cluster.c
+    src/ml/gbdt_infer.c
+    src/ml/hnsw.c
     src/hal/cpu_probe.c
     src/hal/hal_dispatch.c
     src/hal/kernels_scalar.c
     src/hal/kernels_neon.c
     src/hal/kernels_avx2.c
+    src/hal/kernels_wasm.c
 )
 
 target_include_directories(rcre PUBLIC
@@ -49,6 +53,9 @@ set(TESTS
     test_cv_filters
     test_ml_linear
     test_hal
+    test_cluster
+    test_gbdt
+    test_hnsw
 )
 
 foreach(test_name ${TESTS})

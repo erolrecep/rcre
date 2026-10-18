@@ -10,17 +10,21 @@ SRCS = src/core/arena.c \
        src/cv/color.c \
        src/cv/filter.c \
        src/ml/linear.c \
+       src/ml/cluster.c \
+       src/ml/gbdt_infer.c \
+       src/ml/hnsw.c \
        src/hal/cpu_probe.c \
        src/hal/hal_dispatch.c \
        src/hal/kernels_scalar.c \
        src/hal/kernels_neon.c \
-       src/hal/kernels_avx2.c
+       src/hal/kernels_avx2.c \
+       src/hal/kernels_wasm.c
 
 OBJS = $(SRCS:.c=.o)
 LIB = librcre.a
 DYLIB = lib/librcre.dylib
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_ml_linear test_hal
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_ml_linear test_hal test_cluster test_gbdt test_hnsw
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -58,6 +62,9 @@ test: $(LIB) $(TEST_BINS)
 	@bin/test_cv_filters
 	@bin/test_ml_linear
 	@bin/test_hal
+	@bin/test_cluster
+	@bin/test_gbdt
+	@bin/test_hnsw
 	@echo "🎉 All RCRE Core Unit Tests Passed!"
 
 test-sanitizers:
@@ -77,6 +84,12 @@ test-sanitizers:
 	@bin/test_ml_linear_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_hal.c -lm -lpthread -o bin/test_hal_asan
 	@bin/test_hal_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cluster.c -lm -lpthread -o bin/test_cluster_asan
+	@bin/test_cluster_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_gbdt.c -lm -lpthread -o bin/test_gbdt_asan
+	@bin/test_gbdt_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_hnsw.c -lm -lpthread -o bin/test_hnsw_asan
+	@bin/test_hnsw_asan
 	@echo "🎉 Zero Memory Leaks & Zero Undefined Behavior Detected!"
 
 test-parity: $(DYLIB)
