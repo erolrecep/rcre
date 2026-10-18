@@ -114,24 +114,45 @@ clang -std=c2x -O3 -lm -lpthread main.c -o main
 
 ---
 
-### Option 2: Building from Source with `Makefile`
+### Option 2: Building & Running from the `Makefile` Command Center
 
-Build the static library, shared library, single-header distribution, and examples:
+`Makefile` is the central command hub for the entire project:
 
 ```bash
-# Build librcre.a, librcre.dylib, dist/rcre.h, and all example binaries
+# Display all available commands & targets
+make help
+
+# 🌐 Launch educational visualizers and in-browser playground at http://localhost:8080
+make up_web_app
+
+# 📷 Launch live webcam stream with real-time ASCII edge detection
+make webcam_test
+
+# 📷 Launch synthetic camera stream (ideal for headless SSH or CI)
+make webcam_test_dummy
+
+# ⚡ Run high-throughput GBDT inference benchmark (100k samples)
+make gbdt_test
+
+# 🔍 Run HNSW vector similarity search benchmark (64-D embeddings)
+make hnsw_test
+
+# 🚀 Build librcre.a, librcre.dylib, dist/rcre.h, and all example binaries
 make all
 
-# Run the full 12-test unit test suite
+# 🧪 Run full 12-test unit test suite
 make test
 
-# Run AddressSanitizer & UndefinedBehaviorSanitizer memory safety checks
+# 🛡️ Run AddressSanitizer & UndefinedBehaviorSanitizer memory safety checks
 make test-sanitizers
 
-# Run Python numerical parity tests against OpenCV and Scikit-Learn
+# 🐍 Run Python numerical parity tests against OpenCV and Scikit-Learn
 make test-parity
 
-# Run the hardware acceleration GEMM benchmark
+# 🎉 Run all verification layers at once
+make test-all
+
+# 📊 Run the hardware acceleration GEMM benchmark
 make bench
 ```
 

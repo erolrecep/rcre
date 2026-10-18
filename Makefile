@@ -8,14 +8,17 @@ ifeq ($(UNAME_S),Darwin)
     CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/cam_avf.m
     CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_avf.o
     CAM_LDFLAGS = -framework AVFoundation -framework CoreVideo -framework CoreMedia -framework Foundation
+    OPEN_CMD = open
 else ifeq ($(UNAME_S),Linux)
     CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/cam_v4l2.c
     CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_v4l2.o
     CAM_LDFLAGS =
+    OPEN_CMD = xdg-open
 else
     CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c
     CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o
     CAM_LDFLAGS =
+    OPEN_CMD = echo
 endif
 
 SRCS = src/core/arena.c \
@@ -48,7 +51,7 @@ SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 EXAMPLES = webcam_edge_filter tabular_gbdt_predict hnsw_vector_search
 EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
-.PHONY: all clean test test-sanitizers test-parity bench examples dist
+.PHONY: all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_dummy gbdt_test hnsw_test help
 
 all: $(LIB) $(DYLIB) $(AMALGAMATED_HEADER) $(EXAMPLE_BINS)
 
@@ -92,9 +95,40 @@ bin/%: examples/%.c $(LIB)
 examples: $(EXAMPLE_BINS)
 	@echo "✅ Built all RCRE examples in bin/"
 
+# =============================================================================
+# Interactive Developer Operations
+# =============================================================================
+
+up_web_app:
+	@echo "🌐 Launching RCRE Educational Suite & In-Browser Playground..."
+	@echo "   Serving at: http://localhost:8080"
+	@($(OPEN_CMD) http://localhost:8080 2>/dev/null &) || true
+	@python3 -m http.server 8080 --directory web/
+
+webcam_test: bin/webcam_edge_filter
+	@echo "📷 Launching RCRE Live Camera Stream & Edge Filter (Press Ctrl+C to stop)..."
+	@bin/webcam_edge_filter --frames 200 --view
+
+webcam_test_dummy: bin/webcam_edge_filter
+	@echo "📷 Launching RCRE Synthetic Test Camera Stream (Press Ctrl+C to stop)..."
+	@bin/webcam_edge_filter --dummy --frames 100 --view
+
+gbdt_test: bin/tabular_gbdt_predict
+	@bin/tabular_gbdt_predict
+
+hnsw_test: bin/hnsw_vector_search
+	@bin/hnsw_vector_search
+
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@
+
+bench: bin/bench_hal
+	@bin/bench_hal
+
+# =============================================================================
+# Verification & Testing Suites
+# =============================================================================
 
 test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@echo "🚀 Running RCRE Full Unit Test Suite (Core, Camera & Amalgamated)..."
@@ -151,8 +185,37 @@ test-parity: $(DYLIB)
 	@echo "🐍 Running Python FFI Bindings Test..."
 	uv run --with numpy python tests/test_python_bindings.py
 
-bench: bin/bench_hal
-	@bin/bench_hal
+test-all: test test-sanitizers test-parity
+	@echo ""
+	@echo "=================================================================="
+	@echo "🎉 ALL VERIFICATION LAYERS (Units, Sanitizers, Parity) PASSED!  "
+	@echo "=================================================================="
 
 clean:
 	rm -rf lib bin dist src/core/*.o src/cv/*.o src/ml/*.o src/hal/*.o src/extras/*.o
+	@echo "🧹 Cleaned all build artifacts"
+
+help:
+	@echo "=================================================================="
+	@echo "  RCRE — Recep's Code Run Everywhere: Command Center             "
+	@echo "=================================================================="
+	@echo "Interactive Operations:"
+	@echo "  make up_web_app         Serve educational visualizers at http://localhost:8080"
+	@echo "  make webcam_test        Launch real-time webcam & edge filter preview"
+	@echo "  make webcam_test_dummy  Launch synthetic animated camera preview (headless)"
+	@echo "  make gbdt_test          Run 100k-sample GBDT inference benchmark"
+	@echo "  make hnsw_test          Run 64-D HNSW vector similarity search benchmark"
+	@echo ""
+	@echo "Build & Amalgamation Targets:"
+	@echo "  make all                Build static/shared libraries, dist header & examples"
+	@echo "  make dist               Generate single-header amalgamated dist/rcre.h"
+	@echo "  make examples           Compile all standalone examples into bin/"
+	@echo "  make bench              Run hardware acceleration GEMM benchmark"
+	@echo "  make clean              Remove all build artifacts and libraries"
+	@echo ""
+	@echo "Verification & Quality Gates:"
+	@echo "  make test               Run full 12-test unit test suite"
+	@echo "  make test-sanitizers    Run AddressSanitizer & UndefinedBehaviorSanitizer"
+	@echo "  make test-parity        Run Python OpenCV/Scikit-Learn parity tests"
+	@echo "  make test-all           Run all test suites & verification gates"
+	@echo "=================================================================="

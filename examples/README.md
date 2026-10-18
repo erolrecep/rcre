@@ -19,16 +19,26 @@ All examples strictly adhere to RCRE's core architectural tenets:
 
 ---
 
-## 🛠️ Compilation
+## 🛠️ Quick Execution via Makefile
 
-To compile all examples at once:
+Run any example directly with a single command:
 
 ```bash
-# From the apps/rcre/ directory
+# Launch live webcam with interactive terminal edge visualization
+make webcam_test
+
+# Launch synthetic test pattern camera (ideal for headless CI)
+make webcam_test_dummy
+
+# Run high-throughput GBDT inference benchmark (100k samples)
+make gbdt_test
+
+# Run 64-D HNSW vector similarity search benchmark
+make hnsw_test
+
+# Compile all example binaries into bin/
 make examples
 ```
-
-Binaries will be generated in `apps/rcre/bin/`.
 
 ---
 

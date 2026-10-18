@@ -24,10 +24,13 @@ int main(int argc, char** argv) {
     size_t height = 480;
     size_t max_frames = 100;
     int force_dummy = 0;
+    int show_view = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--dummy") == 0) {
             force_dummy = 1;
+        } else if (strcmp(argv[i], "--view") == 0) {
+            show_view = 1;
         } else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
             max_frames = (size_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
@@ -117,6 +120,36 @@ int main(int argc, char** argv) {
         /* Step 4: Spatial 3x3 Sobel edge derivative */
         status = rcre_cv_sobel(&blur_tensor, &sobel_dx, &sobel_dy, arena);
         if (status != RCRE_OK) break;
+
+        /* Optional Live Visual Terminal Display */
+        if (show_view) {
+            printf("\033[H\033[2J");
+            printf("===================================================================\n");
+            printf("  🎥 RCRE Live Camera Stream (Frame %zu / %zu) | Backend: %s\n", 
+                   f + 1, max_frames, rcre_cam_backend_name(cam));
+            printf("===================================================================\n");
+            const char* ramp = " .:-=+*#%@";
+            const uint8_t* edge_data = (const uint8_t*)sobel_dx.data;
+            const size_t ascii_w = 64;
+            const size_t ascii_h = 20;
+            const size_t step_x = width / ascii_w;
+            const size_t step_y = height / ascii_h;
+
+            for (size_t y = 0; y < ascii_h; ++y) {
+                printf("|");
+                for (size_t x = 0; x < ascii_w; ++x) {
+                    uint8_t px = edge_data[(y * step_y) * width + (x * step_x)];
+                    int idx = (px * 9) / 255;
+                    if (idx < 0) idx = 0;
+                    if (idx > 9) idx = 9;
+                    putchar(ramp[idx]);
+                }
+                printf("|\n");
+            }
+            printf("===================================================================\n");
+            printf("  Live Pipeline: Frame %zu | Press Ctrl+C to Stop\n", f + 1);
+            fflush(stdout);
+        }
 
         processed_frames++;
     }
