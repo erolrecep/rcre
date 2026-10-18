@@ -21,7 +21,7 @@
 * **OpenCV & Scikit-Learn Bit-Exact Parity**: 15-bit fixed-point integer color kernels deliver **0 LSB discrepancy** against OpenCV `cv2.cvtColor(RGB2GRAY)`. Linear SVM, $k$-Means, and PCA match Scikit-Learn within float numerical tolerance ($\epsilon \le 10^{-4}$).
 * **Dynamic Hardware Abstraction Layer (HAL)**: Runtime CPU feature detection dispatching single-cycle function pointers to ARM NEON (Apple Silicon), x86 AVX2/FMA, WebAssembly SIMD128, or optimized scalar reference fallbacks.
 * **Isolated Camera Companion (`rcre_cam.h`)**: Native hardware ingestion using macOS AVFoundation (`CVPixelBuffer` zero-copy), Linux Video4Linux2 (`mmap`), and deterministic synthetic test generators for headless CI.
-* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) ($102.8\text{ KB}$).
+* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (102.8 KB).
 * **Interactive Educational Visualizers**: Three.js 3D tensor stride visualizers, cache hierarchy simulators, and live in-browser webcam playgrounds in [`web/`](web/).
 
 ---
@@ -32,11 +32,11 @@
 
 | Workload / Kernel | Hardware Path | Throughput | Latency | Memory Allocation |
 | :--- | :--- | :--- | :--- | :--- |
-| **Cache-Tiled GEMM** ($37 \times 43 \times 29$) | ARM NEON 128-bit | **72.96 GFLOPS** | — | Linear Arena (0 in loop) |
-| **RGB $\to$ Grayscale (Rec.601)** | ARM NEON 15-bit | **7,922 MP/s** | ~$\mathbf{0.26\text{ ms}}$ @ 1080p | Linear Arena (0 in loop) |
-| **Tabular GBDT Prediction** (100 Trees) | Flat-Array Nodes | **7.86M preds / sec** | **$127\text{ ns}$** / pred | Linear Arena (0 in loop) |
-| **HNSW Vector Search** (64-D, $M=16$) | SIMD Euclidean $L_2$ | **44,434 QPS** | **$22.5\text{ }\mu\text{s}$** / query | Linear Arena (0 in loop) |
-| **Live Camera Edge Filter** ($640 \times 480$) | Camera $\to$ Gray $\to$ Blur $\to$ Sobel | **239.39 FPS** | **$4.18\text{ ms}$** / frame | Single scratchpad rewind |
+| **Cache-Tiled GEMM** (37 × 43 × 29) | ARM NEON 128-bit | **72.96 GFLOPS** | — | Linear Arena (0 in loop) |
+| **RGB → Grayscale (Rec.601)** | ARM NEON 15-bit | **7,922 MP/s** | **~0.26 ms** @ 1080p | Linear Arena (0 in loop) |
+| **Tabular GBDT Prediction** (100 Trees) | Flat-Array Nodes | **7.86M preds / sec** | **127 ns** / pred | Linear Arena (0 in loop) |
+| **HNSW Vector Search** (64-D, M=16) | SIMD Euclidean L2 | **44,434 QPS** | **22.5 µs** / query | Linear Arena (0 in loop) |
+| **Live Camera Edge Filter** (640 × 480) | Camera → Gray → Blur → Sobel | **239.39 FPS** | **4.18 ms** / frame | Single scratchpad rewind |
 
 ---
 

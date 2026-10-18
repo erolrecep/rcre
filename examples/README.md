@@ -13,9 +13,9 @@ All examples strictly adhere to RCRE's core architectural tenets:
 
 | Example Binary | Source File | Category | Key Highlights |
 | :--- | :--- | :--- | :--- |
-| `bin/webcam_edge_filter` | [`webcam_edge_filter.c`](webcam_edge_filter.c) | Real-Time Video / CV | Camera stream $\to$ Grayscale $\to$ Gaussian $\to$ Sobel at **239.39 FPS** |
-| `bin/tabular_gbdt_predict` | [`tabular_gbdt_predict.c`](tabular_gbdt_predict.c) | Classical Tabular ML | 100-Tree ensemble inference at **7.86M predictions/sec** ($127\text{ ns}$) |
-| `bin/hnsw_vector_search` | [`hnsw_vector_search.c`](hnsw_vector_search.c) | Vector Search / Embeddings | 64-D vector ANN similarity search at **44,434 QPS** ($22.5\text{ }\mu\text{s}$) |
+| `bin/webcam_edge_filter` | [`webcam_edge_filter.c`](webcam_edge_filter.c) | Real-Time Video / CV | Camera stream → Grayscale → Gaussian → Sobel at **239.39 FPS** |
+| `bin/tabular_gbdt_predict` | [`tabular_gbdt_predict.c`](tabular_gbdt_predict.c) | Classical Tabular ML | 100-Tree ensemble inference at **7.86M predictions/sec** (127 ns latency) |
+| `bin/hnsw_vector_search` | [`hnsw_vector_search.c`](hnsw_vector_search.c) | Vector Search / Embeddings | 64-D vector ANN similarity search at **44,434 QPS** (22.5 µs latency) |
 
 ---
 
