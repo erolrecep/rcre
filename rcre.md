@@ -414,7 +414,8 @@ rcre/
 │   ├── test_ml_correctness.c
 │   └── test_against_scipy_opencv.py <-- Ground-truth validation script
 ├── Makefile
-└── CMakeLists.txt
+└── dist/
+    └── rcre.h                       <-- Amalgamated Single-Header Distribution
 ```
 
 ---

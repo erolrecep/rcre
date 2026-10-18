@@ -67,7 +67,7 @@ Because RCRE has strict, decoupled module boundaries and automated verification 
 ## 3. Specialized Agent Role Definitions
 
 ### Agent 0: Lead System Architect
-* **Primary Scope**: `include/rcre.h`, `CMakeLists.txt`, `Makefile`.
+* **Primary Scope**: `include/rcre.h`, `Makefile`, `dist/rcre.h`.
 * **Responsibilities**:
   * Guards public API boundaries.
   * Enforces C23 syntax (`[[nodiscard]]`, `constexpr`, `nullptr`, `<stdatomic.h>`).

@@ -47,7 +47,7 @@ This document governs all AI agents and engineers operating within `apps/rcre/`.
 
 | Agent Role | Skill Identifier | Authority & Primary File Scope |
 | :--- | :--- | :--- |
-| **Agent 0: Lead Architect** | `rcre-lead-architect` | `include/rcre.h`, `CMakeLists.txt`, `Makefile`, public API review |
+| **Agent 0: Lead Architect** | `rcre-lead-architect` | `include/rcre.h`, `Makefile`, `dist/rcre.h`, public API review |
 | **Agent 1: Core Kernel Engineer** | `rcre-kernel-engineer` | `src/core/tensor.c`, `src/core/arena.c`, `src/core/adapt.c` |
 | **Agent 2: SIMD Specialist** | `rcre-simd-specialist` | `src/hal/*`, `src/hal/kernels_*.c`, CPU feature probes |
 | **Agent 3: Vision & ML Engineer** | `rcre-vision-ml-engineer` | `src/cv/*`, `src/ml/*`, `include/extras/rcre_cam.h` |
