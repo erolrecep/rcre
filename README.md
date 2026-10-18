@@ -10,6 +10,7 @@
   <img src="https://img.shields.io/badge/Sanitizers-ASan%20%7C%20UBSan%20Clean-success.svg?style=flat-square" alt="Sanitizers Clean">
   <img src="https://img.shields.io/badge/OpenCV%20Parity-0%20LSB%20Diff-brightgreen.svg?style=flat-square" alt="OpenCV Parity">
   <img src="https://img.shields.io/badge/Heap%20Allocations%20in%20Loops-0-orange.svg?style=flat-square" alt="Zero Heap Allocations">
+  <a href="https://github.com/erolrecep/rcre-book"><img src="https://img.shields.io/badge/Textbook-rcre--book-red.svg?style=flat-square" alt="Official Textbook"></a>
   <img src="https://img.shields.io/badge/License-MIT-purple.svg?style=flat-square" alt="MIT License">
 </p>
 
@@ -18,6 +19,7 @@
 ## 🚀 Key Highlights
 
 * **Pure C23 Zero-Dependency Core**: Compiles cleanly with standard ISO C23 (`clang -std=c2x` / `gcc -std=c23`) using modern attributes `[[nodiscard]]`, `constexpr`, `nullptr`, and `<stdatomic.h>`.
+* **Accompanying Academic Textbook**: Complete 16-chapter monograph and open-access book explaining the physical silicon math, cache hierarchies, and bare-metal algorithms from first principles at [**github.com/erolrecep/rcre-book**](https://github.com/erolrecep/rcre-book).
 * **Zero Heap Allocations in Inference Loops**: All memory is managed strictly through 64-byte aligned linear scratchpad memory arenas (`RCRE_Arena`) with $\mathcal{O}(1)$ bulk rewinding. `malloc` is strictly forbidden in hot paths.
 * **OpenCV & Scikit-Learn Bit-Exact Parity**: 15-bit fixed-point integer color kernels deliver **0 LSB discrepancy** against OpenCV `cv2.cvtColor(RGB2GRAY)`. Linear SVM, $k$-Means, and PCA match Scikit-Learn within float numerical tolerance ($\epsilon \le 10^{-4}$).
 * **Dynamic Hardware Abstraction Layer (HAL)**: Runtime CPU feature detection dispatching single-cycle function pointers to ARM NEON (Apple Silicon), x86 AVX2/FMA, WebAssembly SIMD128, or optimized scalar reference fallbacks.
