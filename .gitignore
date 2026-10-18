@@ -1,0 +1,18 @@
+# Development reports, specifications, and internal agent notes
+dev_reports/
+
+# Build artifacts & libraries
+bin/
+lib/
+*.o
+*.a
+*.dylib
+*.so
+
+# Python virtual environments & bytecode
+.venv/
+__pycache__/
+*.pyc
+
+# Operating system files
+.DS_Store
