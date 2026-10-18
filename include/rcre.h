@@ -46,7 +46,9 @@ typedef enum {
     RCRE_ERR_OUT_OF_MEMORY   = -2,
     RCRE_ERR_SHAPE_MISMATCH  = -3,
     RCRE_ERR_NOT_CONTIGUOUS  = -4,
-    RCRE_ERR_UNSUPPORTED_OP  = -5
+    RCRE_ERR_UNSUPPORTED_OP  = -5,
+    RCRE_ERR_TIMEOUT         = -6,
+    RCRE_ERR_IO              = -7
 } RCRE_Status;
 
 /* ========================================================================= */
