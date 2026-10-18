@@ -195,20 +195,43 @@ clean:
 	rm -rf lib bin dist src/core/*.o src/cv/*.o src/ml/*.o src/hal/*.o src/extras/*.o
 	@echo "🧹 Cleaned all build artifacts"
 
+docs:
+	@echo "📖 Generating C23 API documentation from headers..."
+	python3 scripts/generate_docs.py
+	@echo "✅ Documentation generated in web/docs/"
+
+up_docs: docs
+	@echo "🌐 Launching Documentation at http://localhost:8080/docs/ ..."
+	python3 -m http.server 8080 --directory web & PID=$$!; \
+	sleep 1; \
+	open http://localhost:8080/docs/; \
+	wait $$PID
+
+sync_blog: docs
+	@echo "📦 Syncing RCRE web suite & documentation to personal blog..."
+	mkdir -p ../personal-blog/blog/receps_blog/static/rcre
+	cp -r web/* ../personal-blog/blog/receps_blog/static/rcre/
+	@echo "🔨 Building personal blog with Hugo..."
+	cd ../personal-blog && make build
+	@echo "✅ Synced and built into personal blog at erolrecep.github.io/rcre/!"
+
 help:
 	@echo "=================================================================="
 	@echo "  RCRE — Recep's Code Run Everywhere: Command Center             "
 	@echo "=================================================================="
 	@echo "Interactive Operations:"
 	@echo "  make up_web_app         Serve educational visualizers at http://localhost:8080"
+	@echo "  make up_docs            Serve documentation at http://localhost:8080/docs/"
 	@echo "  make webcam_test        Launch real-time webcam & edge filter preview"
 	@echo "  make webcam_test_dummy  Launch synthetic animated camera preview (headless)"
 	@echo "  make gbdt_test          Run 100k-sample GBDT inference benchmark"
 	@echo "  make hnsw_test          Run 64-D HNSW vector similarity search benchmark"
 	@echo ""
-	@echo "Build & Amalgamation Targets:"
+	@echo "Build & Documentation Targets:"
 	@echo "  make all                Build static/shared libraries, dist header & examples"
 	@echo "  make dist               Generate single-header amalgamated dist/rcre.h"
+	@echo "  make docs               Extract API signatures and build web documentation"
+	@echo "  make sync_blog          Sync web suite & docs to erolrecep.github.io via Hugo"
 	@echo "  make examples           Compile all standalone examples into bin/"
 	@echo "  make bench              Run hardware acceleration GEMM benchmark"
 	@echo "  make clean              Remove all build artifacts and libraries"
@@ -219,3 +242,4 @@ help:
 	@echo "  make test-parity        Run Python OpenCV/Scikit-Learn parity tests"
 	@echo "  make test-all           Run all test suites & verification gates"
 	@echo "=================================================================="
+
