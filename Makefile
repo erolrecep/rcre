@@ -37,24 +37,31 @@ SRCS = src/core/arena.c \
 
 OBJS = $(SRCS:.c=.o)
 ALL_OBJS = $(OBJS) $(CAM_OBJS)
-LIB = librcre.a
+LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
+AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
 EXAMPLES = webcam_edge_filter tabular_gbdt_predict hnsw_vector_search
 EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
-.PHONY: all clean test test-sanitizers test-parity bench examples
+.PHONY: all clean test test-sanitizers test-parity bench examples dist
 
-all: $(LIB) $(DYLIB) $(EXAMPLE_BINS)
+all: $(LIB) $(DYLIB) $(AMALGAMATED_HEADER) $(EXAMPLE_BINS)
+
+dist: $(AMALGAMATED_HEADER)
+
+$(AMALGAMATED_HEADER): $(SRCS) include/rcre.h scripts/amalgamate.py
+	@mkdir -p dist
+	python3 scripts/amalgamate.py
 
 $(LIB): $(ALL_OBJS)
 	@mkdir -p lib
-	$(AR) rcs lib/$@ $^
-	@echo "✅ Built lib/$@"
+	$(AR) rcs $@ $^
+	@echo "✅ Built $@"
 
 $(DYLIB): $(ALL_OBJS)
 	@mkdir -p lib
@@ -69,6 +76,10 @@ src/extras/%.o: src/extras/%.c
 
 src/extras/cam_avf.o: src/extras/cam_avf.m
 	$(CC) $(CFLAGS) -Isrc/extras -fobjc-arc -c $< -o $@
+
+bin/test_amalgamated: tests/test_amalgamated.c $(AMALGAMATED_HEADER)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $< -lm -lpthread -o $@
 
 bin/test_%: tests/test_%.c $(LIB)
 	@mkdir -p bin
@@ -85,8 +96,8 @@ bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@
 
-test: $(LIB) $(TEST_BINS)
-	@echo "🚀 Running RCRE Core & Camera Unit Tests..."
+test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
+	@echo "🚀 Running RCRE Full Unit Test Suite (Core, Camera & Amalgamated)..."
 	@bin/test_arena
 	@bin/test_tensor_strides
 	@bin/test_adapt_spec
@@ -98,9 +109,10 @@ test: $(LIB) $(TEST_BINS)
 	@bin/test_gbdt
 	@bin/test_hnsw
 	@bin/test_cam
+	@bin/test_amalgamated
 	@echo "🎉 All RCRE Unit Tests Passed!"
 
-test-sanitizers:
+test-sanitizers: $(AMALGAMATED_HEADER)
 	@mkdir -p bin
 	@echo "🛡️ Compiling and running tests with AddressSanitizer & UBSan..."
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_arena.c -lm -lpthread -o bin/test_arena_asan
@@ -129,14 +141,18 @@ else
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) $(CAM_SRCS) tests/test_cam.c -Isrc/extras $(CAM_LDFLAGS) -lm -lpthread -o bin/test_cam_asan
 endif
 	@bin/test_cam_asan
+	$(CC) $(SANITIZER_FLAGS) tests/test_amalgamated.c -lm -lpthread -o bin/test_amalgamated_asan
+	@bin/test_amalgamated_asan
 	@echo "🎉 Zero Memory Leaks & Zero Undefined Behavior Detected!"
 
 test-parity: $(DYLIB)
 	@echo "🐍 Running Python Parity Tests against OpenCV & Scikit-Learn..."
 	uv run --with numpy,opencv-python,scikit-learn,scipy python tests/test_against_scipy_opencv.py
+	@echo "🐍 Running Python FFI Bindings Test..."
+	uv run --with numpy python tests/test_python_bindings.py
 
 bench: bin/bench_hal
 	@bin/bench_hal
 
 clean:
-	rm -rf lib bin src/core/*.o src/cv/*.o src/ml/*.o src/hal/*.o src/extras/*.o
+	rm -rf lib bin dist src/core/*.o src/cv/*.o src/ml/*.o src/hal/*.o src/extras/*.o

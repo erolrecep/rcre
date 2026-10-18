@@ -123,11 +123,14 @@ RCRE_NODISCARD int rcre_ml_ols_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
     return RCRE_OK;
 }
 
-static inline float sigmoidf(float z) {
+#ifndef RCRE_FAST_SIGMOID_DEFINED
+#define RCRE_FAST_SIGMOID_DEFINED
+static inline float rcre_fast_sigmoidf(float z) {
     if (z > 16.0f) return 1.0f;
     if (z < -16.0f) return 0.0f;
     return 1.0f / (1.0f + expf(-z));
 }
+#endif
 
 RCRE_NODISCARD int rcre_ml_logistic_fit(const RCRE_Tensor* X, const RCRE_Tensor* y, 
                                         RCRE_Tensor* weights, float lr, 
@@ -158,7 +161,7 @@ RCRE_NODISCARD int rcre_ml_logistic_fit(const RCRE_Tensor* X, const RCRE_Tensor*
             const float* row = &X_data[i * D];
             float z = rcre_hal.dot_f32(row, w_data, D);
 
-            float error = sigmoidf(z) - y_data[i];
+            float error = rcre_fast_sigmoidf(z) - y_data[i];
             rcre_hal.axpy_f32(D, error, row, grad);
         }
 

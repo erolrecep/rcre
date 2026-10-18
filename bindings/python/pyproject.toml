@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rcre"
+version = "1.0.0"
+description = "Python FFI bindings for RCRE (Recep's Code Run Everywhere) C23 CV & ML Engine"
+authors = [{ name = "Recep" }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rcre*"]

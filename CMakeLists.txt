@@ -85,6 +85,23 @@ foreach(test_name ${TESTS})
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 
+# Amalgamated Header Target
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/dist/rcre.h
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/amalgamate.py
+    DEPENDS ${RCRE_SRCS} ${CMAKE_CURRENT_SOURCE_DIR}/include/rcre.h
+    COMMENT "Amalgamating RCRE single-header release..."
+)
+add_custom_target(dist ALL DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dist/rcre.h)
+
+add_executable(test_amalgamated tests/test_amalgamated.c)
+add_dependencies(test_amalgamated dist)
+target_include_directories(test_amalgamated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/dist)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_amalgamated PRIVATE m)
+endif()
+add_test(NAME test_amalgamated COMMAND test_amalgamated)
+
 # Example Binaries
 set(EXAMPLES
     webcam_edge_filter

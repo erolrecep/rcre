@@ -9,11 +9,14 @@
 #include "rcre.h"
 #include <math.h>
 
-static inline float sigmoidf(float z) {
+#ifndef RCRE_FAST_SIGMOID_DEFINED
+#define RCRE_FAST_SIGMOID_DEFINED
+static inline float rcre_fast_sigmoidf(float z) {
     if (z > 16.0f) return 1.0f;
     if (z < -16.0f) return 0.0f;
     return 1.0f / (1.0f + expf(-z));
 }
+#endif
 
 RCRE_NODISCARD int rcre_ml_gbdt_predict(const RCRE_GBDTModel* model, 
                                         const RCRE_Tensor* X, 
@@ -59,7 +62,7 @@ RCRE_NODISCARD int rcre_ml_gbdt_predict(const RCRE_GBDTModel* model,
         }
 
         if (model->is_binary_classification) {
-            p_data[i] = sigmoidf(score);
+            p_data[i] = rcre_fast_sigmoidf(score);
         } else {
             p_data[i] = score;
         }
