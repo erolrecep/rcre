@@ -5,6 +5,7 @@
 </p>
 
 <p align="center">
+  <a href="https://erolrecep.github.io/rcre/"><img src="https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-00d2ff.svg?style=flat-square" alt="GitHub Pages Live Demo"></a>
   <img src="https://img.shields.io/badge/C23-ISO%20Standard-blue.svg?style=flat-square" alt="C23 Standard">
   <img src="https://img.shields.io/badge/Sanitizers-ASan%20%7C%20UBSan%20Clean-success.svg?style=flat-square" alt="Sanitizers Clean">
   <img src="https://img.shields.io/badge/OpenCV%20Parity-0%20LSB%20Diff-brightgreen.svg?style=flat-square" alt="OpenCV Parity">
@@ -211,16 +212,18 @@ fn main() {
 
 RCRE includes four dedicated interactive educational visualizers to master low-level systems programming:
 
+🌐 **Live Web Demo**: [https://erolrecep.github.io/rcre/](https://erolrecep.github.io/rcre/)
+
 * **[web/index.html](web/index.html)**: Main interactive portal with real-time hardware diagnostics.
 * **[web/playground.html](web/playground.html)**: Live in-browser webcam playground connecting real camera feeds to Gaussian blur, Sobel edge magnitude, and GBDT inference.
 * **[web/learn/strides.html](web/learn/strides.html)**: Three.js 3D voxel grid visualizing tensor strides, row-major ($HWC$) vs planar ($CHW$) memory layouts, and zero-copy $\mathcal{O}(1)$ slicing.
 * **[web/learn/gemm_cache.html](web/learn/gemm_cache.html)**: Animated memory hierarchy showing DRAM, L1 cache tiles, and CPU vector registers during matrix multiplication.
 * **[web/learn/stencils.html](web/learn/stencils.html)**: Sliding $3 \times 3$ convolution stencil showing SIMD vector lanes processing 4 or 8 pixels in parallel.
 
-To run locally:
+To run locally with the operations hub:
 ```bash
-python3 -m http.server 8080 --directory web/
-# Open http://localhost:8080 in your browser
+make up_web_app
+# Automatically launches local HTTP server and opens http://localhost:8080 in your browser
 ```
 
 ---
