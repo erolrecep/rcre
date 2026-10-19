@@ -47,6 +47,7 @@ static void print_usage(const char* prog) {
     printf("  -h, --help                Show this help message\n\n");
     printf("GUI Keyboard Shortcuts:\n");
     printf("  Spacebar / Tab            Toggle view (Full Camera <-> Full Edge <-> Side-by-Side)\n");
+    printf("  'c' / 'e'                 Cycle edge display style (Classic Monochrome <-> Sketch <-> Cyan <-> Emerald)\n");
     printf("  'f' / 'F'                 Toggle true Fullscreen mode (16:10 aspect preserved)\n");
     printf("  'q' / ESC                 Quit capture and print performance benchmark\n");
 }
@@ -228,10 +229,13 @@ int main(int argc, char** argv) {
 
     size_t baseline_offset = arena->offset;
 
+    int edge_palette = 0; /* 0: Classic Mono, 1: Sketch, 2: Cyan, 3: Emerald */
+
     printf("\nStarting pipeline loop (%zu frames)...\n", max_frames);
     if (win) {
         printf("👉 GUI Window Active!\n");
         printf("   • Spacebar: Toggle view (Full Camera <-> Full Edge <-> Side-by-Side)\n");
+        printf("   • 'c' or 'e': Cycle edge style (Classic Mono <-> Sketch <-> Cyan <-> Emerald)\n");
         printf("   • 'f': Toggle Fullscreen\n");
         printf("   • 'q' or ESC: Quit & view performance report\n\n");
     }
@@ -279,43 +283,86 @@ int main(int argc, char** argv) {
                 cur_h = height;
                 render_data = (const uint8_t*)frame_tensor.data;
             } else if (mode == DISPLAY_GUI_FULL_EDGE) {
-                /* Full Edge Filter Screen: High-contrast cyan highlights */
+                /* Full Edge Filter Screen: Classic High-Contrast Edge Map */
                 cur_w = width;
                 cur_h = height;
-                const uint8_t* raw_edge = (const uint8_t*)sobel_dx.data;
+                const uint8_t* raw_dx = (const uint8_t*)sobel_dx.data;
+                const uint8_t* raw_dy = (const uint8_t*)sobel_dy.data;
                 for (size_t y = 0; y < height; ++y) {
                     uint8_t* row_out = gui_buffer + y * (width * 3);
-                    const uint8_t* row_in = raw_edge + y * width;
+                    const uint8_t* in_dx = raw_dx + y * width;
+                    const uint8_t* in_dy = raw_dy + y * width;
                     for (size_t x = 0; x < width; ++x) {
-                        uint8_t v = row_in[x];
-                        row_out[x * 3 + 0] = v / 2;
-                        row_out[x * 3 + 1] = v;
-                        row_out[x * 3 + 2] = v;
+                        /* Combined gradient magnitude: |dx| + |dy| */
+                        uint32_t sum = (uint32_t)in_dx[x] + (uint32_t)in_dy[x];
+                        uint8_t v = sum > 255 ? 255 : (uint8_t)sum;
+
+                        if (edge_palette == 0) {
+                            /* Classic Monochrome: Razor-sharp white edges on deep black */
+                            row_out[x * 3 + 0] = v;
+                            row_out[x * 3 + 1] = v;
+                            row_out[x * 3 + 2] = v;
+                        } else if (edge_palette == 1) {
+                            /* Classic Inverted Pencil Sketch: Charcoal edges on white paper */
+                            uint8_t inv = 255 - v;
+                            row_out[x * 3 + 0] = inv;
+                            row_out[x * 3 + 1] = inv;
+                            row_out[x * 3 + 2] = inv;
+                        } else if (edge_palette == 2) {
+                            /* Cyber / Neon Cyan */
+                            row_out[x * 3 + 0] = v / 2;
+                            row_out[x * 3 + 1] = v;
+                            row_out[x * 3 + 2] = v;
+                        } else {
+                            /* Matrix / Night Vision Emerald */
+                            row_out[x * 3 + 0] = 0;
+                            row_out[x * 3 + 1] = v;
+                            row_out[x * 3 + 2] = v / 4;
+                        }
                     }
                 }
                 render_data = gui_buffer;
             } else if (mode == DISPLAY_GUI_SIDE_BY_SIDE) {
-                /* Side-by-Side Screen: Camera RGB | Sobel Filter */
+                /* Side-by-Side Screen: Camera RGB | Classic Edge View */
                 cur_w = width * 2;
                 cur_h = height;
                 const uint8_t* raw_rgb = (const uint8_t*)frame_tensor.data;
-                const uint8_t* raw_edge = (const uint8_t*)sobel_dx.data;
+                const uint8_t* raw_dx = (const uint8_t*)sobel_dx.data;
+                const uint8_t* raw_dy = (const uint8_t*)sobel_dy.data;
 
                 for (size_t y = 0; y < height; ++y) {
                     uint8_t* row_out = gui_buffer + y * (cur_w * 3);
                     const uint8_t* row_in_rgb = raw_rgb + y * (width * 3);
-                    const uint8_t* row_in_edge = raw_edge + y * width;
+                    const uint8_t* in_dx = raw_dx + y * width;
+                    const uint8_t* in_dy = raw_dy + y * width;
 
                     /* Left side: Camera RGB */
                     memcpy(row_out, row_in_rgb, width * 3);
 
-                    /* Right side: Cyber-cyan edge map */
+                    /* Right side: Edge map */
                     uint8_t* edge_rgb = row_out + (width * 3);
                     for (size_t x = 0; x < width; ++x) {
-                        uint8_t v = row_in_edge[x];
-                        edge_rgb[x * 3 + 0] = v / 2;
-                        edge_rgb[x * 3 + 1] = v;
-                        edge_rgb[x * 3 + 2] = v;
+                        uint32_t sum = (uint32_t)in_dx[x] + (uint32_t)in_dy[x];
+                        uint8_t v = sum > 255 ? 255 : (uint8_t)sum;
+
+                        if (edge_palette == 0) {
+                            edge_rgb[x * 3 + 0] = v;
+                            edge_rgb[x * 3 + 1] = v;
+                            edge_rgb[x * 3 + 2] = v;
+                        } else if (edge_palette == 1) {
+                            uint8_t inv = 255 - v;
+                            edge_rgb[x * 3 + 0] = inv;
+                            edge_rgb[x * 3 + 1] = inv;
+                            edge_rgb[x * 3 + 2] = inv;
+                        } else if (edge_palette == 2) {
+                            edge_rgb[x * 3 + 0] = v / 2;
+                            edge_rgb[x * 3 + 1] = v;
+                            edge_rgb[x * 3 + 2] = v;
+                        } else {
+                            edge_rgb[x * 3 + 0] = 0;
+                            edge_rgb[x * 3 + 1] = v;
+                            edge_rgb[x * 3 + 2] = v / 4;
+                        }
                     }
                 }
                 render_data = gui_buffer;
@@ -338,6 +385,14 @@ int main(int argc, char** argv) {
                     mode = DISPLAY_GUI_FULL_CAMERA;
                     rcre_window_resize(win, width, height);
                 }
+            } else if (win_res == 3) {
+                /* 'c' / 'e' pressed: Toggle edge color palette */
+                edge_palette = (edge_palette + 1) % 4;
+                const char* pal_name = "Classic Monochrome (White-on-Black)";
+                if (edge_palette == 1) pal_name = "Classic Pencil Sketch (Black-on-White)";
+                else if (edge_palette == 2) pal_name = "Cyber Cyan";
+                else if (edge_palette == 3) pal_name = "Matrix Emerald";
+                printf("[GUI] Edge Palette Switched: %s\n", pal_name);
             }
 
             /* Update dynamic title bar every 15 frames */
@@ -345,11 +400,17 @@ int main(int argc, char** argv) {
                 double elapsed = get_time_sec() - t_start;
                 double cur_fps = (double)processed_frames / (elapsed > 1e-4 ? elapsed : 1e-4);
                 const char* view_tag = "Full Camera";
-                if (mode == DISPLAY_GUI_FULL_EDGE) view_tag = "Full Sobel Edge";
-                else if (mode == DISPLAY_GUI_SIDE_BY_SIDE) view_tag = "Side-by-Side";
+                if (mode == DISPLAY_GUI_FULL_EDGE) {
+                    if (edge_palette == 0) view_tag = "Full Edge (Classic Mono)";
+                    else if (edge_palette == 1) view_tag = "Full Edge (Sketch)";
+                    else if (edge_palette == 2) view_tag = "Full Edge (Cyber Cyan)";
+                    else view_tag = "Full Edge (Emerald)";
+                } else if (mode == DISPLAY_GUI_SIDE_BY_SIDE) {
+                    view_tag = "Side-by-Side";
+                }
 
-                char title[160];
-                snprintf(title, sizeof(title), "RCRE Camera [%s | %s] | Frame %zu | %.1f FPS [Space: Toggle View, 'f': Fullscreen, 'q': Quit]",
+                char title[180];
+                snprintf(title, sizeof(title), "RCRE Camera [%s | %s] | Frame %zu | %.1f FPS [Space: Toggle View, 'c': Style, 'f': Fullscreen, 'q': Quit]",
                          view_tag, rcre_cam_backend_name(cam), processed_frames, cur_fps);
                 rcre_window_set_title(win, title);
             }
@@ -363,7 +424,8 @@ int main(int argc, char** argv) {
                    f + 1, max_frames, rcre_cam_backend_name(cam));
             printf("===================================================================\n");
             const char* ramp = " .:-=+*#%@";
-            const uint8_t* edge_data = (const uint8_t*)sobel_dx.data;
+            const uint8_t* raw_dx = (const uint8_t*)sobel_dx.data;
+            const uint8_t* raw_dy = (const uint8_t*)sobel_dy.data;
             const size_t ascii_w = 64;
             const size_t ascii_h = 20;
             const size_t step_x = width / ascii_w;
@@ -372,7 +434,9 @@ int main(int argc, char** argv) {
             for (size_t y = 0; y < ascii_h; ++y) {
                 printf("|");
                 for (size_t x = 0; x < ascii_w; ++x) {
-                    uint8_t px = edge_data[(y * step_y) * width + (x * step_x)];
+                    size_t offset = (y * step_y) * width + (x * step_x);
+                    uint32_t sum = (uint32_t)raw_dx[offset] + (uint32_t)raw_dy[offset];
+                    uint8_t px = sum > 255 ? 255 : (uint8_t)sum;
                     int idx = (px * 9) / 255;
                     if (idx < 0) idx = 0;
                     if (idx > 9) idx = 9;

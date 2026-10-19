@@ -75,14 +75,15 @@ When running the camera test, you can choose between several display formats:
 * **Aspect & Resolution**: Resamples 100% of the camera sensor frame (FaceTime HD / USB camera) so no parts of your field of view are cut off.
 * **Interactive Controls**:
   * <kbd>Spacebar</kbd> / <kbd>Tab</kbd>: Cycle dynamically between **Full Camera** $\leftrightarrow$ **Full Sobel Edge Filter** $\leftrightarrow$ **Side-by-Side Comparison**.
-  * <kbd>f</kbd> / <kbd>F</kbd> (or green macOS zoom button): Toggle true native **Fullscreen Mode**.
+  * <kbd>c</kbd> / <kbd>e</kbd>: Cycle Edge Display Styles (**Classic Monochrome** [White-on-Black] $\leftrightarrow$ **Pencil Sketch** [Black-on-White] $\leftrightarrow$ **Cyber Cyan** $\leftrightarrow$ **Matrix Emerald**).
+  * <kbd>f</kbd> / <kbd>F</kbd> (or green macOS zoom button): Toggle true native **Fullscreen Mode** (locks to MacBook 16:10 aspect).
   * <kbd>q</kbd> / <kbd>ESC</kbd>: Cleanly close the window and print the performance & FPS summary report.
 * **Command**: `make webcam_test_gui` or `./bin/webcam_edge_filter --gui`
 
 #### Mode 2: Native GUI Window (Side-by-Side Comparison)
 * **What it does**: Displays two synchronized screens side-by-side:
   * **Left Screen (Input)**: Live raw camera stream (RGB).
-  * **Right Screen (Output)**: Real-time Sobel edge map highlighted in cyber-cyan.
+  * **Right Screen (Output)**: Real-time Sobel edge map (combines horizontal $dx$ and vertical $dy$ gradients).
 * **Why two screens?** Provides an instant **input vs. output visual parity check** to verify contour detection in real time.
 * **Command**: `./bin/webcam_edge_filter --side-by-side` (or press <kbd>Spacebar</kbd> during GUI mode)
 

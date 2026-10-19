@@ -158,11 +158,21 @@ RCRE_NODISCARD int rcre_cv_sobel(const RCRE_Tensor* src, RCRE_Tensor* dst_dx,
 
                 if (dst_dx && dst_dx->data) {
                     size_t idx = y * dst_dx->strides[0] + x * dst_dx->strides[1] + c;
-                    ((float*)dst_dx->data)[idx] = gx;
+                    if (dst_dx->dtype == RCRE_DTYPE_U8) {
+                        float mag = fabsf(gx);
+                        ((uint8_t*)dst_dx->data)[idx] = (uint8_t)(mag > 255.0f ? 255 : (uint8_t)mag);
+                    } else if (dst_dx->dtype == RCRE_DTYPE_F32) {
+                        ((float*)dst_dx->data)[idx] = gx;
+                    }
                 }
                 if (dst_dy && dst_dy->data) {
                     size_t idx = y * dst_dy->strides[0] + x * dst_dy->strides[1] + c;
-                    ((float*)dst_dy->data)[idx] = gy;
+                    if (dst_dy->dtype == RCRE_DTYPE_U8) {
+                        float mag = fabsf(gy);
+                        ((uint8_t*)dst_dy->data)[idx] = (uint8_t)(mag > 255.0f ? 255 : (uint8_t)mag);
+                    } else if (dst_dy->dtype == RCRE_DTYPE_F32) {
+                        ((float*)dst_dy->data)[idx] = gy;
+                    }
                 }
             }
         }
