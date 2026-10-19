@@ -3,7 +3,7 @@
  * @brief Real-time Camera Stream with Gaussian Blur and Sobel Edge Detection
  * 
  * Demonstrates high-performance zero-copy camera ingestion and CV filter pipelining.
- * Supports Terminal (ASCII/ANSI) and Native GUI Window display modes.
+ * Supports Terminal (ASCII/ANSI) and Native GUI Window display modes with interactive view toggling.
  * Measures end-to-end processing throughput (FPS) and latency.
  */
 
@@ -19,8 +19,9 @@
 typedef enum {
     DISPLAY_UNSPECIFIED = 0,
     DISPLAY_TERMINAL,
+    DISPLAY_GUI_FULL_CAMERA,
+    DISPLAY_GUI_FULL_EDGE,
     DISPLAY_GUI_SIDE_BY_SIDE,
-    DISPLAY_GUI_SINGLE,
     DISPLAY_BENCH_ONLY
 } DisplayMode;
 
@@ -32,16 +33,22 @@ static double get_time_sec(void) {
 
 static void print_usage(const char* prog) {
     printf("Usage: %s [OPTIONS]\n\n", prog);
-    printf("Options:\n");
+    printf("Display Options:\n");
+    printf("  --gui, --gui-full         Launch Native GUI window in Full Camera mode (Recommended)\n");
+    printf("  --gui-edge                Launch Native GUI window in Full Sobel Edge mode\n");
+    printf("  --gui-split, --side-by-side Launch Native GUI window in Side-by-side mode (RGB | Edge)\n");
     printf("  --terminal, --view        Display live video in terminal via ANSI ASCII art\n");
-    printf("  --gui                     Display live video in Native GUI window (Side-by-side)\n");
-    printf("  --gui-single              Display live video in Native GUI window (Edge filter only)\n");
-    printf("  --headless, --bench       Run without display to benchmark maximum throughput\n");
+    printf("  --headless, --bench       Run without display to benchmark maximum throughput\n\n");
+    printf("Configuration Options:\n");
     printf("  --dummy                   Use synthetic moving gradient pattern instead of webcam\n");
     printf("  --frames <N>              Number of frames to process (default: 200, 0 = unlimited)\n");
     printf("  --width <W>               Frame capture width (default: 640)\n");
     printf("  --height <H>              Frame capture height (default: 480)\n");
-    printf("  -h, --help                Show this help message\n");
+    printf("  -h, --help                Show this help message\n\n");
+    printf("GUI Keyboard Shortcuts:\n");
+    printf("  Spacebar / Tab            Toggle view (Full Camera <-> Full Edge <-> Side-by-Side)\n");
+    printf("  'f' / 'F'                 Toggle true Fullscreen mode\n");
+    printf("  'q' / ESC                 Quit capture and print performance benchmark\n");
 }
 
 int main(int argc, char** argv) {
@@ -56,20 +63,24 @@ int main(int argc, char** argv) {
             force_dummy = 1;
         } else if (strcmp(argv[i], "--terminal") == 0 || strcmp(argv[i], "--view") == 0) {
             mode = DISPLAY_TERMINAL;
-        } else if (strcmp(argv[i], "--gui") == 0 || strcmp(argv[i], "--side-by-side") == 0) {
+        } else if (strcmp(argv[i], "--gui") == 0 || strcmp(argv[i], "--gui-full") == 0 || strcmp(argv[i], "--full") == 0) {
+            mode = DISPLAY_GUI_FULL_CAMERA;
+        } else if (strcmp(argv[i], "--gui-edge") == 0 || strcmp(argv[i], "--edge") == 0) {
+            mode = DISPLAY_GUI_FULL_EDGE;
+        } else if (strcmp(argv[i], "--gui-split") == 0 || strcmp(argv[i], "--side-by-side") == 0) {
             mode = DISPLAY_GUI_SIDE_BY_SIDE;
-        } else if (strcmp(argv[i], "--gui-single") == 0) {
-            mode = DISPLAY_GUI_SINGLE;
         } else if (strcmp(argv[i], "--headless") == 0 || strcmp(argv[i], "--bench") == 0) {
             mode = DISPLAY_BENCH_ONLY;
         } else if (strncmp(argv[i], "--display=", 10) == 0) {
             const char* val = argv[i] + 10;
             if (strcmp(val, "terminal") == 0 || strcmp(val, "ascii") == 0) {
                 mode = DISPLAY_TERMINAL;
-            } else if (strcmp(val, "gui") == 0 || strcmp(val, "side-by-side") == 0) {
+            } else if (strcmp(val, "full") == 0 || strcmp(val, "gui") == 0) {
+                mode = DISPLAY_GUI_FULL_CAMERA;
+            } else if (strcmp(val, "edge") == 0) {
+                mode = DISPLAY_GUI_FULL_EDGE;
+            } else if (strcmp(val, "split") == 0 || strcmp(val, "side-by-side") == 0) {
                 mode = DISPLAY_GUI_SIDE_BY_SIDE;
-            } else if (strcmp(val, "gui-single") == 0) {
-                mode = DISPLAY_GUI_SINGLE;
             } else if (strcmp(val, "none") == 0 || strcmp(val, "bench") == 0) {
                 mode = DISPLAY_BENCH_ONLY;
             }
@@ -94,14 +105,15 @@ int main(int argc, char** argv) {
             printf("Please select display mode for this test:\n");
             printf("  [1] Terminal (Real-time ANSI ASCII visualization in console)\n");
             if (rcre_window_is_supported()) {
-                printf("  [2] Native GUI Window (Side-by-side: Camera RGB | Sobel Filter) [Recommended]\n");
-                printf("  [3] Native GUI Window (Single: Sobel Edge Output)\n");
+                printf("  [2] Native GUI Window (Full Camera Screen) [Recommended]\n");
+                printf("  [3] Native GUI Window (Full Sobel Edge Filter Screen)\n");
+                printf("  [4] Native GUI Window (Side-by-side: Camera RGB | Sobel Filter)\n");
             } else {
                 printf("  [2] Native GUI Window [Unavailable on this platform]\n");
             }
-            printf("  [4] Headless Benchmark (Maximum throughput, no rendering)\n");
+            printf("  [5] Headless Benchmark (Maximum throughput, no rendering)\n");
             printf("-------------------------------------------------------------------\n");
-            printf("Choice [1-%d] (default: %d): ", rcre_window_is_supported() ? 4 : 4, rcre_window_is_supported() ? 2 : 1);
+            printf("Choice [1-%d] (default: 2): ", rcre_window_is_supported() ? 5 : 5);
             fflush(stdout);
 
             char line[32];
@@ -110,26 +122,26 @@ int main(int argc, char** argv) {
                 if (choice == 1) {
                     mode = DISPLAY_TERMINAL;
                 } else if (choice == 2) {
-                    mode = rcre_window_is_supported() ? DISPLAY_GUI_SIDE_BY_SIDE : DISPLAY_TERMINAL;
+                    mode = rcre_window_is_supported() ? DISPLAY_GUI_FULL_CAMERA : DISPLAY_TERMINAL;
                 } else if (choice == 3) {
-                    mode = rcre_window_is_supported() ? DISPLAY_GUI_SINGLE : DISPLAY_TERMINAL;
+                    mode = rcre_window_is_supported() ? DISPLAY_GUI_FULL_EDGE : DISPLAY_TERMINAL;
                 } else if (choice == 4) {
+                    mode = rcre_window_is_supported() ? DISPLAY_GUI_SIDE_BY_SIDE : DISPLAY_TERMINAL;
+                } else if (choice == 5) {
                     mode = DISPLAY_BENCH_ONLY;
                 } else {
-                    /* Default selection */
-                    mode = rcre_window_is_supported() ? DISPLAY_GUI_SIDE_BY_SIDE : DISPLAY_TERMINAL;
+                    mode = rcre_window_is_supported() ? DISPLAY_GUI_FULL_CAMERA : DISPLAY_TERMINAL;
                 }
             } else {
-                mode = rcre_window_is_supported() ? DISPLAY_GUI_SIDE_BY_SIDE : DISPLAY_TERMINAL;
+                mode = rcre_window_is_supported() ? DISPLAY_GUI_FULL_CAMERA : DISPLAY_TERMINAL;
             }
         } else {
-            /* Non-interactive pipe / CI */
             mode = DISPLAY_TERMINAL;
         }
     }
 
     /* Fallback if GUI requested on unsupported platform */
-    if ((mode == DISPLAY_GUI_SIDE_BY_SIDE || mode == DISPLAY_GUI_SINGLE) && !rcre_window_is_supported()) {
+    if ((mode >= DISPLAY_GUI_FULL_CAMERA && mode <= DISPLAY_GUI_SIDE_BY_SIDE) && !rcre_window_is_supported()) {
         printf("⚠️  Native desktop GUI window not supported in current environment.\n");
         printf("    Falling back to Terminal ASCII display.\n");
         mode = DISPLAY_TERMINAL;
@@ -144,11 +156,12 @@ int main(int argc, char** argv) {
     printf("  Backend:      %s\n", force_dummy ? "Synthetic Dummy (Forced)" : "Auto-Detect");
     const char* mode_str = "Headless Benchmark";
     if (mode == DISPLAY_TERMINAL) mode_str = "Terminal (ANSI ASCII Art)";
+    else if (mode == DISPLAY_GUI_FULL_CAMERA) mode_str = "Native GUI Window (Full Camera Screen)";
+    else if (mode == DISPLAY_GUI_FULL_EDGE) mode_str = "Native GUI Window (Full Sobel Edge Filter Screen)";
     else if (mode == DISPLAY_GUI_SIDE_BY_SIDE) mode_str = "Native GUI Window (Side-by-side Camera | Sobel)";
-    else if (mode == DISPLAY_GUI_SINGLE) mode_str = "Native GUI Window (Sobel Output)";
     printf("  Display Mode: %s\n", mode_str);
 
-    /* Allocate 32 MB arena for entire pipeline (Zero heap allocations in loop!) */
+    /* Allocate 32 MB arena for entire pipeline */
     const size_t arena_size = 32 * 1024 * 1024;
     RCRE_Arena* arena = rcre_arena_create(arena_size);
     if (!arena) {
@@ -193,23 +206,22 @@ int main(int argc, char** argv) {
     /* Initialize GUI Window if selected */
     RCRE_Window* win = NULL;
     uint8_t* gui_buffer = NULL;
-    size_t win_w = width;
-    size_t win_h = height;
+    size_t win_init_w = (mode == DISPLAY_GUI_SIDE_BY_SIDE) ? (width * 2) : width;
+    size_t win_init_h = height;
 
-    if (mode == DISPLAY_GUI_SIDE_BY_SIDE) {
-        win_w = width * 2;
-        win = rcre_window_create("RCRE Video Stream [Original RGB | Sobel Filter]", win_w, win_h);
-        gui_buffer = (uint8_t*)rcre_arena_alloc(arena, win_w * win_h * 3, 16);
-    } else if (mode == DISPLAY_GUI_SINGLE) {
-        win = rcre_window_create("RCRE Sobel Edge Detector", win_w, win_h);
-        gui_buffer = (uint8_t*)rcre_arena_alloc(arena, win_w * win_h * 3, 16);
+    if (mode >= DISPLAY_GUI_FULL_CAMERA && mode <= DISPLAY_GUI_SIDE_BY_SIDE) {
+        win = rcre_window_create("RCRE Camera Stream [Full Screen]", win_init_w, win_init_h);
+        gui_buffer = (uint8_t*)rcre_arena_alloc(arena, (width * 2) * height * 3, 16);
     }
 
     size_t baseline_offset = arena->offset;
 
     printf("\nStarting pipeline loop (%zu frames)...\n", max_frames);
-    if (mode == DISPLAY_GUI_SIDE_BY_SIDE || mode == DISPLAY_GUI_SINGLE) {
-        printf("👉 Native GUI window launched! Press 'q' or ESC in window or Ctrl+C in terminal to finish.\n");
+    if (win) {
+        printf("👉 GUI Window Active!\n");
+        printf("   • Spacebar: Toggle view (Full Camera <-> Full Edge <-> Side-by-Side)\n");
+        printf("   • 'f': Toggle Fullscreen\n");
+        printf("   • 'q' or ESC: Quit & view performance report\n\n");
     }
 
     double t_start = get_time_sec();
@@ -224,20 +236,20 @@ int main(int argc, char** argv) {
             if (grab_res == RCRE_ERR_TIMEOUT) {
                 continue;
             }
-            printf("grab err: %d\n", grab_res); break;
+            break;
         }
 
         /* Step 2: RGB -> Grayscale conversion (15-bit fixed point) */
         int status = rcre_cv_rgb_to_gray(&frame_tensor, &gray_tensor);
-        if (status != RCRE_OK) { printf("status err at line %d: %d\n", __LINE__, status); break; }
+        if (status != RCRE_OK) break;
 
         /* Step 3: Separable Gaussian Blur (sigma = 1.2) */
         status = rcre_cv_gaussian_blur(&gray_tensor, &blur_tensor, 1.2f, arena);
-        if (status != RCRE_OK) { printf("status err at line %d: %d\n", __LINE__, status); break; }
+        if (status != RCRE_OK) break;
 
         /* Step 4: Spatial 3x3 Sobel edge derivative */
         status = rcre_cv_sobel(&blur_tensor, &sobel_dx, &sobel_dy, arena);
-        if (status != RCRE_OK) { printf("status err at line %d: %d\n", __LINE__, status); break; }
+        if (status != RCRE_OK) break;
 
         processed_frames++;
 
@@ -245,56 +257,89 @@ int main(int argc, char** argv) {
 
         /* Option A: Native GUI Window Display */
         if (win && gui_buffer) {
-            if (mode == DISPLAY_GUI_SIDE_BY_SIDE) {
-                const uint8_t* raw_rgb = (const uint8_t*)frame_tensor.data;
-                const uint8_t* raw_edge = (const uint8_t*)sobel_dx.data;
+            size_t cur_w = width;
+            size_t cur_h = height;
+            const uint8_t* render_data = NULL;
 
-                for (size_t y = 0; y < height; ++y) {
-                    uint8_t* row_out = gui_buffer + y * (win_w * 3);
-                    const uint8_t* row_in_rgb = raw_rgb + y * (width * 3);
-                    const uint8_t* row_in_edge = raw_edge + y * width;
-
-                    /* Left side: Original Camera RGB */
-                    memcpy(row_out, row_in_rgb, width * 3);
-
-                    /* Right side: Edge detection with high-contrast cyan highlight */
-                    uint8_t* edge_rgb = row_out + (width * 3);
-                    for (size_t x = 0; x < width; ++x) {
-                        uint8_t v = row_in_edge[x];
-                        edge_rgb[x * 3 + 0] = v / 2; /* Red */
-                        edge_rgb[x * 3 + 1] = v;     /* Green */
-                        edge_rgb[x * 3 + 2] = v;     /* Blue */
-                    }
-                }
-            } else if (mode == DISPLAY_GUI_SINGLE) {
+            if (mode == DISPLAY_GUI_FULL_CAMERA) {
+                /* Full Camera Screen: Direct raw RGB view */
+                cur_w = width;
+                cur_h = height;
+                render_data = (const uint8_t*)frame_tensor.data;
+            } else if (mode == DISPLAY_GUI_FULL_EDGE) {
+                /* Full Edge Filter Screen: High-contrast cyan highlights */
+                cur_w = width;
+                cur_h = height;
                 const uint8_t* raw_edge = (const uint8_t*)sobel_dx.data;
                 for (size_t y = 0; y < height; ++y) {
-                    uint8_t* row_out = gui_buffer + y * (win_w * 3);
-                    const uint8_t* row_in_edge = raw_edge + y * width;
+                    uint8_t* row_out = gui_buffer + y * (width * 3);
+                    const uint8_t* row_in = raw_edge + y * width;
                     for (size_t x = 0; x < width; ++x) {
-                        uint8_t v = row_in_edge[x];
+                        uint8_t v = row_in[x];
                         row_out[x * 3 + 0] = v / 2;
                         row_out[x * 3 + 1] = v;
                         row_out[x * 3 + 2] = v;
                     }
                 }
+                render_data = gui_buffer;
+            } else if (mode == DISPLAY_GUI_SIDE_BY_SIDE) {
+                /* Side-by-Side Screen: Camera RGB | Sobel Filter */
+                cur_w = width * 2;
+                cur_h = height;
+                const uint8_t* raw_rgb = (const uint8_t*)frame_tensor.data;
+                const uint8_t* raw_edge = (const uint8_t*)sobel_dx.data;
+
+                for (size_t y = 0; y < height; ++y) {
+                    uint8_t* row_out = gui_buffer + y * (cur_w * 3);
+                    const uint8_t* row_in_rgb = raw_rgb + y * (width * 3);
+                    const uint8_t* row_in_edge = raw_edge + y * width;
+
+                    /* Left side: Camera RGB */
+                    memcpy(row_out, row_in_rgb, width * 3);
+
+                    /* Right side: Cyber-cyan edge map */
+                    uint8_t* edge_rgb = row_out + (width * 3);
+                    for (size_t x = 0; x < width; ++x) {
+                        uint8_t v = row_in_edge[x];
+                        edge_rgb[x * 3 + 0] = v / 2;
+                        edge_rgb[x * 3 + 1] = v;
+                        edge_rgb[x * 3 + 2] = v;
+                    }
+                }
+                render_data = gui_buffer;
             }
 
-            int win_active = rcre_window_update_rgb(win, gui_buffer, win_w, win_h);
+            int win_res = rcre_window_update_rgb(win, render_data, cur_w, cur_h);
+
+            if (win_res == 0) {
+                printf("\n[GUI] Window close requested by user. Finishing benchmark...\n");
+                break;
+            } else if (win_res == 2) {
+                /* Spacebar pressed: Toggle view mode */
+                if (mode == DISPLAY_GUI_FULL_CAMERA) {
+                    mode = DISPLAY_GUI_FULL_EDGE;
+                    rcre_window_resize(win, width, height);
+                } else if (mode == DISPLAY_GUI_FULL_EDGE) {
+                    mode = DISPLAY_GUI_SIDE_BY_SIDE;
+                    rcre_window_resize(win, width * 2, height);
+                } else if (mode == DISPLAY_GUI_SIDE_BY_SIDE) {
+                    mode = DISPLAY_GUI_FULL_CAMERA;
+                    rcre_window_resize(win, width, height);
+                }
+            }
 
             /* Update dynamic title bar every 15 frames */
             if (processed_frames % 15 == 0) {
                 double elapsed = get_time_sec() - t_start;
                 double cur_fps = (double)processed_frames / (elapsed > 1e-4 ? elapsed : 1e-4);
-                char title[128];
-                snprintf(title, sizeof(title), "RCRE Camera Pipeline [%s] | Frame %zu | %.1f FPS (Press 'q' to stop)",
-                         rcre_cam_backend_name(cam), processed_frames, cur_fps);
-                rcre_window_set_title(win, title);
-            }
+                const char* view_tag = "Full Camera";
+                if (mode == DISPLAY_GUI_FULL_EDGE) view_tag = "Full Sobel Edge";
+                else if (mode == DISPLAY_GUI_SIDE_BY_SIDE) view_tag = "Side-by-Side";
 
-            if (!win_active) {
-                printf("\n[GUI] Window close requested by user. Finishing benchmark...\n");
-                break;
+                char title[160];
+                snprintf(title, sizeof(title), "RCRE Camera [%s | %s] | Frame %zu | %.1f FPS [Space: Toggle View, 'f': Fullscreen, 'q': Quit]",
+                         view_tag, rcre_cam_backend_name(cam), processed_frames, cur_fps);
+                rcre_window_set_title(win, title);
             }
         }
 

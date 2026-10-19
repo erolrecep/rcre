@@ -27,14 +27,18 @@ Run any example directly with a single command:
 # Launch interactive camera test (select Terminal or GUI Window from menu)
 make webcam_test
 
-# 🖥️ Launch directly in Native GUI Window (Side-by-side: Camera RGB | Sobel Filter)
+# 🖥️ Launch directly in Native GUI Window (Full Camera Screen, uncropped)
 make webcam_test_gui
 
 # 📟 Launch directly in Terminal (Real-time ANSI ASCII visualization)
 make webcam_test_terminal
 
+# ⏱️ Customize frame count easily via FRAMES parameter:
+make webcam_test_terminal FRAMES=1000
+make webcam_test_gui FRAMES=500
+
 # 📷 Launch synthetic test pattern camera (ideal for headless CI/SSH)
-make webcam_test_dummy
+make webcam_test_dummy FRAMES=100
 
 # Run high-throughput GBDT inference benchmark (100k samples)
 make gbdt_test
@@ -53,7 +57,7 @@ make examples
 Demonstrates zero-copy camera frame acquisition coupled with high-speed spatial image filtering.
 
 ### Pipeline Stages
-1. **Frame Ingestion**: `rcre_cam_grab()` fetches a zero-copy $[H, W, 3]$ $U8$ frame via macOS AVFoundation, Linux V4L2, or Synthetic Dummy generator.
+1. **Frame Ingestion**: `rcre_cam_grab()` fetches a zero-copy $[H, W, 3]$ $U8$ frame via macOS AVFoundation, Linux V4L2, or Synthetic Dummy generator with proportional full field-of-view sensor mapping.
 2. **Color Conversion**: `rcre_cv_rgb_to_gray()` computes 15-bit fixed-point Rec.601 luma (0 LSB difference from OpenCV).
 3. **Spatial Smoothing**: `rcre_cv_gaussian_blur()` applies separable 2D Gaussian blur with reflection padding ($\sigma = 1.2$).
 4. **Spatial Gradients**: `rcre_cv_sobel()` calculates horizontal ($dx$) and vertical ($dy$) gradient derivatives.
@@ -64,25 +68,28 @@ Demonstrates zero-copy camera frame acquisition coupled with high-speed spatial 
 
 ### 🖥️ Display Modes Explained
 
-When running the camera test, you can choose between two main display formats:
+When running the camera test, you can choose between several display formats:
 
-#### Mode 1: Terminal (ANSI ASCII Art)
+#### Mode 1: Native GUI Window (Full Camera Screen) — *Default for `make webcam_test_gui`*
+* **What it does**: Displays the **complete, uncropped live camera stream** in a native hardware-accelerated window.
+* **Aspect & Resolution**: Resamples 100% of the camera sensor frame (FaceTime HD / USB camera) so no parts of your field of view are cut off.
+* **Interactive Controls**:
+  * <kbd>Spacebar</kbd> / <kbd>Tab</kbd>: Cycle dynamically between **Full Camera** $\leftrightarrow$ **Full Sobel Edge Filter** $\leftrightarrow$ **Side-by-Side Comparison**.
+  * <kbd>f</kbd> / <kbd>F</kbd> (or green macOS zoom button): Toggle true native **Fullscreen Mode**.
+  * <kbd>q</kbd> / <kbd>ESC</kbd>: Cleanly close the window and print the performance & FPS summary report.
+* **Command**: `make webcam_test_gui` or `./bin/webcam_edge_filter --gui`
+
+#### Mode 2: Native GUI Window (Side-by-Side Comparison)
+* **What it does**: Displays two synchronized screens side-by-side:
+  * **Left Screen (Input)**: Live raw camera stream (RGB).
+  * **Right Screen (Output)**: Real-time Sobel edge map highlighted in cyber-cyan.
+* **Why two screens?** Provides an instant **input vs. output visual parity check** to verify contour detection in real time.
+* **Command**: `./bin/webcam_edge_filter --side-by-side` (or press <kbd>Spacebar</kbd> during GUI mode)
+
+#### Mode 3: Terminal (ANSI ASCII Art)
 * **What it does**: Downsamples edge intensities into an ANSI character ramp (` .:-=+*#%@`) directly inside your console.
 * **Why use it**: Zero graphical dependencies; perfect for remote SSH sessions, headless servers, Docker containers, or tmux panes.
 * **Command**: `make webcam_test_terminal` or `./bin/webcam_edge_filter --terminal`
-
-#### Mode 2: Native GUI Window (Side-by-Side: Camera RGB | Sobel Filter)
-* **What it does**: Opens a hardware-accelerated desktop window displaying **two screens side-by-side**:
-  * **Left Screen (Input)**: The raw live camera feed (RGB 640×480) ingested directly from the hardware.
-  * **Right Screen (Output)**: The real-time filtered output (Sobel edge derivative highlighted in cyber-cyan).
-* **Why two screens?**
-  * It provides an **instant input vs. output visual parity check**, making it immediately obvious how contours, motion, and edges are tracked in real time.
-* **Controls**: Press <kbd>q</kbd> or <kbd>ESC</kbd> in the window (or click the red close button) to finish capture and print the performance summary.
-* **Command**: `make webcam_test_gui` or `./bin/webcam_edge_filter --gui`
-
-#### Mode 3: Native GUI Window (Single Screen: Sobel Output Only)
-* **What it does**: Displays only the filtered 640×480 edge output in a single window.
-* **Command**: `./bin/webcam_edge_filter --gui-single`
 
 #### Mode 4: Headless Benchmark
 * **What it does**: Ingests and processes frames at maximum CPU pipeline throughput without rendering.
@@ -95,14 +102,15 @@ When running the camera test, you can choose between two main display formats:
 You can test GUI and Terminal modes back-to-back:
 
 ```bash
-# 1. Test in Terminal (ANSI ASCII):
-make webcam_test_terminal
-
-# 2. Test in Native GUI (Side-by-Side view):
+# 1. Test in Full Camera GUI Window:
 make webcam_test_gui
 
-# 3. Test with Single-Screen GUI:
-./bin/webcam_edge_filter --gui-single --frames 200
+# 2. Test in Terminal (ANSI ASCII):
+make webcam_test_terminal
+
+# 3. Test with a custom frame count (e.g. 1000 frames):
+make webcam_test_terminal FRAMES=1000
+make webcam_test_gui FRAMES=500
 
 # 4. Interactive Mode (prompts you each time):
 make webcam_test

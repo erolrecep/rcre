@@ -40,7 +40,7 @@ RCRE_Window* rcre_window_create(const char* title, size_t width, size_t height);
  * @param rgb_data Pointer to RGB24 packed pixel buffer.
  * @param width Frame width.
  * @param height Frame height.
- * @return 1 if window remains open and active; 0 if user requested close (ESC, 'q', or window closed).
+ * @return 1 if active; 0 if user requested close (ESC, 'q', or window closed); 2 if view toggle requested (Spacebar/Tab).
  */
 int rcre_window_update_rgb(RCRE_Window* win, const uint8_t* rgb_data, size_t width, size_t height);
 
@@ -48,6 +48,11 @@ int rcre_window_update_rgb(RCRE_Window* win, const uint8_t* rgb_data, size_t wid
  * @brief Updates the window title bar (e.g. for dynamic FPS / telemetry display).
  */
 void rcre_window_set_title(RCRE_Window* win, const char* title);
+
+/**
+ * @brief Resizes window frame to adapt to new content dimensions.
+ */
+void rcre_window_resize(RCRE_Window* win, size_t width, size_t height);
 
 /**
  * @brief Closes and destroys the window.

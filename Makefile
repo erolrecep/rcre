@@ -109,20 +109,25 @@ up_web_app:
 	@($(OPEN_CMD) http://localhost:8080 2>/dev/null &) || true
 	@python3 -m http.server 8080 --directory web/
 
+# Optional runtime parameters
+FRAMES ?= 200
+ARGS ?=
+
 webcam_test: bin/webcam_edge_filter
-	@bin/webcam_edge_filter
+	@bin/webcam_edge_filter $(ARGS)
 
 webcam_test_gui: bin/webcam_edge_filter
-	@echo "📷 Launching RCRE Real-time Camera Stream with Native GUI Window..."
-	@bin/webcam_edge_filter --gui
+	@echo "📷 Launching RCRE Live Camera Stream (Full Camera Screen)..."
+	@echo "   👉 Controls: Spacebar to toggle views (Camera <-> Edge <-> Split), 'f' for fullscreen, 'q' to stop"
+	@bin/webcam_edge_filter --gui --frames $(FRAMES) $(ARGS)
 
 webcam_test_terminal: bin/webcam_edge_filter
 	@echo "📷 Launching RCRE Real-time Camera Stream in Terminal (ASCII/ANSI)..."
-	@bin/webcam_edge_filter --terminal --frames 200
+	@bin/webcam_edge_filter --terminal --frames $(FRAMES) $(ARGS)
 
 webcam_test_dummy: bin/webcam_edge_filter
 	@echo "📷 Launching RCRE Synthetic Test Camera Stream..."
-	@bin/webcam_edge_filter --dummy
+	@bin/webcam_edge_filter --dummy --terminal --frames $(FRAMES) $(ARGS)
 
 gbdt_test: bin/tabular_gbdt_predict
 	@bin/tabular_gbdt_predict

@@ -56,6 +56,10 @@ RCRE_Window* rcre_window_create(const char* title, size_t width, size_t height) 
                                                  defer:NO];
         if (!window) return NULL;
 
+        // Support native macOS Full Screen zoom button
+        [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
+        [window setMinSize:NSMakeSize(320, 240)];
+
         NSString *nsTitle = [NSString stringWithUTF8String:title ? title : "RCRE Video Stream"];
         [window setTitle:nsTitle];
 
@@ -94,6 +98,8 @@ int rcre_window_update_rgb(RCRE_Window* win, const uint8_t* rgb_data, size_t wid
             return 0;
         }
 
+        int return_code = 1;
+
         // Pump events
         NSEvent *event;
         while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
@@ -107,6 +113,10 @@ int rcre_window_update_rgb(RCRE_Window* win, const uint8_t* rgb_data, size_t wid
                     if (c == 27 /* ESC */ || c == 'q' || c == 'Q') {
                         win->shouldClose = YES;
                         return 0;
+                    } else if (c == 'f' || c == 'F') {
+                        [win->window toggleFullScreen:nil];
+                    } else if (c == ' ' || c == '\t' || c == 'v' || c == 'V') {
+                        return_code = 2; /* Signal view mode toggle */
                     }
                 }
             }
@@ -118,7 +128,7 @@ int rcre_window_update_rgb(RCRE_Window* win, const uint8_t* rgb_data, size_t wid
             return 0;
         }
 
-        if (!rgb_data) return 1;
+        if (!rgb_data) return return_code;
 
         // Render RGB24
         unsigned char *planes[1] = { (unsigned char *)rgb_data };
@@ -140,7 +150,7 @@ int rcre_window_update_rgb(RCRE_Window* win, const uint8_t* rgb_data, size_t wid
             [win->imageView setImage:img];
         }
 
-        return 1;
+        return return_code;
     }
 }
 
@@ -149,6 +159,20 @@ void rcre_window_set_title(RCRE_Window* win, const char* title) {
     @autoreleasepool {
         NSString *nsTitle = [NSString stringWithUTF8String:title];
         [win->window setTitle:nsTitle];
+    }
+}
+
+void rcre_window_resize(RCRE_Window* win, size_t width, size_t height) {
+    if (!win || !win->window) return;
+    @autoreleasepool {
+        if (!([win->window styleMask] & NSWindowStyleMaskFullScreen)) {
+            NSRect frame = [win->window frame];
+            NSSize newContentSize = NSMakeSize((CGFloat)width, (CGFloat)height);
+            NSRect newFrame = [win->window frameRectForContentRect:NSMakeRect(frame.origin.x, frame.origin.y, newContentSize.width, newContentSize.height)];
+            [win->window setFrame:newFrame display:YES animate:YES];
+        }
+        win->width = width;
+        win->height = height;
     }
 }
 

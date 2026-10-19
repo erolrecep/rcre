@@ -30,6 +30,12 @@ void rcre_window_set_title(RCRE_Window* win, const char* title) {
     (void)title;
 }
 
+void rcre_window_resize(RCRE_Window* win, size_t width, size_t height) {
+    (void)win;
+    (void)width;
+    (void)height;
+}
+
 void rcre_window_destroy(RCRE_Window* win) {
     (void)win;
 }

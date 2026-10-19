@@ -80,26 +80,39 @@ static int avf_grab(RCRE_Camera* cam, RCRE_Tensor* out_frame) {
 
     CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
     uint8_t* base_addr = (uint8_t*)CVPixelBufferGetBaseAddress(buffer);
-    size_t width = CVPixelBufferGetWidth(buffer);
-    size_t height = CVPixelBufferGetHeight(buffer);
+    size_t in_w = CVPixelBufferGetWidth(buffer);
+    size_t in_h = CVPixelBufferGetHeight(buffer);
     size_t bytes_per_row = CVPixelBufferGetBytesPerRow(buffer);
-
-    size_t copy_h = (height < cam->config.height) ? height : cam->config.height;
-    size_t copy_w = (width < cam->config.width) ? width : cam->config.width;
+    size_t target_w = cam->config.width;
+    size_t target_h = cam->config.height;
 
     uint8_t* dst = (uint8_t*)out_frame->data;
 
-    /* AVF default 32BGRA -> RGB 24-bit copy */
-    for (size_t y = 0; y < copy_h; ++y) {
-        const uint8_t* src_row = base_addr + y * bytes_per_row;
-        uint8_t* dst_row = dst + y * cam->config.width * 3;
-        for (size_t x = 0; x < copy_w; ++x) {
-            uint8_t b = src_row[x * 4 + 0];
-            uint8_t g = src_row[x * 4 + 1];
-            uint8_t r = src_row[x * 4 + 2];
-            dst_row[x * 3 + 0] = r;
-            dst_row[x * 3 + 1] = g;
-            dst_row[x * 3 + 2] = b;
+    /* AVF 32BGRA -> RGB 24-bit with full sensor field-of-view (never crop top-left) */
+    if (in_w == target_w && in_h == target_h) {
+        for (size_t y = 0; y < target_h; ++y) {
+            const uint8_t* src_row = base_addr + y * bytes_per_row;
+            uint8_t* dst_row = dst + y * target_w * 3;
+            for (size_t x = 0; x < target_w; ++x) {
+                dst_row[x * 3 + 0] = src_row[x * 4 + 2]; /* R */
+                dst_row[x * 3 + 1] = src_row[x * 4 + 1]; /* G */
+                dst_row[x * 3 + 2] = src_row[x * 4 + 0]; /* B */
+            }
+        }
+    } else {
+        /* Proportional resample across 100% of the camera sensor view */
+        for (size_t y = 0; y < target_h; ++y) {
+            size_t src_y = (y * in_h) / target_h;
+            if (src_y >= in_h) src_y = in_h - 1;
+            const uint8_t* src_row = base_addr + src_y * bytes_per_row;
+            uint8_t* dst_row = dst + y * target_w * 3;
+            for (size_t x = 0; x < target_w; ++x) {
+                size_t src_x = (x * in_w) / target_w;
+                if (src_x >= in_w) src_x = in_w - 1;
+                dst_row[x * 3 + 0] = src_row[src_x * 4 + 2]; /* R */
+                dst_row[x * 3 + 1] = src_row[src_x * 4 + 1]; /* G */
+                dst_row[x * 3 + 2] = src_row[src_x * 4 + 0]; /* B */
+            }
         }
     }
 
@@ -129,6 +142,17 @@ RCRE_Camera* rcre_cam_avf_open(const RCRE_CamConfig* config, RCRE_Arena* arena) 
         AVCaptureSession* session = [[AVCaptureSession alloc] init];
         if (![session canAddInput:input]) return NULL;
         [session addInput:input];
+
+        /* Match optimal session preset to target resolution */
+        if (config->width >= 1920 && config->height >= 1080 && [session canSetSessionPreset:AVCaptureSessionPreset1920x1080]) {
+            session.sessionPreset = AVCaptureSessionPreset1920x1080;
+        } else if (config->width >= 1280 && config->height >= 720 && [session canSetSessionPreset:AVCaptureSessionPreset1280x720]) {
+            session.sessionPreset = AVCaptureSessionPreset1280x720;
+        } else if (config->width <= 640 && config->height <= 480 && [session canSetSessionPreset:AVCaptureSessionPreset640x480]) {
+            session.sessionPreset = AVCaptureSessionPreset640x480;
+        } else if ([session canSetSessionPreset:AVCaptureSessionPresetHigh]) {
+            session.sessionPreset = AVCaptureSessionPresetHigh;
+        }
 
         AVCaptureVideoDataOutput* output = [[AVCaptureVideoDataOutput alloc] init];
         output.alwaysDiscardsLateVideoFrames = YES;
