@@ -51,7 +51,11 @@ SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 EXAMPLES = webcam_edge_filter tabular_gbdt_predict hnsw_vector_search
 EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
-.PHONY: all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_dummy gbdt_test hnsw_test help
+.DEFAULT_GOAL := help
+
+.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_dummy gbdt_test hnsw_test
+
+default: help
 
 all: $(LIB) $(DYLIB) $(AMALGAMATED_HEADER) $(EXAMPLE_BINS)
 
