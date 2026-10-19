@@ -24,10 +24,16 @@ All examples strictly adhere to RCRE's core architectural tenets:
 Run any example directly with a single command:
 
 ```bash
-# Launch live webcam with interactive terminal edge visualization
+# Launch interactive camera test (select Terminal or GUI Window from menu)
 make webcam_test
 
-# Launch synthetic test pattern camera (ideal for headless CI)
+# 🖥️ Launch directly in Native GUI Window (Side-by-side: Camera RGB | Sobel Filter)
+make webcam_test_gui
+
+# 📟 Launch directly in Terminal (Real-time ANSI ASCII visualization)
+make webcam_test_terminal
+
+# 📷 Launch synthetic test pattern camera (ideal for headless CI/SSH)
 make webcam_test_dummy
 
 # Run high-throughput GBDT inference benchmark (100k samples)
@@ -49,28 +55,76 @@ Demonstrates zero-copy camera frame acquisition coupled with high-speed spatial 
 ### Pipeline Stages
 1. **Frame Ingestion**: `rcre_cam_grab()` fetches a zero-copy $[H, W, 3]$ $U8$ frame via macOS AVFoundation, Linux V4L2, or Synthetic Dummy generator.
 2. **Color Conversion**: `rcre_cv_rgb_to_gray()` computes 15-bit fixed-point Rec.601 luma (0 LSB difference from OpenCV).
-3. **Spatial Smoothing**: `rcre_cv_gaussian_blur()` applies separable 2D Gaussian blur with reflection padding.
+3. **Spatial Smoothing**: `rcre_cv_gaussian_blur()` applies separable 2D Gaussian blur with reflection padding ($\sigma = 1.2$).
 4. **Spatial Gradients**: `rcre_cv_sobel()` calculates horizontal ($dx$) and vertical ($dy$) gradient derivatives.
-5. **Linear Scratchpad Rewind**: The memory arena offset is reset to baseline in $\mathcal{O}(1)$ time, reusing scratch buffers indefinitely without memory leaks.
+5. **Display Rendering**: Outputs to either a native hardware-accelerated GUI window or an ANSI ASCII console stream.
+6. **Linear Scratchpad Rewind**: The memory arena offset is reset to baseline in $\mathcal{O}(1)$ time, reusing scratch buffers indefinitely with **zero heap allocations in the loop**.
 
-### Command-Line Arguments
+---
+
+### 🖥️ Display Modes Explained
+
+When running the camera test, you can choose between two main display formats:
+
+#### Mode 1: Terminal (ANSI ASCII Art)
+* **What it does**: Downsamples edge intensities into an ANSI character ramp (` .:-=+*#%@`) directly inside your console.
+* **Why use it**: Zero graphical dependencies; perfect for remote SSH sessions, headless servers, Docker containers, or tmux panes.
+* **Command**: `make webcam_test_terminal` or `./bin/webcam_edge_filter --terminal`
+
+#### Mode 2: Native GUI Window (Side-by-Side: Camera RGB | Sobel Filter)
+* **What it does**: Opens a hardware-accelerated desktop window displaying **two screens side-by-side**:
+  * **Left Screen (Input)**: The raw live camera feed (RGB 640×480) ingested directly from the hardware.
+  * **Right Screen (Output)**: The real-time filtered output (Sobel edge derivative highlighted in cyber-cyan).
+* **Why two screens?**
+  * It provides an **instant input vs. output visual parity check**, making it immediately obvious how contours, motion, and edges are tracked in real time.
+* **Controls**: Press <kbd>q</kbd> or <kbd>ESC</kbd> in the window (or click the red close button) to finish capture and print the performance summary.
+* **Command**: `make webcam_test_gui` or `./bin/webcam_edge_filter --gui`
+
+#### Mode 3: Native GUI Window (Single Screen: Sobel Output Only)
+* **What it does**: Displays only the filtered 640×480 edge output in a single window.
+* **Command**: `./bin/webcam_edge_filter --gui-single`
+
+#### Mode 4: Headless Benchmark
+* **What it does**: Ingests and processes frames at maximum CPU pipeline throughput without rendering.
+* **Command**: `./bin/webcam_edge_filter --headless --frames 500`
+
+---
+
+### 🎮 Testing Options & Back-to-Back Workflow
+
+You can test GUI and Terminal modes back-to-back:
+
 ```bash
-bin/webcam_edge_filter [OPTIONS]
+# 1. Test in Terminal (ANSI ASCII):
+make webcam_test_terminal
 
-Options:
-  --dummy        Force synthetic moving color bars (ideal for headless CI/SSH)
-  --frames <N>   Number of frames to process (default: 100)
-  --width <W>    Desired width (default: 640)
-  --height <H>   Desired height (default: 480)
+# 2. Test in Native GUI (Side-by-Side view):
+make webcam_test_gui
+
+# 3. Test with Single-Screen GUI:
+./bin/webcam_edge_filter --gui-single --frames 200
+
+# 4. Interactive Mode (prompts you each time):
+make webcam_test
 ```
 
-### Running the Example
-```bash
-# Run with synthetic test generator for 100 frames
-bin/webcam_edge_filter --dummy --frames 100
+### Command-Line Arguments Reference
 
-# Run with physical webcam on macOS / Linux
-bin/webcam_edge_filter --frames 200
+```text
+Usage: bin/webcam_edge_filter [OPTIONS]
+
+Display Options:
+  --terminal, --view        Display live video in terminal via ANSI ASCII art
+  --gui                     Display live video in Native GUI window (Side-by-side RGB | Sobel)
+  --gui-single              Display live video in Native GUI window (Sobel edge output only)
+  --headless, --bench       Run without display to measure maximum pipeline throughput
+
+Configuration Options:
+  --dummy                   Force synthetic moving color bars (ideal for headless CI/SSH)
+  --frames <N>              Number of frames to process (default: 200, 0 = run until stopped)
+  --width <W>               Frame capture width (default: 640)
+  --height <H>              Frame capture height (default: 480)
+  -h, --help                Show command-line help message
 ```
 
 ### Sample Output (Apple M5 Max)
