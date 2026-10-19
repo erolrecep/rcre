@@ -56,9 +56,10 @@ RCRE_Window* rcre_window_create(const char* title, size_t width, size_t height) 
                                                  defer:NO];
         if (!window) return NULL;
 
-        // Support native macOS Full Screen zoom button
+        // Support native macOS Full Screen zoom button and aspect ratio locking
         [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
-        [window setMinSize:NSMakeSize(320, 240)];
+        [window setContentAspectRatio:NSMakeSize((CGFloat)width, (CGFloat)height)];
+        [window setMinSize:NSMakeSize(320, 200)];
 
         NSString *nsTitle = [NSString stringWithUTF8String:title ? title : "RCRE Video Stream"];
         [window setTitle:nsTitle];
@@ -165,6 +166,7 @@ void rcre_window_set_title(RCRE_Window* win, const char* title) {
 void rcre_window_resize(RCRE_Window* win, size_t width, size_t height) {
     if (!win || !win->window) return;
     @autoreleasepool {
+        [win->window setContentAspectRatio:NSMakeSize((CGFloat)width, (CGFloat)height)];
         if (!([win->window styleMask] & NSWindowStyleMaskFullScreen)) {
             NSRect frame = [win->window frame];
             NSSize newContentSize = NSMakeSize((CGFloat)width, (CGFloat)height);

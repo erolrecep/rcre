@@ -42,20 +42,23 @@ static void print_usage(const char* prog) {
     printf("Configuration Options:\n");
     printf("  --dummy                   Use synthetic moving gradient pattern instead of webcam\n");
     printf("  --frames <N>              Number of frames to process (default: 200, 0 = unlimited)\n");
-    printf("  --width <W>               Frame capture width (default: 640)\n");
-    printf("  --height <H>              Frame capture height (default: 480)\n");
+    printf("  --width <W>               Frame capture width (default: 768, 16:10 MacBook aspect)\n");
+    printf("  --height <H>              Frame capture height (default: 480, 16:10 MacBook aspect)\n");
     printf("  -h, --help                Show this help message\n\n");
     printf("GUI Keyboard Shortcuts:\n");
     printf("  Spacebar / Tab            Toggle view (Full Camera <-> Full Edge <-> Side-by-Side)\n");
-    printf("  'f' / 'F'                 Toggle true Fullscreen mode\n");
+    printf("  'f' / 'F'                 Toggle true Fullscreen mode (16:10 aspect preserved)\n");
     printf("  'q' / ESC                 Quit capture and print performance benchmark\n");
 }
 
 int main(int argc, char** argv) {
-    size_t width = 640;
+    /* Default calibrated to MacBook 16:10 Retina aspect ratio (768x480) */
+    size_t width = 768;
     size_t height = 480;
     size_t max_frames = 200;
     int force_dummy = 0;
+    int user_width = 0;
+    int user_height = 0;
     DisplayMode mode = DISPLAY_UNSPECIFIED;
 
     for (int i = 1; i < argc; ++i) {
@@ -88,12 +91,21 @@ int main(int argc, char** argv) {
             max_frames = (size_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
             width = (size_t)atoi(argv[++i]);
+            user_width = 1;
         } else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
             height = (size_t)atoi(argv[++i]);
+            user_height = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
         }
+    }
+
+    /* Auto-calculate 16:10 MacBook ratio if only one dimension was specified */
+    if (user_width && !user_height) {
+        height = (width * 10) / 16;
+    } else if (user_height && !user_width) {
+        width = (height * 16) / 10;
     }
 
     /* Interactive mode prompt if no display flag was provided */

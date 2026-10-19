@@ -109,25 +109,39 @@ up_web_app:
 	@($(OPEN_CMD) http://localhost:8080 2>/dev/null &) || true
 	@python3 -m http.server 8080 --directory web/
 
-# Optional runtime parameters
+# Optional runtime parameters (calibrated to MacBook 16:10 aspect ratio)
 FRAMES ?= 200
+WIDTH ?= 768
+HEIGHT ?= 480
+
+# Support lowercase parameter overrides passed on command line (e.g. make width=640)
+ifdef width
+    WIDTH = $(width)
+endif
+ifdef height
+    HEIGHT = $(height)
+endif
+ifdef frames
+    FRAMES = $(frames)
+endif
+
 ARGS ?=
 
 webcam_test: bin/webcam_edge_filter
-	@bin/webcam_edge_filter $(ARGS)
+	@bin/webcam_edge_filter --width $(WIDTH) --height $(HEIGHT) --frames $(FRAMES) $(ARGS)
 
 webcam_test_gui: bin/webcam_edge_filter
-	@echo "📷 Launching RCRE Live Camera Stream (Full Camera Screen)..."
+	@echo "📷 Launching RCRE Live Camera Stream (16:10 MacBook Aspect)..."
 	@echo "   👉 Controls: Spacebar to toggle views (Camera <-> Edge <-> Split), 'f' for fullscreen, 'q' to stop"
-	@bin/webcam_edge_filter --gui --frames $(FRAMES) $(ARGS)
+	@bin/webcam_edge_filter --gui --width $(WIDTH) --height $(HEIGHT) --frames $(FRAMES) $(ARGS)
 
 webcam_test_terminal: bin/webcam_edge_filter
 	@echo "📷 Launching RCRE Real-time Camera Stream in Terminal (ASCII/ANSI)..."
-	@bin/webcam_edge_filter --terminal --frames $(FRAMES) $(ARGS)
+	@bin/webcam_edge_filter --terminal --width $(WIDTH) --height $(HEIGHT) --frames $(FRAMES) $(ARGS)
 
 webcam_test_dummy: bin/webcam_edge_filter
-	@echo "📷 Launching RCRE Synthetic Test Camera Stream..."
-	@bin/webcam_edge_filter --dummy --terminal --frames $(FRAMES) $(ARGS)
+	@echo "📷 Launching RCRE Synthetic Test Camera Stream (16:10 MacBook Aspect)..."
+	@bin/webcam_edge_filter --dummy --terminal --width $(WIDTH) --height $(HEIGHT) --frames $(FRAMES) $(ARGS)
 
 gbdt_test: bin/tabular_gbdt_predict
 	@bin/tabular_gbdt_predict

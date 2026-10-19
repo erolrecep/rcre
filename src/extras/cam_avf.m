@@ -100,14 +100,29 @@ static int avf_grab(RCRE_Camera* cam, RCRE_Tensor* out_frame) {
             }
         }
     } else {
-        /* Proportional resample across 100% of the camera sensor view */
+        /* Centered aspect-fill resample: preserves 1:1 pixel geometry on 16:10 MacBook screen without distortion */
+        size_t usable_w = in_w;
+        size_t usable_h = in_h;
+        size_t offset_x = 0;
+        size_t offset_y = 0;
+
+        if (in_w * target_h > in_h * target_w) {
+            /* Input is wider (e.g. 16:9 camera onto 16:10 MacBook target) */
+            usable_w = (in_h * target_w) / target_h;
+            offset_x = (in_w - usable_w) / 2;
+        } else if (in_w * target_h < in_h * target_w) {
+            /* Input is taller (e.g. 4:3 camera onto 16:10 MacBook target) */
+            usable_h = (in_w * target_h) / target_w;
+            offset_y = (in_h - usable_h) / 2;
+        }
+
         for (size_t y = 0; y < target_h; ++y) {
-            size_t src_y = (y * in_h) / target_h;
+            size_t src_y = offset_y + (y * usable_h) / target_h;
             if (src_y >= in_h) src_y = in_h - 1;
             const uint8_t* src_row = base_addr + src_y * bytes_per_row;
             uint8_t* dst_row = dst + y * target_w * 3;
             for (size_t x = 0; x < target_w; ++x) {
-                size_t src_x = (x * in_w) / target_w;
+                size_t src_x = offset_x + (x * usable_w) / target_w;
                 if (src_x >= in_w) src_x = in_w - 1;
                 dst_row[x * 3 + 0] = src_row[src_x * 4 + 2]; /* R */
                 dst_row[x * 3 + 1] = src_row[src_x * 4 + 1]; /* G */
