@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 authors = ["Recep"]
 description = "Safe Rust FFI bindings for RCRE (Recep's Code Run Everywhere) C23 CV & ML Engine"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 

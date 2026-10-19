@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/OpenCV_Parity-0_LSB-brightgreen?logo=opencv&logoColor=white&style=flat" alt="OpenCV Parity">
   <img src="https://img.shields.io/badge/Loop_Allocs-0-orange?style=flat" alt="Zero Heap Allocations">
   <a href="https://github.com/erolrecep/rcre-book"><img src="https://img.shields.io/badge/Textbook-rcre--book-red?logo=gitbook&style=flat" alt="Official Textbook"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=flat" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL_3.0_%2F_Commercial-blue?style=flat" alt="AGPL-3.0 / Commercial License"></a>
 </p>
 
 ---
@@ -236,6 +236,21 @@ make up_web_app
 
 ---
 
-## 📜 License
+## 📜 Licensing & Commercial Use
 
-RCRE is released under the **MIT License**. Created by **Recep**.
+RCRE is licensed under a **Dual-Licensing Model**:
+
+### 1. Open-Source Community License (GNU AGPLv3)
+For open-source projects, students, academic researchers, and hobbyists, RCRE is freely available under the **[GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE)**.
+* Under the AGPL-3.0 copyleft terms, any software, cloud service, or derivative product that incorporates or links RCRE **must also make its complete source code publicly available under AGPL-3.0**.
+
+### 2. Commercial Proprietary License (Enterprise & Closed-Source)
+If you represent a company, startup, or OEM hardware vendor that wishes to embed RCRE in proprietary, closed-source commercial software, hardware appliances, cameras, or commercial SaaS products **without open-sourcing your proprietary intellectual property**, a commercial license is required.
+
+**Commercial License Benefits:**
+* ✅ **Exemption from AGPL-3.0 copyleft obligations**: Keep your application source code closed and proprietary.
+* ✅ **Royalty-free commercial deployment**: Distribute RCRE in commercial hardware devices or cloud endpoints.
+* ✅ **Direct Author Support**: Architecture consultation, custom SIMD kernel optimization, and prioritized feature requests.
+
+📧 **Commercial & Enterprise Inquiries**: Contact **Recep Erol** via GitHub ([@erolrecep](https://github.com/erolrecep)) or open an inquiry issue.
+
