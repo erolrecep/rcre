@@ -5,13 +5,13 @@
 </p>
 
 <p align="center">
-  <a href="https://erolrecep.github.io/rcre/"><img src="https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-00d2ff.svg?style=flat-square" alt="GitHub Pages Live Demo"></a>
-  <img src="https://img.shields.io/badge/C23-ISO%20Standard-blue.svg?style=flat-square" alt="C23 Standard">
-  <img src="https://img.shields.io/badge/Sanitizers-ASan%20%7C%20UBSan%20Clean-success.svg?style=flat-square" alt="Sanitizers Clean">
-  <img src="https://img.shields.io/badge/OpenCV%20Parity-0%20LSB%20Diff-brightgreen.svg?style=flat-square" alt="OpenCV Parity">
-  <img src="https://img.shields.io/badge/Heap%20Allocations%20in%20Loops-0-orange.svg?style=flat-square" alt="Zero Heap Allocations">
-  <a href="https://github.com/erolrecep/rcre-book"><img src="https://img.shields.io/badge/Textbook-rcre--book-red.svg?style=flat-square" alt="Official Textbook"></a>
-  <img src="https://img.shields.io/badge/License-MIT-purple.svg?style=flat-square" alt="MIT License">
+  <a href="https://erolrecep.github.io/rcre/"><img src="https://img.shields.io/badge/Demo-Live_Playground-00d2ff?logo=github&style=flat" alt="Live Demo"></a>
+  <img src="https://img.shields.io/badge/Language-ISO_C23-00599C?logo=c&style=flat" alt="C23 Standard">
+  <img src="https://img.shields.io/badge/Sanitizers-ASan_%7C_UBSan-success?style=flat" alt="Sanitizers Clean">
+  <img src="https://img.shields.io/badge/OpenCV_Parity-0_LSB-brightgreen?logo=opencv&logoColor=white&style=flat" alt="OpenCV Parity">
+  <img src="https://img.shields.io/badge/Loop_Allocs-0-orange?style=flat" alt="Zero Heap Allocations">
+  <a href="https://github.com/erolrecep/rcre-book"><img src="https://img.shields.io/badge/Textbook-rcre--book-red?logo=gitbook&style=flat" alt="Official Textbook"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=flat" alt="MIT License"></a>
 </p>
 
 ---
