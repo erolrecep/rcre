@@ -5,18 +5,18 @@ SANITIZER_FLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address,u
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
-    CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/cam_avf.m
-    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_avf.o
-    CAM_LDFLAGS = -framework AVFoundation -framework CoreVideo -framework CoreMedia -framework Foundation
+    CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/cam_avf.m src/extras/gui_mac.m
+    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_avf.o src/extras/gui_mac.o
+    CAM_LDFLAGS = -framework AVFoundation -framework CoreVideo -framework CoreMedia -framework Foundation -framework Cocoa
     OPEN_CMD = open
 else ifeq ($(UNAME_S),Linux)
-    CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/cam_v4l2.c
-    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_v4l2.o
+    CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/cam_v4l2.c src/extras/gui_stub.c
+    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_v4l2.o src/extras/gui_stub.c
     CAM_LDFLAGS =
     OPEN_CMD = xdg-open
 else
-    CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c
-    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o
+    CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/gui_stub.c
+    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/gui_stub.c
     CAM_LDFLAGS =
     OPEN_CMD = echo
 endif
@@ -53,7 +53,7 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_dummy gbdt_test hnsw_test
+.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test
 
 default: help
 
@@ -81,7 +81,7 @@ $(DYLIB): $(ALL_OBJS)
 src/extras/%.o: src/extras/%.c
 	$(CC) $(CFLAGS) -Isrc/extras -c $< -o $@
 
-src/extras/cam_avf.o: src/extras/cam_avf.m
+src/extras/%.o: src/extras/%.m
 	$(CC) $(CFLAGS) -Isrc/extras -fobjc-arc -c $< -o $@
 
 bin/test_amalgamated: tests/test_amalgamated.c $(AMALGAMATED_HEADER)
@@ -110,12 +110,19 @@ up_web_app:
 	@python3 -m http.server 8080 --directory web/
 
 webcam_test: bin/webcam_edge_filter
-	@echo "📷 Launching RCRE Live Camera Stream & Edge Filter (Press Ctrl+C to stop)..."
-	@bin/webcam_edge_filter --frames 200 --view
+	@bin/webcam_edge_filter
+
+webcam_test_gui: bin/webcam_edge_filter
+	@echo "📷 Launching RCRE Real-time Camera Stream with Native GUI Window..."
+	@bin/webcam_edge_filter --gui
+
+webcam_test_terminal: bin/webcam_edge_filter
+	@echo "📷 Launching RCRE Real-time Camera Stream in Terminal (ASCII/ANSI)..."
+	@bin/webcam_edge_filter --terminal --frames 200
 
 webcam_test_dummy: bin/webcam_edge_filter
-	@echo "📷 Launching RCRE Synthetic Test Camera Stream (Press Ctrl+C to stop)..."
-	@bin/webcam_edge_filter --dummy --frames 100 --view
+	@echo "📷 Launching RCRE Synthetic Test Camera Stream..."
+	@bin/webcam_edge_filter --dummy
 
 gbdt_test: bin/tabular_gbdt_predict
 	@bin/tabular_gbdt_predict
@@ -224,12 +231,14 @@ help:
 	@echo "  RCRE — Recep's Code Run Everywhere: Command Center             "
 	@echo "=================================================================="
 	@echo "Interactive Operations:"
-	@echo "  make up_web_app         Serve educational visualizers at http://localhost:8080"
-	@echo "  make up_docs            Serve documentation at http://localhost:8080/docs/"
-	@echo "  make webcam_test        Launch real-time webcam & edge filter preview"
-	@echo "  make webcam_test_dummy  Launch synthetic animated camera preview (headless)"
-	@echo "  make gbdt_test          Run 100k-sample GBDT inference benchmark"
-	@echo "  make hnsw_test          Run 64-D HNSW vector similarity search benchmark"
+	@echo "  make up_web_app            Serve educational visualizers at http://localhost:8080"
+	@echo "  make up_docs               Serve documentation at http://localhost:8080/docs/"
+	@echo "  make webcam_test           Interactive camera test (choose Terminal or GUI window)"
+	@echo "  make webcam_test_gui       Launch live webcam edge detection with Native GUI window"
+	@echo "  make webcam_test_terminal  Launch live webcam edge detection in Terminal (ASCII)"
+	@echo "  make webcam_test_dummy     Launch synthetic animated camera preview"
+	@echo "  make gbdt_test             Run 100k-sample GBDT inference benchmark"
+	@echo "  make hnsw_test             Run 64-D HNSW vector similarity search benchmark"
 	@echo ""
 	@echo "Build & Documentation Targets:"
 	@echo "  make all                Build static/shared libraries, dist header & examples"

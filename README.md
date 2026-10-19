@@ -128,8 +128,14 @@ make help
 # 🌐 Launch educational visualizers and in-browser playground at http://localhost:8080
 make up_web_app
 
-# 📷 Launch live webcam stream with real-time ASCII edge detection
+# 📷 Launch interactive webcam test (prompts for Terminal or Native GUI Window)
 make webcam_test
+
+# 🖥️ Launch live webcam edge detection directly with Native GUI Window (Side-by-side)
+make webcam_test_gui
+
+# 📟 Launch live webcam edge detection directly in Terminal (ANSI ASCII art)
+make webcam_test_terminal
 
 # 📷 Launch synthetic camera stream (ideal for headless SSH or CI)
 make webcam_test_dummy
