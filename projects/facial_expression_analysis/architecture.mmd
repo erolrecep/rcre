@@ -1,0 +1,52 @@
+flowchart TD
+    classDef input fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b;
+    classDef detect fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
+    classDef landmark fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#1b5e20;
+    classDef facs fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#e65100;
+    classDef emotion fill:#fce4ec,stroke:#c2185b,stroke-width:2px,color:#880e4f;
+
+    A["<b>Input Source</b><br/>Static Image / Live Webcam / Synthetic Archetype"]:::input
+
+    subgraph S1 ["1. Face Detection & Canonical Normalization"]
+        B["<b>Skin-Locus YCbCr Classifier</b><br/>Luma-Invariant Chrominance Gate"]:::detect
+        C["<b>Integral Image (SAT)</b><br/>O(1) Rectangular Density Query"]:::detect
+        D["<b>Multi-Scale Scanning Window</b><br/>Cheek vs Eye Band Contrast Ratio"]:::detect
+        E["<b>Greedy NMS Suppression</b><br/>IoU Threshold = 0.40"]:::detect
+        F["<b>Canonical Crop & Bilinear Resample</b><br/>128 x 128 x 3 RGB Tensor"]:::detect
+    end
+
+    subgraph S2 ["2. 13-Point Anthropometric Landmark Engine"]
+        G["<b>Rec.601 Luma + Gaussian Blur</b><br/>2D Spatial Filter (σ = 1.0)"]:::landmark
+        H["<b>Eye Center Dark-Valley Tracking</b><br/>Sub-pixel Pupil Localization"]:::landmark
+        I["<b>Scale Baseline Anchor</b><br/>Inter-Ocular Distance (IOD)"]:::landmark
+        J["<b>13 Anthropometric Facial Points</b><br/>Eyes, Brows, Nose Apex, Mouth Corners & Lips"]:::landmark
+    end
+
+    subgraph S3 ["3. FACS Biomechanical Action Unit (AU) Extractor"]
+        K["<b>Geometric FACS Ratios</b><br/>• Smile Curvature (AU12 Zygomaticus)<br/>• Mouth Aspect Ratio (MAR)<br/>• Brow Elevation (AU1+AU2 Frontalis)"]:::facs
+        L["<b>Texture & Wrinkle Analysis</b><br/>Sobel 3x3 Gradient Field Energy:<br/>• Glabella Energy (AU4 Corrugator)<br/>• Nasolabial Fold Energy"]:::facs
+        M["<b>16-D Normalized Feature Vector</b><br/>Scale- & Translation-Invariant"]:::facs
+    end
+
+    subgraph S4 ["4. Categorical Affective State Classifier"]
+        N["<b>Calibrated Affect Logit Engine</b><br/>Happy | Sad | Anxious | Panic | Angry | Neutral"]:::emotion
+        O["<b>Numerically Stable Softmax</b><br/>P(e) = exp(z_e - max(z)) / Σ exp(z_i - max(z))"]:::emotion
+        P["<b>HUD Output & CLI Diagnostics</b><br/>Dominant Expression, Confidence & FACS Metrics"]:::emotion
+    end
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+    I --> J
+    J --> K
+    F --> L
+    K --> M
+    L --> M
+    M --> N
+    N --> O
+    O --> P

@@ -53,7 +53,7 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test
+.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test project_lens_test project_lens_demo project_facex_test project_facex_demo
 
 default: help
 
@@ -154,6 +154,12 @@ project_lens_test: $(LIB)
 
 project_lens_demo: $(LIB)
 	@$(MAKE) -C projects/reverse_image_search demo
+
+project_facex_test: $(LIB)
+	@$(MAKE) -C projects/facial_expression_analysis test
+
+project_facex_demo: $(LIB)
+	@$(MAKE) -C projects/facial_expression_analysis demo
 
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
@@ -264,6 +270,10 @@ help:
 	@echo "  make webcam_test_dummy     Launch synthetic animated camera preview"
 	@echo "  make gbdt_test             Run 100k-sample GBDT inference benchmark"
 	@echo "  make hnsw_test             Run 64-D HNSW vector similarity search benchmark"
+	@echo "  make project_lens_test     Run Reverse Image Search (rcre-lens) test suite"
+	@echo "  make project_lens_demo     Run Reverse Image Search (rcre-lens) live demo"
+	@echo "  make project_facex_test    Run Facial Expression (rcre-facex) verification suite"
+	@echo "  make project_facex_demo    Run Facial Expression (rcre-facex) archetype demo"
 	@echo ""
 	@echo "Build & Documentation Targets:"
 	@echo "  make all                Build static/shared libraries, dist header & examples"
