@@ -2863,6 +2863,7 @@ RCRE_NODISCARD int rcre_ml_gbdt_predict(const RCRE_GBDTModel* model,
  * Graph-based Approximate Nearest Neighbors (ANN) algorithm.
  */
 
+#include <stdio.h>
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -3010,7 +3011,22 @@ RCRE_NODISCARD int rcre_hnsw_insert(RCRE_HNSWIndex* index, const float* vector, 
     /* 2. Connect at levels min(max_level, new_level) down to 0 */
     int top_connect_level = (index->max_level < new_level) ? index->max_level : new_level;
     for (int l = top_connect_level; l >= 0; --l) {
-        /* Simple greedy search at level l to find candidate neighbors */
+        /* Greedy search at level l to find local minimum before connecting */
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (size_t i = 0; i < index->nodes[curr_obj].num_neighbors[l]; ++i) {
+                size_t neighbor = index->nodes[curr_obj].neighbors[l][i];
+                float d = compute_distance(vector, index->nodes[neighbor].vector, index->dim, index->metric);
+                if (d < curr_dist) {
+                    curr_dist = d;
+                    curr_obj = neighbor;
+                    changed = true;
+                }
+            }
+        }
+
+        /* Gather candidate neighbors around curr_obj at level l */
         size_t candidates[128];
         float cand_dists[128];
         size_t num_candidates = 0;
@@ -3052,6 +3068,24 @@ RCRE_NODISCARD int rcre_hnsw_insert(RCRE_HNSWIndex* index, const float* vector, 
             /* Connect n -> new_idx */
             if (index->nodes[n].num_neighbors[l] < max_m) {
                 index->nodes[n].neighbors[l][index->nodes[n].num_neighbors[l]++] = new_idx;
+            } else {
+                /* When neighbor list is full, replace the farthest neighbor if new_idx is closer */
+                float d_new = compute_distance(index->nodes[n].vector, vector, index->dim, index->metric);
+                size_t worst_pos = 0;
+                float worst_d = compute_distance(index->nodes[n].vector, 
+                                                 index->nodes[index->nodes[n].neighbors[l][0]].vector, 
+                                                 index->dim, index->metric);
+                for (size_t j = 1; j < index->nodes[n].num_neighbors[l]; ++j) {
+                    size_t nb = index->nodes[n].neighbors[l][j];
+                    float d_nb = compute_distance(index->nodes[n].vector, index->nodes[nb].vector, index->dim, index->metric);
+                    if (d_nb > worst_d) {
+                        worst_d = d_nb;
+                        worst_pos = j;
+                    }
+                }
+                if (d_new < worst_d) {
+                    index->nodes[n].neighbors[l][worst_pos] = new_idx;
+                }
             }
         }
 
@@ -3097,59 +3131,106 @@ RCRE_NODISCARD int rcre_hnsw_search(const RCRE_HNSWIndex* index, const float* qu
         }
     }
 
-    /* 2. Beam search at level 0 */
-    size_t visited[512];
-    size_t num_visited = 0;
+    /* 2. Priority best-first beam search at level 0 */
+    size_t ef = (ef_search > k) ? ef_search : k;
+    if (ef < 32) ef = 32;
+    if (ef > 128) ef = 128;
 
-    HNSWDistPair candidates[512];
-    size_t num_cand = 0;
+    typedef struct {
+        size_t id;
+        float  dist;
+        bool   explored;
+    } CandidateItem;
 
-    candidates[num_cand++] = (HNSWDistPair){.id = curr_obj, .dist = curr_dist};
-    visited[num_visited++] = curr_obj;
+    CandidateItem W[128];
+    size_t W_size = 0;
 
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        size_t current_candidates_count = num_cand;
-        for (size_t c = 0; c < current_candidates_count; ++c) {
-            size_t cand_id = candidates[c].id;
-            for (size_t i = 0; i < index->nodes[cand_id].num_neighbors[0]; ++i) {
-                size_t neighbor = index->nodes[cand_id].neighbors[0][i];
+    W[W_size++] = (CandidateItem){.id = curr_obj, .dist = curr_dist, .explored = false};
 
-                /* Check if already visited */
-                bool seen = false;
-                for (size_t v = 0; v < num_visited; ++v) {
-                    if (visited[v] == neighbor) { seen = true; break; }
+    /* Visited tracking: use stack bitset for up to 4096 elements, or dynamic fallback */
+    size_t max_nodes = index->num_elements;
+    size_t bitset_bytes = (max_nodes + 7) / 8;
+    uint8_t stack_visited[512];
+    uint8_t* visited = stack_visited;
+    bool allocated_visited = false;
+    if (bitset_bytes > sizeof(stack_visited)) {
+        if (scratch) {
+            visited = (uint8_t*)rcre_arena_alloc(scratch, bitset_bytes, 8);
+        } else {
+            visited = (uint8_t*)calloc(1, bitset_bytes);
+            allocated_visited = true;
+        }
+    }
+    if (visited) {
+        memset(visited, 0, bitset_bytes);
+        visited[curr_obj / 8] |= (uint8_t)(1 << (curr_obj % 8));
+    }
+
+    while (true) {
+        /* Find unexplored candidate with minimum distance */
+        int best_idx = -1;
+        float min_unexp_dist = 1e30f;
+        for (size_t i = 0; i < W_size; ++i) {
+            if (!W[i].explored && W[i].dist < min_unexp_dist) {
+                min_unexp_dist = W[i].dist;
+                best_idx = (int)i;
+            }
+        }
+
+        if (best_idx < 0) {
+            break; /* All candidates explored */
+        }
+
+        /* If closest unexplored is worse than the worst result in full capacity W, stop */
+        if (W_size >= ef && min_unexp_dist > W[W_size - 1].dist) {
+            break;
+        }
+
+        W[best_idx].explored = true;
+        size_t cand_id = W[best_idx].id;
+
+        /* Explore neighbors of cand_id at level 0 */
+        for (size_t i = 0; i < index->nodes[cand_id].num_neighbors[0]; ++i) {
+            size_t neighbor = index->nodes[cand_id].neighbors[0][i];
+
+            if (visited) {
+                if (visited[neighbor / 8] & (1 << (neighbor % 8))) {
+                    continue;
                 }
-                if (seen) continue;
+                visited[neighbor / 8] |= (uint8_t)(1 << (neighbor % 8));
+            }
 
-                if (num_visited < 512) visited[num_visited++] = neighbor;
+            float d = compute_distance(query, index->nodes[neighbor].vector, index->dim, index->metric);
 
-                float d = compute_distance(query, index->nodes[neighbor].vector, index->dim, index->metric);
-                if (num_cand < 512) {
-                    candidates[num_cand++] = (HNSWDistPair){.id = neighbor, .dist = d};
-                    changed = true;
+            if (d < W[W_size - 1].dist || W_size < ef) {
+                /* Insert (neighbor, d) in sorted order into W */
+                size_t insert_pos = 0;
+                while (insert_pos < W_size && W[insert_pos].dist <= d) {
+                    insert_pos++;
+                }
+
+                if (insert_pos < ef) {
+                    if (W_size < ef) {
+                        W_size++;
+                    }
+                    for (size_t m = W_size - 1; m > insert_pos; --m) {
+                        W[m] = W[m - 1];
+                    }
+                    W[insert_pos] = (CandidateItem){.id = neighbor, .dist = d, .explored = false};
                 }
             }
         }
     }
 
-    /* Sort all accumulated candidates by distance */
-    for (size_t a = 0; a < num_cand; ++a) {
-        for (size_t b = a + 1; b < num_cand; ++b) {
-            if (candidates[b].dist < candidates[a].dist) {
-                HNSWDistPair tmp = candidates[a];
-                candidates[a] = candidates[b];
-                candidates[b] = tmp;
-            }
-        }
+    if (allocated_visited && visited) {
+        free(visited);
     }
 
-    size_t results_to_return = (k < num_cand) ? k : num_cand;
+    size_t results_to_return = (k < W_size) ? k : W_size;
     for (size_t i = 0; i < results_to_return; ++i) {
-        out_ids[i] = index->nodes[candidates[i].id].id;
+        out_ids[i] = index->nodes[W[i].id].id;
         if (out_distances) {
-            out_distances[i] = candidates[i].dist;
+            out_distances[i] = W[i].dist;
         }
     }
 
