@@ -8,6 +8,7 @@
 
 #include "rcre.h"
 #include "extras/rcre_cam.h"
+#include "extras/rcre_window.h"
 #include "stb_image.h"
 #include "face_detector.h"
 #include "landmark_detector.h"
@@ -63,6 +64,87 @@ static const char* emotion_emblem(RCRE_EmotionType emotion) {
         case EMOTION_ANGRY:   return "😡 [ANGRY]";
         case EMOTION_NEUTRAL: return "😐 [NEUTRAL]";
         default:              return "❓ [UNKNOWN]";
+    }
+}
+
+/* ========================================================================= */
+/* Frame Overlay Rendering Helpers                                           */
+/* ========================================================================= */
+static void draw_rect(uint8_t* rgb, int w, int h, int rx, int ry, int rw, int rh, 
+                      uint8_t cr, uint8_t cg, uint8_t cb, int thickness) {
+    for (int t = 0; t < thickness; ++t) {
+        for (int x = rx; x < rx + rw; ++x) {
+            if (x < 0 || x >= w) continue;
+            int y_top = ry + t;
+            int y_bot = ry + rh - 1 - t;
+            if (y_top >= 0 && y_top < h) {
+                size_t idx = ((size_t)y_top * (size_t)w + (size_t)x) * 3;
+                rgb[idx + 0] = cr; rgb[idx + 1] = cg; rgb[idx + 2] = cb;
+            }
+            if (y_bot >= 0 && y_bot < h) {
+                size_t idx = ((size_t)y_bot * (size_t)w + (size_t)x) * 3;
+                rgb[idx + 0] = cr; rgb[idx + 1] = cg; rgb[idx + 2] = cb;
+            }
+        }
+        for (int y = ry; y < ry + rh; ++y) {
+            if (y < 0 || y >= h) continue;
+            int x_left = rx + t;
+            int x_right = rx + rw - 1 - t;
+            if (x_left >= 0 && x_left < w) {
+                size_t idx = ((size_t)y * (size_t)w + (size_t)x_left) * 3;
+                rgb[idx + 0] = cr; rgb[idx + 1] = cg; rgb[idx + 2] = cb;
+            }
+            if (x_right >= 0 && x_right < w) {
+                size_t idx = ((size_t)y * (size_t)w + (size_t)x_right) * 3;
+                rgb[idx + 0] = cr; rgb[idx + 1] = cg; rgb[idx + 2] = cb;
+            }
+        }
+    }
+}
+
+static void draw_disk(uint8_t* rgb, int w, int h, int cx, int cy, int radius, 
+                      uint8_t cr, uint8_t cg, uint8_t cb) {
+    for (int dy = -radius; dy <= radius; ++dy) {
+        int y = cy + dy;
+        if (y < 0 || y >= h) continue;
+        for (int dx = -radius; dx <= radius; ++dx) {
+            int x = cx + dx;
+            if (x < 0 || x >= w) continue;
+            if (dx * dx + dy * dy <= radius * radius) {
+                size_t idx = ((size_t)y * (size_t)w + (size_t)x) * 3;
+                rgb[idx + 0] = cr; rgb[idx + 1] = cg; rgb[idx + 2] = cb;
+            }
+        }
+    }
+}
+
+static void draw_hud_banner(uint8_t* rgb, int w, int h, RCRE_EmotionType emotion, float confidence) {
+    int banner_h = 24;
+    uint8_t r_tint = 60, g_tint = 60, b_tint = 60;
+    switch (emotion) {
+        case EMOTION_HAPPY:   r_tint = 20;  g_tint = 200; b_tint = 60;  break;
+        case EMOTION_SAD:     r_tint = 30;  g_tint = 120; b_tint = 240; break;
+        case EMOTION_ANXIOUS: r_tint = 240; g_tint = 150; b_tint = 20;  break;
+        case EMOTION_PANIC:   r_tint = 220; g_tint = 40;  b_tint = 180; break;
+        case EMOTION_ANGRY:   r_tint = 240; g_tint = 30;  b_tint = 30;  break;
+        default:              r_tint = 100; g_tint = 110; b_tint = 120; break;
+    }
+
+    for (int y = 0; y < banner_h && y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            size_t idx = ((size_t)y * (size_t)w + (size_t)x) * 3;
+            rgb[idx + 0] = (uint8_t)((rgb[idx + 0] + r_tint * 2) / 3);
+            rgb[idx + 1] = (uint8_t)((rgb[idx + 1] + g_tint * 2) / 3);
+            rgb[idx + 2] = (uint8_t)((rgb[idx + 2] + b_tint * 2) / 3);
+        }
+    }
+
+    int bar_len = (int)((float)w * confidence);
+    for (int y = banner_h - 3; y < banner_h && y < h; ++y) {
+        for (int x = 0; x < bar_len && x < w; ++x) {
+            size_t idx = ((size_t)y * (size_t)w + (size_t)x) * 3;
+            rgb[idx + 0] = 255; rgb[idx + 1] = 255; rgb[idx + 2] = 255;
+        }
     }
 }
 
@@ -184,7 +266,7 @@ static int cmd_analyze(const char* image_file) {
 /* ========================================================================= */
 /* Command: Live Interactive Webcam Feed                                     */
 /* ========================================================================= */
-static int cmd_live(void) {
+static int cmd_live(bool force_terminal) {
     printf("===================================================================\n");
     printf("📹 RCRE FaceX — Live Real-Time Camera Analysis\n");
     printf("===================================================================\n");
@@ -211,9 +293,22 @@ static int cmd_live(void) {
 
     printf("✓ Camera backend initialized: %s (%zux%zu)\n", 
            rcre_cam_backend_name(cam), cfg.width, cfg.height);
-    printf("⚡ Starting real-time expression detection loop (Press Ctrl+C to exit)...\n\n");
+
+    RCRE_Window* win = NULL;
+    if (!force_terminal && rcre_window_is_supported()) {
+        win = rcre_window_create("RCRE FaceX — Real-Time Facial Expression HUD", cfg.width, cfg.height);
+        if (win) {
+            printf("🖥️  Native GUI Preview Window Launched (%zux%zu)\n", cfg.width, cfg.height);
+            printf("   Controls: Press 'q' or ESC in GUI window to exit, or Ctrl+C in terminal.\n");
+        }
+    } else if (force_terminal) {
+        printf("📟 Terminal-only display mode active.\n");
+    }
+
+    printf("⚡ Starting real-time expression detection loop...\n\n");
 
     uint8_t canonical[RCRE_CANONICAL_FACE_SIZE * RCRE_CANONICAL_FACE_SIZE * 3];
+    uint8_t* gui_buf = (uint8_t*)rcre_arena_alloc(arena, cfg.width * cfg.height * 3, 64);
 
     size_t frame_shape[3] = {cfg.height, cfg.width, 3};
     int frame_num = 0;
@@ -228,6 +323,10 @@ static int cmd_live(void) {
         }
 
         const uint8_t* frame_buf = (const uint8_t*)frame_tensor.data;
+        if (gui_buf) {
+            memcpy(gui_buf, frame_buf, cfg.width * cfg.height * 3);
+        }
+
         double t0 = get_time_sec();
         RCRE_FaceBox faces[2];
         int num_faces = rcre_detect_faces(frame_buf, (int)cfg.width, (int)cfg.height, faces, 2, scratch);
@@ -244,6 +343,40 @@ static int cmd_live(void) {
             RCRE_ExpressionResult expr;
             (void)rcre_classify_expression(&au, &expr);
 
+            /* Render GUI overlays */
+            if (win && gui_buf) {
+                /* 1. Bounding box (Vibrant green, 2px border) */
+                draw_rect(gui_buf, (int)cfg.width, (int)cfg.height, 
+                          faces[0].x, faces[0].y, faces[0].width, faces[0].height, 
+                          0, 240, 140, 2);
+
+                /* 2. 13 Facial Landmarks (Pupils in Cyan, Brows in Gold, Lips in Magenta) */
+                for (int p = 0; p < RCRE_NUM_LANDMARKS; ++p) {
+                    int px = faces[0].x + (int)(lm.points[p].x * (float)faces[0].width / 128.0f);
+                    int py = faces[0].y + (int)(lm.points[p].y * (float)faces[0].height / 128.0f);
+                    uint8_t lr = 255, lg = 220, lb = 0;
+                    if (p <= LANDMARK_RIGHT_EYE_OUTER) { lr = 0; lg = 240; lb = 255; }
+                    else if (p >= LANDMARK_MOUTH_LEFT_CORNER) { lr = 255; lg = 60; lb = 140; }
+                    draw_disk(gui_buf, (int)cfg.width, (int)cfg.height, px, py, 2, lr, lg, lb);
+                }
+
+                /* 3. Top HUD Banner */
+                draw_hud_banner(gui_buf, (int)cfg.width, (int)cfg.height, expr.dominant_emotion, expr.confidence);
+
+                /* 4. Dynamic Window Title Bar */
+                if (frame_num % 10 == 0) {
+                    char win_title[256];
+                    snprintf(win_title, sizeof(win_title), 
+                             "RCRE FaceX | %s (%.1f%%) | Smile: %+.3f | MAR: %.3f | %.1f ms | 'q': Quit",
+                             emotion_emblem(expr.dominant_emotion),
+                             expr.confidence * 100.0f,
+                             au.smile_curvature,
+                             au.mouth_aspect_ratio,
+                             elapsed);
+                    rcre_window_set_title(win, win_title);
+                }
+            }
+
             printf("\r[Frame %05d] Face: [%dx%d] | %-16s | Conf: %5.1f%% | Smile: %+5.3f | MAR: %5.3f | %4.1f ms",
                    frame_num, faces[0].width, faces[0].height,
                    emotion_emblem(expr.dominant_emotion),
@@ -252,19 +385,34 @@ static int cmd_live(void) {
                    au.mouth_aspect_ratio,
                    elapsed);
         } else {
+            if (win && gui_buf && frame_num % 15 == 0) {
+                rcre_window_set_title(win, "RCRE FaceX | Scanning for Human Faces... | 'q': Quit");
+            }
             printf("\r[Frame %05d] Scanning for human faces... (No face in view)                         | %4.1f ms",
                    frame_num, elapsed);
         }
         fflush(stdout);
-        usleep(15000); /* ~60 FPS */
 
-        /* Break after 150 frames if running non-interactively */
-        if (!isatty(STDIN_FILENO) && frame_num >= 150) {
+        if (win && gui_buf) {
+            int win_res = rcre_window_update_rgb(win, gui_buf, cfg.width, cfg.height);
+            if (win_res == 0) {
+                printf("\n[GUI] Window close requested by user.\n");
+                break;
+            }
+        }
+
+        usleep(10000); /* ~60 FPS */
+
+        /* Break after 150 frames if running non-interactively without GUI */
+        if (!win && !isatty(STDIN_FILENO) && frame_num >= 150) {
             break;
         }
     }
     printf("\n");
 
+    if (win) {
+        rcre_window_destroy(win);
+    }
     rcre_cam_close(cam);
     rcre_arena_destroy(arena);
     rcre_arena_destroy(scratch);
@@ -440,7 +588,7 @@ static int cmd_demo(void) {
 static void print_usage(const char* prog) {
     printf("Usage:\n");
     printf("  %s analyze <image_file>       Detect faces, landmarks & classify emotion\n", prog);
-    printf("  %s live                       Launch live camera real-time analysis HUD\n", prog);
+    printf("  %s live [--terminal]          Launch live camera analysis (Native GUI screen by default)\n", prog);
     printf("  %s demo                       Run automated expression archetypes demo\n", prog);
     printf("\nSupported Image Formats: .jpg, .jpeg, .png, .bmp\n");
 }
@@ -462,7 +610,8 @@ int main(int argc, char** argv) {
         }
         return cmd_analyze(argv[2]);
     } else if (strcmp(command, "live") == 0) {
-        return cmd_live();
+        bool force_terminal = (argc >= 3 && strcmp(argv[2], "--terminal") == 0);
+        return cmd_live(force_terminal);
     } else if (strcmp(command, "demo") == 0) {
         return cmd_demo();
     } else if (strcmp(command, "--help") == 0 || strcmp(command, "-h") == 0) {

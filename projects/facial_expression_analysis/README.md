@@ -256,25 +256,35 @@ Analyzes any portrait, group photo, or selfie. Detects all faces, computes bound
 
 ---
 
-### Command 2: Live Interactive Webcam Analysis
-Streams live video directly from your webcam (macOS AVFoundation or Linux Video4Linux2) at **60+ FPS**, displaying a live, single-line dynamic HUD in your terminal:
+### Command 2: Live Interactive Webcam Analysis (Native GUI Window)
+Streams live video directly from your webcam (macOS AVFoundation or Linux Video4Linux2) at **60+ FPS**, rendering a **hardware-accelerated Native GUI Window** with real-time computer vision overlays:
+- **Face Bounding Box**: Vibrant green/cyan 2px border tracking your face in real time.
+- **13 Anthropometric Facial Landmarks**: Color-coded tracking dots on eye centers/pupils (Cyan), eyebrow arches (Gold), and mouth/lip contours (Magenta).
+- **Affective State Banner**: Top-of-screen color-coded emotion banner with a real-time confidence indicator bar.
+- **Dynamic Telemetry Title Bar**: Real-time emotion attribution, confidence percentage, smile curvature, MAR, and millisecond frame latency.
 
 ```bash
+# Launch with Native GUI Window (Default):
 ./apps/rcre/projects/facial_expression_analysis/bin/rcre-facex live
+
+# Launch in Terminal-only ASCII mode (for headless or remote SSH servers):
+./apps/rcre/projects/facial_expression_analysis/bin/rcre-facex live --terminal
 ```
 
-**Live Interactive HUD (Updates at 60 Hz)**:
+**Live Console HUD (Updates at 60 Hz)**:
 ```text
 ===================================================================
 📹 RCRE FaceX — Live Real-Time Camera Analysis
 ===================================================================
 ✓ Camera backend initialized: AVFoundation (640x480)
-⚡ Starting real-time expression detection loop (Press Ctrl+C to exit)...
+🖥️  Native GUI Preview Window Launched (640x480)
+   Controls: Press 'q' or ESC in GUI window to exit, or Ctrl+C in terminal.
+⚡ Starting real-time expression detection loop...
 
 [Frame 00342] Face: [180x225] | 😊 [HAPPY]       | Conf:  96.4% | Smile: +0.210 | MAR:  0.245 |  2.4 ms
 ```
 
-> **Note on Headless / CI Execution**: When invoked non-interactively (e.g. piped in CI without a TTY), the live loop automatically processes 150 frames and terminates gracefully.
+> **Window Controls**: Press **`q`** or **`ESC`** directly inside the native GUI window to exit, or use `Ctrl+C` in your terminal. When invoked non-interactively in headless CI environments, the process automatically tests 150 frames and exits cleanly.
 
 ---
 
