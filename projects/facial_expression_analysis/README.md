@@ -111,7 +111,7 @@ $$\text{Sum}(x, y, w, h) = \mathcal{I}(x+w, y+h) - \mathcal{I}(x+w, y) - \mathca
 ### 2. Anthropometric Scale Normalization (Inter-Ocular Distance)
 To guarantee scale invariance across camera focal lengths and subject distances, all physical spatial dimensions are normalized against the **Inter-Ocular Distance ($\text{IOD}$)**:
 
-$$\text{IOD} = \sqrt{(x_{\text{right\_eye}} - x_{\text{left\_eye}})^2 + (y_{\text{right\_eye}} - y_{\text{left\_eye}})^2}$$
+$$\text{IOD} = \sqrt{(x_{\text{right}} - x_{\text{left}})^2 + (y_{\text{right}} - y_{\text{left}})^2}$$
 
 The 13 localized anthropometric landmarks:
 1. `LANDMARK_LEFT_EYE_CENTER`
@@ -134,11 +134,11 @@ The 13 localized anthropometric landmarks:
 
 | Action Unit | Biomechanical Muscle | Mathematical Metric | Affective Meaning |
 | :--- | :--- | :--- | :--- |
-| **AU12** | *Zygomaticus Major* | $\text{Smile Curvature} = \frac{y_{\text{mouth\_center}} - \bar{y}_{\text{corners}}}{\text{IOD}}$ | Lip corners pulled upward ($>0$) vs depressed ($<0$) |
-| **AU26/27** | *Masseter / Jaw Drop* | $\text{MAR} = \frac{\|y_{\text{lower\_lip}} - y_{\text{upper\_lip}}\|}{\|x_{\text{mouth\_right}} - x_{\text{mouth\_left}}\|}$ | Mouth Aspect Ratio: gaping jaw drop during panic/surprise |
-| **AU1 + AU2** | *Frontalis* | $\text{Brow Elevation} = \frac{y_{\text{eye\_center}} - y_{\text{brow\_arch}}}{\text{IOD}}$ | Brow elevation during fear, shock, anxiety ($>0.33$) |
-| **AU4** | *Corrugator Supercilii* | $\text{Glabella Energy} = \frac{1}{|\Omega|} \sum_{\Omega} \sqrt{G_x^2 + G_y^2}$ | Vertical brow furrow wrinkle density between eyebrows |
-| **Nasolabial** | *Levator Labii Superioris* | $\text{Nasolabial Energy} = \frac{1}{|\mathcal{N}|} \sum_{\mathcal{N}} \sqrt{G_x^2 + G_y^2}$ | Smile crease and fold intensity along cheek boundary |
+| **AU12** | *Zygomaticus Major* | $\text{Smile Curvature} = \frac{y_{\text{center}} - \bar{y}_{\text{corner}}}{\text{IOD}}$ | Lip corners pulled upward ($>0$) vs depressed ($<0$) |
+| **AU26/27** | *Masseter / Jaw Drop* | $\text{MAR} = \frac{y_{\text{lower}} - y_{\text{upper}}}{x_{\text{right}} - x_{\text{left}}}$ | Mouth Aspect Ratio: gaping jaw drop during panic/surprise |
+| **AU1 + AU2** | *Frontalis* | $\text{Brow Elevation} = \frac{y_{\text{eye}} - y_{\text{brow}}}{\text{IOD}}$ | Brow elevation during fear, shock, anxiety ($>0.33$) |
+| **AU4** | *Corrugator Supercilii* | $\text{Glabella Energy} = \frac{1}{N_{\Omega}} \sum_{\Omega} \sqrt{G_x^2 + G_y^2}$ | Vertical brow furrow wrinkle density between eyebrows |
+| **Nasolabial** | *Levator Labii Superioris* | $\text{Nasolabial Energy} = \frac{1}{N_{\mathcal{N}}} \sum_{\mathcal{N}} \sqrt{G_x^2 + G_y^2}$ | Smile crease and fold intensity along cheek boundary |
 
 ---
 
