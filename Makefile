@@ -149,6 +149,9 @@ gbdt_test: bin/tabular_gbdt_predict
 hnsw_test: bin/hnsw_vector_search
 	@bin/hnsw_vector_search
 
+project_lens_test: $(LIB)
+	@$(MAKE) -C projects/reverse_image_search test
+
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@
