@@ -21,24 +21,33 @@ Unlike modern deep learning retrieval pipelines that require gigabytes of Python
 
 ## 📐 Architecture Pipeline
 
+<p align="center">
+  <img src="architecture_pipeline.png" alt="RCRE Lens Architecture Pipeline" width="460" />
+</p>
+
+<details>
+<summary><b>View Mermaid Diagram Source</b></summary>
+
 ```mermaid
 flowchart TD
-    A["Raw Image (.jpg, .png, .bmp)"] --> B["Canonical Resampler\n(Bilinear 256x256x3)"]
-    B --> C["Color Channels (RGB)\n[256x256x3]"]
-    B --> D["Rec.601 Grayscale\n[256x256]"]
-    D --> E["Gaussian Blur (σ=1.0)"]
-    E --> F["Sobel 3x3 Gradient\n(dx, dy -> Magnitude)"]
+    A["Raw Input Image<br/>JPG / PNG / BMP"] --> B["Bilinear Resampler<br/>256 x 256 x 3 (RGB Tensor)"]
+    B --> C["Color Stream<br/>Channel Splitting (R, G, B)"]
+    B --> D["Rec.601 Grayscale<br/>Integer Quantization"]
+    D --> E["Gaussian Blur<br/>2D Kernel (σ = 1.0)"]
+    E --> F["Sobel 3x3 Operator<br/>Gradient Energy (dx, dy)"]
     
-    C --> G["4x4 Spatial Pyramid Partitioning\n(16 Spatial Cells)"]
+    C --> G["4x4 Spatial Grid Partitioning<br/>16 Independent Receptive Cells"]
     F --> G
     
-    G --> H["Cell Descriptors:\n• Mean R\n• Mean G\n• Mean B\n• Mean Sobel Edge Energy"]
-    H --> I["L2 Normalization\n(||v||₂ = 1.0)"]
+    G --> H["Cell Feature Aggregation<br/>• Mean Red, Green, Blue<br/>• Mean Sobel Texture Energy"]
+    H --> I["L2 Normalization<br/>Unit Sphere: ||v|| = 1.0"]
     I --> J["64-D Visual Feature Vector"]
     
-    J --> K["HNSW Proximity Graph\n(M=16, M₀=32, ef=64)"]
-    K --> L["Binary Persistence\n(.rcre_idx File)"]
+    J --> K["HNSW Proximity Graph<br/>Multi-layer skip-graph (M=16, M₀=32)"]
+    K --> L["Binary Disk Persistence<br/>Self-Contained .rcre_idx Format"]
 ```
+
+</details>
 
 ---
 

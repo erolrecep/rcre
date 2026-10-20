@@ -1,0 +1,43 @@
+flowchart TD
+    classDef input fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b;
+    classDef proc fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
+    classDef feature fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#1b5e20;
+    classDef index fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#e65100;
+
+    A["<b>Raw Input Image</b><br/>JPG / PNG / BMP"]:::input
+    
+    subgraph Preproc ["1. Canonical Preprocessing"]
+        B["<b>Bilinear Resampler</b><br/>256 x 256 x 3 (RGB Tensor)"]:::proc
+    end
+
+    subgraph DualStream ["2. Dual-Stream Visual Analysis"]
+        C["<b>Color Stream</b><br/>Channel Splitting (R, G, B)"]:::proc
+        D["<b>Rec.601 Grayscale</b><br/>Integer Quantization"]:::proc
+        E["<b>Gaussian Blur</b><br/>2D Kernel (σ = 1.0)"]:::proc
+        F["<b>Sobel 3x3 Operator</b><br/>Gradient Energy (dx, dy)"]:::proc
+    end
+
+    subgraph Spatial ["3. Spatial Pyramid Pooling"]
+        G["<b>4x4 Spatial Grid Partitioning</b><br/>16 Independent Receptive Cells"]:::feature
+        H["<b>Cell Feature Aggregation</b><br/>• Mean Red, Green, Blue<br/>• Mean Sobel Texture Energy"]:::feature
+        I["<b>L2 Normalization</b><br/>Unit Sphere: ||v|| = 1.0"]:::feature
+        J["<b>64-D Visual Feature Vector</b>"]:::feature
+    end
+
+    subgraph Indexing ["4. Proximity Retrieval & Storage"]
+        K["<b>HNSW Proximity Graph</b><br/>Multi-layer skip-graph (M=16, M₀=32)"]:::index
+        L["<b>Binary Disk Persistence</b><br/>Self-Contained .rcre_idx Format"]:::index
+    end
+
+    A --> B
+    B --> C
+    B --> D
+    D --> E
+    E --> F
+    C --> G
+    F --> G
+    G --> H
+    H --> I
+    I --> J
+    J --> K
+    K --> L
