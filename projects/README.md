@@ -26,6 +26,12 @@ A zero-dependency CLI application to index folders of photos and search visually
 
 ### Quick Start
 ```bash
-# Run the Phase 1 feature extractor verification suite:
+# Run the complete test suite (extractor + serializer + HNSW invariants):
 make project_lens_test
+
+# Run the automated end-to-end gallery demo:
+make project_lens_demo
 ```
+
+For complete CLI documentation, architecture diagrams, and binary file specifications, see [`projects/reverse_image_search/README.md`](reverse_image_search/README.md).
+
