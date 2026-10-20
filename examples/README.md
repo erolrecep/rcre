@@ -207,7 +207,9 @@ In modern physical silicon, chasing heap-allocated pointers across hundreds of t
 **The RCRE Solution: Flat-Array Cache-Aligned Memory Layout**:
 * All trees and branch nodes are serialized into a single contiguous, 64-byte cache-line aligned array (`RCRE_TreeNode`).
 * Tree traversal is converted into direct index arithmetic:
-  $$\text{child\_idx} = (\text{feature}[i] \le \text{threshold}) \; ? \; \text{left} : \text{right}$$
+  ```c
+  child_idx = (feature[i] <= threshold) ? node.left_child : node.right_child;
+  ```
 * The entire 100-tree ensemble fits completely within the CPU's high-speed **L1/L2 cache**, enabling true sub-microsecond throughput.
 
 ### 💼 Real-World Use Cases
