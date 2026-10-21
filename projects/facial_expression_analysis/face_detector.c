@@ -13,20 +13,20 @@
 #include <string.h>
 #include <math.h>
 
-#define MAX_RAW_PROPOSALS 512
+#define MAX_RAW_PROPOSALS 4096
+#define MAX_CLUSTERS 64
 
-/* Fast skin locus classification in YCbCr / RGB space */
+/* Fast, illumination-robust skin locus classification with hemoglobin chromophore separation */
 static inline bool is_skin_pixel(uint8_t r, uint8_t g, uint8_t b) {
-    /* Basic RGB bounding rule */
-    if (r <= g || g <= b || (r - g) < 15 || r < 60) {
-        return false;
-    }
+    int y_lum = (77 * (int)r + 150 * (int)g + 29 * (int)b) >> 8;
+    int cb = ((-43 * (int)r - 85 * (int)g + 128 * (int)b) >> 8) + 128;
+    int cr = ((128 * (int)r - 107 * (int)g - 21 * (int)b) >> 8) + 128;
 
-    /* Standard YCbCr transform and locus */
-    float cb = -0.168736f * (float)r - 0.331264f * (float)g + 0.5f * (float)b + 128.0f;
-    float cr =  0.5f * (float)r - 0.418688f * (float)g - 0.081312f * (float)b + 128.0f;
-
-    return (cb >= 77.0f && cb <= 127.0f && cr >= 133.0f && cr <= 173.0f);
+    return (cb >= 75 && cb <= 145 && 
+            cr >= 120 && cr <= 180 && 
+            y_lum >= 25 && y_lum <= 245 && 
+            ((int)r - (int)b >= 12) && 
+            ((int)r - (int)g >= 6));
 }
 
 /* Intersection-over-Union (IoU) calculation */
@@ -50,40 +50,16 @@ static float compute_iou(const RCRE_FaceBox* a, const RCRE_FaceBox* b) {
     return union_area > 0.0f ? (inter_area / union_area) : 0.0f;
 }
 
-/* Non-Maximum Suppression (NMS) */
-static size_t apply_nms(RCRE_FaceBox* proposals, size_t num_proposals, float iou_threshold, 
-                        RCRE_FaceBox* out_faces, size_t max_faces) {
-    /* Sort proposals descending by confidence using selection sort */
-    for (size_t i = 0; i < num_proposals; ++i) {
-        for (size_t j = i + 1; j < num_proposals; ++j) {
-            if (proposals[j].confidence > proposals[i].confidence) {
-                RCRE_FaceBox tmp = proposals[i];
-                proposals[i] = proposals[j];
-                proposals[j] = tmp;
-            }
-        }
-    }
+typedef struct {
+    int x, y, width, height;
+    float score;
+} RawProposal;
 
-    bool suppressed[MAX_RAW_PROPOSALS];
-    memset(suppressed, 0, sizeof(suppressed));
-
-    size_t count = 0;
-    for (size_t i = 0; i < num_proposals && count < max_faces; ++i) {
-        if (suppressed[i]) continue;
-
-        out_faces[count++] = proposals[i];
-
-        for (size_t j = i + 1; j < num_proposals; ++j) {
-            if (!suppressed[j]) {
-                if (compute_iou(&proposals[i], &proposals[j]) > iou_threshold) {
-                    suppressed[j] = true;
-                }
-            }
-        }
-    }
-
-    return count;
-}
+typedef struct {
+    int x, y, width, height;
+    float total_score;
+    int count;
+} FaceCluster;
 
 RCRE_NODISCARD int rcre_detect_faces(const uint8_t* rgb, 
                                      int width, int height, 
@@ -96,108 +72,338 @@ RCRE_NODISCARD int rcre_detect_faces(const uint8_t* rgb,
 
     size_t saved_offset = scratch_arena->offset;
 
-    /* 1. Build Integral Image of Skin Mask (int32 SAT) */
     size_t sat_stride = (size_t)(width + 1);
     size_t sat_elements = sat_stride * (size_t)(height + 1);
-    int32_t* sat = (int32_t*)rcre_arena_alloc(scratch_arena, sat_elements * sizeof(int32_t), 64);
-    if (!sat) {
+
+    /* 1. Build Integral Images: Luminance, Squared Luminance (for variance), and Skin SAT */
+    uint32_t* sat_lum = (uint32_t*)rcre_arena_alloc(scratch_arena, sat_elements * sizeof(uint32_t), 64);
+    uint64_t* sat_lum_sq = (uint64_t*)rcre_arena_alloc(scratch_arena, sat_elements * sizeof(uint64_t), 64);
+    int32_t*  sat_skin = (int32_t*)rcre_arena_alloc(scratch_arena, sat_elements * sizeof(int32_t), 64);
+
+    if (!sat_lum || !sat_lum_sq || !sat_skin) {
         scratch_arena->offset = saved_offset;
         return RCRE_ERR_OUT_OF_MEMORY;
     }
-    memset(sat, 0, sat_elements * sizeof(int32_t));
+
+    memset(sat_lum, 0, sat_elements * sizeof(uint32_t));
+    memset(sat_lum_sq, 0, sat_elements * sizeof(uint64_t));
+    memset(sat_skin, 0, sat_elements * sizeof(int32_t));
 
     for (int y = 0; y < height; ++y) {
-        int32_t row_sum = 0;
+        uint32_t row_lum = 0;
+        uint64_t row_lum_sq = 0;
+        int32_t  row_skin = 0;
+
         for (int x = 0; x < width; ++x) {
             size_t idx = ((size_t)y * (size_t)width + (size_t)x) * 3;
             uint8_t r = rgb[idx + 0];
             uint8_t g = rgb[idx + 1];
             uint8_t b = rgb[idx + 2];
 
+            uint32_t y_val = (uint32_t)((77 * (int)r + 150 * (int)g + 29 * (int)b) >> 8);
             bool skin = is_skin_pixel(r, g, b);
 
-            row_sum += skin ? 1 : 0;
-            sat[(y + 1) * sat_stride + (x + 1)] = sat[y * sat_stride + (x + 1)] + row_sum;
+            row_lum += y_val;
+            row_lum_sq += (uint64_t)y_val * (uint64_t)y_val;
+            row_skin += skin ? 1 : 0;
+
+            size_t curr_idx = (size_t)(y + 1) * sat_stride + (size_t)(x + 1);
+            size_t prev_idx = (size_t)y * sat_stride + (size_t)(x + 1);
+
+            sat_lum[curr_idx] = sat_lum[prev_idx] + row_lum;
+            sat_lum_sq[curr_idx] = sat_lum_sq[prev_idx] + row_lum_sq;
+            sat_skin[curr_idx] = sat_skin[prev_idx] + row_skin;
         }
     }
 
-    /* Helper lambda to query sum inside rectangle (x, y, w, h) in O(1) */
-    #define QUERY_SAT(rx, ry, rw, rh) \
-        (sat[((ry) + (rh)) * sat_stride + ((rx) + (rw))] - \
-         sat[(ry) * sat_stride + ((rx) + (rw))] - \
-         sat[((ry) + (rh)) * sat_stride + (rx)] + \
-         sat[(ry) * sat_stride + (rx)])
+    /* Fast O(1) rectangle query macros */
+    #define QUERY_LUM(rx, ry, rw, rh) \
+        (float)(sat_lum[((ry) + (rh)) * sat_stride + ((rx) + (rw))] - \
+                sat_lum[(ry) * sat_stride + ((rx) + (rw))] - \
+                sat_lum[((ry) + (rh)) * sat_stride + (rx)] + \
+                sat_lum[(ry) * sat_stride + (rx)])
 
-    /* 2. Multi-Scale Scanning Window */
-    RCRE_FaceBox raw_proposals[MAX_RAW_PROPOSALS];
+    #define QUERY_LUM_SQ(rx, ry, rw, rh) \
+        (double)(sat_lum_sq[((ry) + (rh)) * sat_stride + ((rx) + (rw))] - \
+                 sat_lum_sq[(ry) * sat_stride + ((rx) + (rw))] - \
+                 sat_lum_sq[((ry) + (rh)) * sat_stride + (rx)] + \
+                 sat_lum_sq[(ry) * sat_stride + (rx)])
+
+    #define QUERY_SKIN(rx, ry, rw, rh) \
+        (sat_skin[((ry) + (rh)) * sat_stride + ((rx) + (rw))] - \
+         sat_skin[(ry) * sat_stride + ((rx) + (rw))] - \
+         sat_skin[((ry) + (rh)) * sat_stride + (rx)] + \
+         sat_skin[(ry) * sat_stride + (rx)])
+
+    /* 2. Coarse-to-Fine Multi-Scale Cascaded Scanning Window */
+    RawProposal proposals[MAX_RAW_PROPOSALS];
     size_t num_proposals = 0;
 
-    int min_face_w = width < height ? (width / 8) : (height / 8);
-    if (min_face_w < 32) min_face_w = 32;
-    int max_face_w = width < height ? width : height;
+    int min_face_w = 44;
+    int max_face_w = (int)(height * 0.70f);
+    if (max_face_w > width) max_face_w = width;
+    if (min_face_w > max_face_w) min_face_w = max_face_w;
 
-    /* Search scales with 1.25x scale factor */
-    for (int win_w = min_face_w; win_w <= max_face_w && num_proposals < MAX_RAW_PROPOSALS; win_w = (int)(win_w * 1.25f)) {
-        int win_h = (int)(win_w * 1.25f); /* Anthropometric face ratio 1 : 1.25 */
-        if (win_h > height || win_w > width) break;
+    /* Scales from min to max with 1.15x geometric progression */
+    int scales[32];
+    int num_scales = 0;
+    for (int s = min_face_w; s <= max_face_w && num_scales < 32; s = (int)(s * 1.15f)) {
+        scales[num_scales++] = s;
+    }
 
-        int stride_x = win_w / 4 > 8 ? win_w / 4 : 8;
-        int stride_y = win_h / 4 > 8 ? win_h / 4 : 8;
+    const float aspect_ratios[2] = { 1.15f, 1.0f };
 
-        for (int y = 0; y + win_h <= height && num_proposals < MAX_RAW_PROPOSALS; y += stride_y) {
-            for (int x = 0; x + win_w <= width && num_proposals < MAX_RAW_PROPOSALS; x += stride_x) {
-                int total_pixels = win_w * win_h;
-                int skin_in_win = QUERY_SAT(x, y, win_w, win_h);
-                float skin_density = (float)skin_in_win / (float)total_pixels;
+    for (int s_idx = num_scales - 1; s_idx >= 0 && num_proposals < MAX_RAW_PROPOSALS; --s_idx) {
+        int win_w = scales[s_idx];
+        for (int a_idx = 0; a_idx < 2 && num_proposals < MAX_RAW_PROPOSALS; ++a_idx) {
+            int win_h = (int)(win_w * aspect_ratios[a_idx]);
+            if (win_h > height || win_w > width) continue;
 
-                /* Human faces typically exhibit 35% to 85% skin locus coverage */
-                if (skin_density >= 0.30f && skin_density <= 0.88f) {
-                    /* Anthropometric test: Eye band (top 20%-45%) vs Cheek band (45%-70%) */
-                    int eye_y = y + (int)(win_h * 0.20f);
+            int stride_x = win_w / 10 > 5 ? win_w / 10 : 5;
+            int stride_y = win_h / 10 > 5 ? win_h / 10 : 5;
+
+            int max_y = height - win_h - 10;
+            if (max_y > (int)(height * 0.72f)) max_y = (int)(height * 0.72f);
+
+            for (int y = 10; y <= max_y && num_proposals < MAX_RAW_PROPOSALS; y += stride_y) {
+                for (int x = 10; x + win_w <= width - 10 && num_proposals < MAX_RAW_PROPOSALS; x += stride_x) {
+                    float tot_pix = (float)(win_w * win_h);
+
+                    /* Stage 1: Illumination-Invariant Texture Filter */
+                    float sum_lum = QUERY_LUM(x, y, win_w, win_h);
+                    float mean_lum = sum_lum / tot_pix;
+                    if (mean_lum < 25.0f) continue;
+
+                    double sum_sq = QUERY_LUM_SQ(x, y, win_w, win_h);
+                    float variance = (float)((sum_sq / (double)tot_pix) - ((double)mean_lum * (double)mean_lum));
+                    if ((variance / (mean_lum * mean_lum)) < 0.035f) {
+                        continue;
+                    }
+
+                    /* Stage 2: Skin Probability Filter */
+                    int skin_count = QUERY_SKIN(x, y, win_w, win_h);
+                    float skin_ratio = (float)skin_count / tot_pix;
+                    if (skin_ratio < 0.38f) {
+                        continue;
+                    }
+
+                    /* Upper & Lower Skin Symmetry */
+                    int half_h = win_h / 2;
+                    float upper_skin = (float)QUERY_SKIN(x, y, win_w, half_h) / (float)(win_w * half_h);
+                    float lower_skin = (float)QUERY_SKIN(x, y + half_h, win_w, win_h - half_h) / (float)(win_w * (win_h - half_h));
+                    if (upper_skin < 0.28f || lower_skin < 0.28f) {
+                        continue;
+                    }
+
+                    /* Stage 3: Anthropometric Facial Bio-Geometry */
+                    int fh_h = (int)(win_h * 0.20f);
+                    int eye_y = y + fh_h;
                     int eye_h = (int)(win_h * 0.25f);
-                    int cheek_y = y + (int)(win_h * 0.45f);
+                    if (eye_h < 4) eye_h = 4;
+
+                    int col_w = win_w / 5;
+                    if (col_w < 4) col_w = 4;
+                    float area_col = (float)(col_w * eye_h);
+
+                    int cheek_y = eye_y + eye_h;
                     int cheek_h = (int)(win_h * 0.25f);
+                    if (cheek_h < 4) cheek_h = 4;
 
-                    int eye_skin = QUERY_SAT(x, eye_y, win_w, eye_h);
-                    int cheek_skin = QUERY_SAT(x, cheek_y, win_w, cheek_h);
+                    /* 3 columns: Left Eye (c1), Nasal Bridge (c2), Right Eye (c3) */
+                    float c1 = QUERY_LUM(x + col_w, eye_y, col_w, eye_h) / area_col;
+                    float c2 = QUERY_LUM(x + 2 * col_w, eye_y, col_w, eye_h) / area_col;
+                    float c3 = QUERY_LUM(x + 3 * col_w, eye_y, col_w, eye_h) / area_col;
 
-                    float eye_density = (float)eye_skin / (float)(win_w * eye_h);
-                    float cheek_density = (float)cheek_skin / (float)(win_w * cheek_h);
+                    float d1 = (c2 - c1) / mean_lum;
+                    float d2 = (c2 - c3) / mean_lum;
+                    float rel_bridge = d1 + d2;
+                    if (rel_bridge < 0.05f) continue;
+                    if (fmaxf(d1, d2) < 0.03f) continue;
+                    if (fabsf(c1 - c3) / mean_lum > 0.45f) continue;
 
-                    /* Cheeks have higher unbroken skin density than eye sockets/eyebrows */
-                    float confidence = skin_density * 0.6f + (cheek_density >= eye_density ? 0.4f : 0.1f);
+                    /* Forehead & Cheek Vertical Valley around Eye Band */
+                    float eye_lum = (c1 + c2 + c3) / 3.0f;
+                    float fh_lum = QUERY_LUM(x + col_w, y, 3 * col_w, fh_h) / (float)(3 * col_w * fh_h);
+                    float cheek_lum = QUERY_LUM(x + col_w, cheek_y, 3 * col_w, cheek_h) / (float)(3 * col_w * cheek_h);
 
-                    raw_proposals[num_proposals++] = (RCRE_FaceBox){
+                    float v_fh = (fh_lum - eye_lum) / mean_lum;
+                    float v_cheek = (cheek_lum - eye_lum) / mean_lum;
+                    if (v_cheek < -0.15f) continue;
+
+                    float score = (rel_bridge * 2.0f + v_fh + v_cheek + skin_ratio) * 100.0f;
+
+                    proposals[num_proposals++] = (RawProposal){
                         .x = x,
                         .y = y,
                         .width = win_w,
                         .height = win_h,
-                        .confidence = confidence
+                        .score = score
                     };
                 }
             }
         }
     }
 
-    /* Fallback: if skin segmentation was too sparse (e.g. grayscale or extreme color tint),
-       generate a center-crop canonical candidate proposal */
+    #undef QUERY_LUM
+    #undef QUERY_LUM_SQ
+    #undef QUERY_SKIN
+
     if (num_proposals == 0) {
-        int w = width < height ? (int)(width * 0.65f) : (int)(height * 0.65f);
-        int h = (int)(w * 1.25f);
-        if (h > height) h = height;
-        raw_proposals[num_proposals++] = (RCRE_FaceBox){
-            .x = (width - w) / 2,
-            .y = (height - h) / 3, /* Faces are typically in upper center */
-            .width = w,
-            .height = h,
-            .confidence = 0.50f
+        scratch_arena->offset = saved_offset;
+        return 0;
+    }
+
+    /* 3. Pre-Clustering Sort: prioritize high-confidence, large face windows */
+    for (size_t i = 0; i < num_proposals; ++i) {
+        for (size_t j = i + 1; j < num_proposals; ++j) {
+            float rank_i = proposals[i].score * sqrtf((float)(proposals[i].width * proposals[i].height));
+            float rank_j = proposals[j].score * sqrtf((float)(proposals[j].width * proposals[j].height));
+            if (rank_j > rank_i) {
+                RawProposal tmp = proposals[i];
+                proposals[i] = proposals[j];
+                proposals[j] = tmp;
+            }
+        }
+    }
+
+    /* 4. Density Clustering with Weighted Centroid Fusion */
+    typedef struct {
+        int x, y, width, height;
+        float total_score;
+        float mass;
+        int count;
+    } ResolvedCluster;
+
+    ResolvedCluster clusters[MAX_CLUSTERS];
+    size_t num_clusters = 0;
+
+    bool* assigned = (bool*)rcre_arena_alloc(scratch_arena, num_proposals * sizeof(bool), 16);
+    if (!assigned) {
+        scratch_arena->offset = saved_offset;
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(assigned, 0, num_proposals * sizeof(bool));
+
+    for (size_t i = 0; i < num_proposals && num_clusters < MAX_CLUSTERS; ++i) {
+        if (assigned[i]) continue;
+        assigned[i] = true;
+
+        RCRE_FaceBox anchor_box = {
+            .x = proposals[i].x,
+            .y = proposals[i].y,
+            .width = proposals[i].width,
+            .height = proposals[i].height,
+            .confidence = proposals[i].score
+        };
+
+        /* Anchor proposal gets 2x weight to anchor box stability */
+        float sum_x = (float)proposals[i].x * proposals[i].score * 2.0f;
+        float sum_y = (float)proposals[i].y * proposals[i].score * 2.0f;
+        float sum_w = (float)proposals[i].width * proposals[i].score * 2.0f;
+        float sum_h = (float)proposals[i].height * proposals[i].score * 2.0f;
+        float sum_s = proposals[i].score * 2.0f;
+        int votes = 1;
+
+        for (size_t j = i + 1; j < num_proposals; ++j) {
+            if (assigned[j]) continue;
+            RCRE_FaceBox cand_box = {
+                .x = proposals[j].x,
+                .y = proposals[j].y,
+                .width = proposals[j].width,
+                .height = proposals[j].height,
+                .confidence = proposals[j].score
+            };
+
+            if (compute_iou(&anchor_box, &cand_box) >= 0.30f) {
+                assigned[j] = true;
+                sum_x += (float)proposals[j].x * proposals[j].score;
+                sum_y += (float)proposals[j].y * proposals[j].score;
+                sum_w += (float)proposals[j].width * proposals[j].score;
+                sum_h += (float)proposals[j].height * proposals[j].score;
+                sum_s += proposals[j].score;
+                votes++;
+            }
+        }
+
+        int avg_x = (int)(sum_x / sum_s);
+        int avg_y = (int)(sum_y / sum_s);
+        int avg_w = (int)(sum_w / sum_s);
+        int avg_h = (int)(sum_h / sum_s);
+        float mass = (float)votes * sqrtf((float)(avg_w * avg_h));
+
+        clusters[num_clusters++] = (ResolvedCluster){
+            .x = avg_x,
+            .y = avg_y,
+            .width = avg_w,
+            .height = avg_h,
+            .total_score = sum_s,
+            .mass = mass,
+            .count = votes
         };
     }
 
-    /* 3. Non-Maximum Suppression (NMS) with 0.35 IoU */
-    size_t final_count = apply_nms(raw_proposals, num_proposals, 0.35f, out_faces, max_faces);
+    /* 5. Subsumption: Suppress smaller sub-boxes inside larger faces */
+    bool suppressed[MAX_CLUSTERS];
+    memset(suppressed, 0, sizeof(suppressed));
 
-    #undef QUERY_SAT
+    for (size_t i = 0; i < num_clusters; ++i) {
+        for (size_t j = 0; j < num_clusters; ++j) {
+            if (i == j || suppressed[j]) continue;
+            int area_i = clusters[i].width * clusters[i].height;
+            int area_j = clusters[j].width * clusters[j].height;
+
+            if (area_j > (int)((float)area_i * 1.3f)) {
+                int x1 = clusters[i].x > clusters[j].x ? clusters[i].x : clusters[j].x;
+                int y1 = clusters[i].y > clusters[j].y ? clusters[i].y : clusters[j].y;
+                int x2 = (clusters[i].x + clusters[i].width) < (clusters[j].x + clusters[j].width) ?
+                         (clusters[i].x + clusters[i].width) : (clusters[j].x + clusters[j].width);
+                int y2 = (clusters[i].y + clusters[i].height) < (clusters[j].y + clusters[j].height) ?
+                         (clusters[i].y + clusters[i].height) : (clusters[j].y + clusters[j].height);
+
+                int inter_w = x2 - x1;
+                int inter_h = y2 - y1;
+                if (inter_w > 0 && inter_h > 0) {
+                    float inter_area = (float)(inter_w * inter_h);
+                    if (inter_area >= 0.50f * (float)area_i) {
+                        suppressed[i] = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /* 6. Sort valid clusters descending by mass */
+    for (size_t i = 0; i < num_clusters; ++i) {
+        for (size_t j = i + 1; j < num_clusters; ++j) {
+            if (clusters[j].mass > clusters[i].mass) {
+                ResolvedCluster tmp = clusters[i];
+                clusters[i] = clusters[j];
+                clusters[j] = tmp;
+
+                bool sup_tmp = suppressed[i];
+                suppressed[i] = suppressed[j];
+                suppressed[j] = sup_tmp;
+            }
+        }
+    }
+
+    size_t final_count = 0;
+    for (size_t i = 0; i < num_clusters && final_count < max_faces; ++i) {
+        if (suppressed[i] || clusters[i].count < 3) continue;
+
+        float conf = 0.70f + (float)clusters[i].count * 0.01f + (clusters[i].total_score / 25000.0f);
+        if (conf > 0.99f) conf = 0.99f;
+
+        out_faces[final_count++] = (RCRE_FaceBox){
+            .x = clusters[i].x,
+            .y = clusters[i].y,
+            .width = clusters[i].width,
+            .height = clusters[i].height,
+            .confidence = conf
+        };
+    }
+
     scratch_arena->offset = saved_offset;
     return (int)final_count;
 }

@@ -64,10 +64,13 @@ RCRE_NODISCARD int rcre_classify_expression(const RCRE_ActionUnits* au,
                                   3.0f * (au->mouth_width_ratio - 0.80f);
 
     /* 5. Angry Logit: AU4 (Corrugator Furrow) + Lowered Brow + AU23 (Lip Compression) */
-    raw_scores[EMOTION_ANGRY] = 18.0f * (0.33f - brow_elev) + 
+    float furrow_active = (glabella > 0.06f || brow_furrow < 0.80f) ? (0.33f - brow_elev) : 0.0f;
+    if (furrow_active < 0.0f) furrow_active = 0.0f;
+    raw_scores[EMOTION_ANGRY] = 18.0f * furrow_active + 
                                 16.0f * glabella + 
                                 6.0f * (0.80f - brow_furrow) + 
-                                4.0f * (0.24f - mar);
+                                4.0f * (0.24f - mar) - 
+                                10.0f * smile_active;
 
     /* 6. Neutral Logit: Equilibrium state */
     float deviation = fabsf(smile) * 15.0f + 

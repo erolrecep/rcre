@@ -120,6 +120,8 @@ int rcre_window_update_rgb(RCRE_Window* win, const uint8_t* rgb_data, size_t wid
                         return_code = 2; /* Signal view mode toggle */
                     } else if (c == 'c' || c == 'C' || c == 'e' || c == 'E') {
                         return_code = 3; /* Signal edge palette toggle */
+                    } else if (c == 'm' || c == 'M') {
+                        return_code = 4; /* Signal mirror toggle */
                     }
                 }
             }
