@@ -16,3 +16,7 @@ __pycache__/
 
 # Operating system files
 .DS_Store
+
+# Temporary test video assets
+test_video/
+*.mp4

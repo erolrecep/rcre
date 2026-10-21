@@ -1,3 +1,5 @@
 bin/
 *.o
 *.bmp
+test_video/
+*.mp4
