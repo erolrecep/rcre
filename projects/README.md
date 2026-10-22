@@ -12,6 +12,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | :--- | :--- | :--- | :--- |
 | **`rcre-lens`** | [`reverse_image_search/`](reverse_image_search/) | High-speed reverse image search engine & visual database indexing | Spatial Pyramid Features, Sobel Gradients, HNSW Vector Index |
 | **`rcre-facex`** | [`facial_expression_analysis/`](facial_expression_analysis/) | Real-time face detection, 13-point landmarks, FACS Action Units & emotion classification | Skin SAT Integral Image, Valley Tracking, FACS Biomechanics, Softmax |
+| **`rcre-mobilenet`** | [`cifar100_mobilenet/`](cifar100_mobilenet/) | Sub-4ms MobileNet CNN training and zero-heap inference on CIFAR-100 | Depthwise Separable Conv, Edge BN Folding, SIMD axpy, Softmax |
 
 ---
 
@@ -57,6 +58,30 @@ make project_facex_test
 # Run the automated expression archetype demonstration:
 make project_facex_demo
 ```
+
+---
+
+## 3. `rcre-mobilenet` (MobileNet CIFAR-100 Inference & Training Pipeline)
+
+A zero-heap, sub-4ms MobileNet inference engine and PyTorch training pipeline on CIFAR-100 ($32 \times 32$ image classification) implemented in ISO C23.
+
+### Key Capabilities
+* **Zero-Heap Allocations**: Entire inference graph runs inside linear memory arenas (`RCRE_Arena`) with zero runtime heap allocations.
+* **Zero-Cost Edge BatchNorm Folding**: Fuses BatchNorm scale and shift directly into Conv2D and Depthwise Conv weights and biases.
+* **SIMD Hardware Acceleration**: Pointwise convolutions accelerated via ARM NEON / AVX2 `axpy_f32`, and linear head accelerated via `dot_f32`.
+* **High-Throughput Sub-4ms Latency**: Executes forward pass in ~3.24 ms (>300 FPS) on Apple Silicon CPU.
+* **End-to-End Pipeline**: Includes full PyTorch training script with learning rate scheduling, model checkpointing, weight export, and test sample generation.
+
+### Quick Start
+```bash
+# Run the automated 10-sample CIFAR-100 demo:
+make project_mobilenet_demo
+
+# Run the 50-iteration latency benchmark:
+make -C projects/cifar100_mobilenet benchmark
+```
+
+For complete CLI documentation, architecture diagrams, and weight formats, see [`projects/cifar100_mobilenet/README.md`](cifar100_mobilenet/README.md).
 
 For complete CLI documentation, mathematical formulas, and rendered pipeline diagrams, see [`projects/facial_expression_analysis/README.md`](facial_expression_analysis/README.md).
 

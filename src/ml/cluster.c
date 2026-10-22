@@ -20,9 +20,22 @@ static inline float squared_l2_distance(const float* a, const float* b, size_t d
     return sum;
 }
 
-RCRE_NODISCARD int rcre_ml_kmeans_fit(const RCRE_Tensor* X, size_t k, size_t max_iter,
-                                      RCRE_Tensor* centroids, RCRE_Tensor* labels,
-                                      RCRE_Arena* arena) {
+/* SplitMix64 pseudo-random number generator for reproducible sampling */
+static inline uint64_t rcre_splitmix64(uint64_t* state) {
+    uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+static inline float rcre_rand_f32(uint64_t* state) {
+    return (float)((rcre_splitmix64(state) >> 40) * (1.0 / 16777216.0));
+}
+
+RCRE_NODISCARD int rcre_ml_kmeans_fit_ex(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_KMeansParams* params,
+                                         RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                         float* out_inertia, RCRE_Arena* arena) {
     if (!X || !X->data || !centroids || !centroids->data || !arena || k == 0) {
         return RCRE_ERR_INVALID_ARG;
     }
@@ -38,91 +51,145 @@ RCRE_NODISCARD int rcre_ml_kmeans_fit(const RCRE_Tensor* X, size_t k, size_t max
         return RCRE_ERR_SHAPE_MISMATCH;
     }
 
+    size_t max_iter = (params && params->max_iter > 0) ? params->max_iter : 100;
+    size_t n_init = (params && params->n_init > 0) ? params->n_init : 10;
+    float tol = (params && params->tol > 0.0f) ? params->tol : 1e-4f;
+    uint64_t rng_state = (params && params->seed != 0) ? params->seed : 42ULL;
+
     const float* X_data = (const float*)X->data;
-    float* C_data = (float*)centroids->data;
 
     /* Allocate transient working memory from arena */
+    float* cand_C = (float*)rcre_arena_alloc(arena, k * D * sizeof(float), 64);
     float* new_C = (float*)rcre_arena_alloc(arena, k * D * sizeof(float), 64);
     size_t* counts = (size_t*)rcre_arena_alloc(arena, k * sizeof(size_t), 64);
-    size_t* cluster_assign = (size_t*)rcre_arena_alloc(arena, N * sizeof(size_t), 64);
+    size_t* cand_assign = (size_t*)rcre_arena_alloc(arena, N * sizeof(size_t), 64);
     float* min_sq_dist = (float*)rcre_arena_alloc(arena, N * sizeof(float), 64);
 
-    if (!new_C || !counts || !cluster_assign || !min_sq_dist) {
+    float* best_C = (float*)centroids->data;
+    size_t* best_assign = (size_t*)rcre_arena_alloc(arena, N * sizeof(size_t), 64);
+
+    if (!cand_C || !new_C || !counts || !cand_assign || !min_sq_dist || !best_assign) {
         return RCRE_ERR_OUT_OF_MEMORY;
     }
 
-    /* k-Means++ initialization */
-    /* Centroid 0: first point */
-    memcpy(&C_data[0], &X_data[0], D * sizeof(float));
+    float best_total_inertia = INFINITY;
 
-    for (size_t c = 1; c < k; ++c) {
-        float max_d2 = -1.0f;
-        size_t best_idx = 0;
+    for (size_t init_run = 0; init_run < n_init; ++init_run) {
+        /* 1. K-Means++ Probabilistic Initialization */
+        /* Pick first centroid uniformly at random */
+        size_t first_idx = (size_t)(rcre_splitmix64(&rng_state) % N);
+        memcpy(&cand_C[0], &X_data[first_idx * D], D * sizeof(float));
 
+        /* Initialize squared distances to first centroid */
         for (size_t i = 0; i < N; ++i) {
-            float d2 = squared_l2_distance(&X_data[i * D], &C_data[(c - 1) * D], D);
-            if (c == 1 || d2 < min_sq_dist[i]) {
-                min_sq_dist[i] = d2;
-            }
-            if (min_sq_dist[i] > max_d2) {
-                max_d2 = min_sq_dist[i];
-                best_idx = i;
-            }
+            min_sq_dist[i] = squared_l2_distance(&X_data[i * D], &cand_C[0], D);
         }
-        memcpy(&C_data[c * D], &X_data[best_idx * D], D * sizeof(float));
-    }
 
-    /* Lloyd's iteration loop */
-    for (size_t iter = 0; iter < max_iter; ++iter) {
-        bool changed = false;
+        /* Choose remaining k - 1 centroids via D^2 probabilistic sampling */
+        for (size_t c = 1; c < k; ++c) {
+            float total_weight = 0.0f;
+            for (size_t i = 0; i < N; ++i) {
+                total_weight += min_sq_dist[i];
+            }
 
-        /* 1. Assignment step */
-        for (size_t i = 0; i < N; ++i) {
-            const float* x_i = &X_data[i * D];
-            float best_dist = INFINITY;
-            size_t best_c = 0;
+            size_t chosen_idx = 0;
+            if (total_weight > 1e-12f) {
+                float threshold = rcre_rand_f32(&rng_state) * total_weight;
+                float running_sum = 0.0f;
+                for (size_t i = 0; i < N; ++i) {
+                    running_sum += min_sq_dist[i];
+                    if (running_sum >= threshold) {
+                        chosen_idx = i;
+                        break;
+                    }
+                }
+            } else {
+                chosen_idx = (size_t)(rcre_splitmix64(&rng_state) % N);
+            }
 
-            for (size_t c = 0; c < k; ++c) {
-                float dist = squared_l2_distance(x_i, &C_data[c * D], D);
-                if (dist < best_dist) {
-                    best_dist = dist;
-                    best_c = c;
+            memcpy(&cand_C[c * D], &X_data[chosen_idx * D], D * sizeof(float));
+
+            /* Update min_sq_dist for newly selected centroid */
+            for (size_t i = 0; i < N; ++i) {
+                float d2 = squared_l2_distance(&X_data[i * D], &cand_C[c * D], D);
+                if (d2 < min_sq_dist[i]) {
+                    min_sq_dist[i] = d2;
                 }
             }
+        }
 
-            if (cluster_assign[i] != best_c) {
-                cluster_assign[i] = best_c;
-                changed = true;
+        /* 2. Lloyd Iteration Loop with Early Stopping */
+        for (size_t iter = 0; iter < max_iter; ++iter) {
+            /* Assignment step */
+            for (size_t i = 0; i < N; ++i) {
+                const float* x_i = &X_data[i * D];
+                float best_dist = INFINITY;
+                size_t best_c = 0;
+
+                for (size_t c = 0; c < k; ++c) {
+                    float dist = squared_l2_distance(x_i, &cand_C[c * D], D);
+                    if (dist < best_dist) {
+                        best_dist = dist;
+                        best_c = c;
+                    }
+                }
+                cand_assign[i] = best_c;
             }
-        }
 
-        if (!changed && iter > 0) {
-            break; /* Converged */
-        }
+            /* Update step */
+            memset(new_C, 0, k * D * sizeof(float));
+            memset(counts, 0, k * sizeof(size_t));
 
-        /* 2. Update step */
-        memset(new_C, 0, k * D * sizeof(float));
-        memset(counts, 0, k * sizeof(size_t));
-
-        for (size_t i = 0; i < N; ++i) {
-            size_t c = cluster_assign[i];
-            counts[c]++;
-            const float* x_i = &X_data[i * D];
-            float* nc_i = &new_C[c * D];
-            for (size_t d = 0; d < D; ++d) {
-                nc_i[d] += x_i[d];
-            }
-        }
-
-        for (size_t c = 0; c < k; ++c) {
-            if (counts[c] > 0) {
-                float inv_count = 1.0f / (float)counts[c];
+            for (size_t i = 0; i < N; ++i) {
+                size_t c = cand_assign[i];
+                counts[c]++;
+                const float* x_i = &X_data[i * D];
                 float* nc_i = &new_C[c * D];
                 for (size_t d = 0; d < D; ++d) {
-                    C_data[c * D + d] = nc_i[d] * inv_count;
+                    nc_i[d] += x_i[d];
                 }
             }
+
+            float max_shift = 0.0f;
+            for (size_t c = 0; c < k; ++c) {
+                if (counts[c] > 0) {
+                    float inv_count = 1.0f / (float)counts[c];
+                    float shift = 0.0f;
+                    for (size_t d = 0; d < D; ++d) {
+                        float old_val = cand_C[c * D + d];
+                        float new_val = new_C[c * D + d] * inv_count;
+                        float diff = new_val - old_val;
+                        shift += diff * diff;
+                        cand_C[c * D + d] = new_val;
+                    }
+                    if (shift > max_shift) {
+                        max_shift = shift;
+                    }
+                }
+            }
+
+            if (max_shift < tol * tol) {
+                break; /* Centroids converged within tolerance */
+            }
         }
+
+        /* 3. Compute Within-Cluster Sum of Squares (Inertia) */
+        float run_inertia = 0.0f;
+        for (size_t i = 0; i < N; ++i) {
+            size_t c = cand_assign[i];
+            run_inertia += squared_l2_distance(&X_data[i * D], &cand_C[c * D], D);
+        }
+
+        /* Retain best run across n_init trials */
+        if (run_inertia < best_total_inertia) {
+            best_total_inertia = run_inertia;
+            memcpy(best_C, cand_C, k * D * sizeof(float));
+            memcpy(best_assign, cand_assign, N * sizeof(size_t));
+        }
+    }
+
+    if (out_inertia) {
+        *out_inertia = best_total_inertia;
     }
 
     /* Copy labels if requested */
@@ -130,13 +197,156 @@ RCRE_NODISCARD int rcre_ml_kmeans_fit(const RCRE_Tensor* X, size_t k, size_t max
         if (labels->dtype == RCRE_DTYPE_F32) {
             float* l_data = (float*)labels->data;
             for (size_t i = 0; i < N; ++i) {
-                l_data[i] = (float)cluster_assign[i];
+                l_data[i] = (float)best_assign[i];
             }
         } else if (labels->dtype == RCRE_DTYPE_I32) {
             int32_t* l_data = (int32_t*)labels->data;
             for (size_t i = 0; i < N; ++i) {
-                l_data[i] = (int32_t)cluster_assign[i];
+                l_data[i] = (int32_t)best_assign[i];
             }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_ml_kmeans_fit(const RCRE_Tensor* X, size_t k, size_t max_iter,
+                                      RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                      RCRE_Arena* arena) {
+    RCRE_KMeansParams params = {
+        .max_iter = max_iter ? max_iter : 100,
+        .n_init = 10,
+        .tol = 1e-4f,
+        .seed = 42ULL
+    };
+    return rcre_ml_kmeans_fit_ex(X, k, &params, centroids, labels, nullptr, arena);
+}
+
+RCRE_NODISCARD int rcre_ml_dbscan_fit(const RCRE_Tensor* X,
+                                      const RCRE_DBSCANParams* params,
+                                      RCRE_Tensor* labels,
+                                      size_t* out_num_clusters,
+                                      RCRE_Arena* arena) {
+    if (!X || !X->data || !params || !labels || !labels->data || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    if (X->ndim != 2 || labels->shape[0] != X->shape[0]) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    size_t N = X->shape[0];
+    size_t D = X->shape[1];
+    float eps = params->eps;
+    size_t min_samples = params->min_samples;
+
+    if (eps <= 0.0f || min_samples == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    const float* X_data = (const float*)X->data;
+    float eps_sq = eps * eps;
+
+    /* Working memory: status/labels, neighbor index buffer, FIFO queue */
+    int32_t* tag = (int32_t*)rcre_arena_alloc(arena, N * sizeof(int32_t), 64);
+    size_t* neighbor_buf = (size_t*)rcre_arena_alloc(arena, N * sizeof(size_t), 64);
+    size_t* queue = (size_t*)rcre_arena_alloc(arena, N * sizeof(size_t), 64);
+
+    if (!tag || !neighbor_buf || !queue) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Initialize all points as UNVISITED (-2) */
+    for (size_t i = 0; i < N; ++i) {
+        tag[i] = -2;
+    }
+
+    int32_t cluster_id = 0;
+
+    for (size_t i = 0; i < N; ++i) {
+        if (tag[i] != -2) {
+            continue; /* Already processed */
+        }
+
+        /* Query neighbors within epsilon */
+        const float* p_i = &X_data[i * D];
+        size_t neighbor_count = 0;
+        for (size_t j = 0; j < N; ++j) {
+            if (squared_l2_distance(p_i, &X_data[j * D], D) <= eps_sq) {
+                neighbor_buf[neighbor_count++] = j;
+            }
+        }
+
+        if (neighbor_count < min_samples) {
+            tag[i] = -1; /* Mark as noise (may become border point later) */
+        } else {
+            /* Start a new cluster and expand */
+            tag[i] = cluster_id;
+
+            size_t head = 0;
+            size_t tail = 0;
+
+            for (size_t n = 0; n < neighbor_count; ++n) {
+                size_t pt = neighbor_buf[n];
+                if (pt != i) {
+                    queue[tail++] = pt;
+                }
+            }
+
+            while (head < tail) {
+                size_t q = queue[head++];
+                int32_t q_status = tag[q];
+
+                if (q_status == -1) {
+                    /* Noise point reached from core point becomes border point */
+                    tag[q] = cluster_id;
+                }
+
+                if (q_status != -2) {
+                    continue; /* Already visited */
+                }
+
+                tag[q] = cluster_id;
+
+                /* Query neighbors of q */
+                const float* p_q = &X_data[q * D];
+                size_t q_neighbor_count = 0;
+                for (size_t j = 0; j < N; ++j) {
+                    if (squared_l2_distance(p_q, &X_data[j * D], D) <= eps_sq) {
+                        q_neighbor_count++;
+                    }
+                }
+
+                /* If q is also a core point, expand neighbors */
+                if (q_neighbor_count >= min_samples) {
+                    for (size_t j = 0; j < N; ++j) {
+                        if (squared_l2_distance(p_q, &X_data[j * D], D) <= eps_sq) {
+                            if (tag[j] == -2 || tag[j] == -1) {
+                                queue[tail++] = j;
+                            }
+                        }
+                    }
+                }
+            }
+
+            cluster_id++;
+        }
+    }
+
+    if (out_num_clusters) {
+        *out_num_clusters = (size_t)cluster_id;
+    }
+
+    /* Output labels */
+    if (labels->dtype == RCRE_DTYPE_F32) {
+        float* l_data = (float*)labels->data;
+        for (size_t i = 0; i < N; ++i) {
+            l_data[i] = (float)tag[i];
+        }
+    } else if (labels->dtype == RCRE_DTYPE_I32) {
+        int32_t* l_data = (int32_t*)labels->data;
+        for (size_t i = 0; i < N; ++i) {
+            l_data[i] = tag[i];
         }
     }
 

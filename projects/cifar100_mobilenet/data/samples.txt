@@ -1,0 +1,10 @@
+0 0 apple 60 0.0113
+1 1 aquarium_fish 60 0.0113
+2 2 baby 60 0.0113
+3 3 bear 60 0.0113
+4 4 beaver 60 0.0113
+5 5 bed 60 0.0113
+6 6 bee 60 0.0113
+7 7 beetle 60 0.0113
+8 8 bicycle 60 0.0113
+9 9 bottle 60 0.0113

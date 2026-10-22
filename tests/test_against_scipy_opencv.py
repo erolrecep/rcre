@@ -11,7 +11,7 @@ import ctypes
 import numpy as np
 import cv2
 from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, DBSCAN
 from sklearn.decomposition import PCA
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,20 @@ RCRE_LAYOUT_UNKNOWN = 0
 RCRE_LAYOUT_HWC     = 1
 RCRE_LAYOUT_CHW     = 2
 RCRE_LAYOUT_TABULAR = 3
+
+class RCRE_DBSCANParams(ctypes.Structure):
+    _fields_ = [
+        ("eps", ctypes.c_float),
+        ("min_samples", ctypes.c_size_t),
+    ]
+
+class RCRE_Conv2DParams(ctypes.Structure):
+    _fields_ = [
+        ("stride_h", ctypes.c_size_t),
+        ("stride_w", ctypes.c_size_t),
+        ("pad_h", ctypes.c_size_t),
+        ("pad_w", ctypes.c_size_t),
+    ]
 
 def load_rcre():
     import os
@@ -80,13 +94,47 @@ def load_rcre():
     ]
     rcre.rcre_cv_gaussian_blur.restype = ctypes.c_int
 
-    rcre.rcre_cv_sobel.argtypes = [
+    rcre.rcre_cv_sobel.restype = ctypes.c_int
+
+    # FFT primitives
+    rcre.rcre_fft_2d.argtypes = [
         ctypes.POINTER(RCRE_Tensor),
         ctypes.POINTER(RCRE_Tensor),
         ctypes.POINTER(RCRE_Tensor),
         ctypes.c_void_p
     ]
-    rcre.rcre_cv_sobel.restype = ctypes.c_int
+    rcre.rcre_fft_2d.restype = ctypes.c_int
+
+    rcre.rcre_ifft_2d.argtypes = [
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.c_void_p
+    ]
+    rcre.rcre_ifft_2d.restype = ctypes.c_int
+
+    # CNN primitives
+    rcre.rcre_nn_conv2d.argtypes = [
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.POINTER(RCRE_Conv2DParams),
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.c_void_p
+    ]
+    rcre.rcre_nn_conv2d.restype = ctypes.c_int
+
+    rcre.rcre_nn_relu6.argtypes = [
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.POINTER(RCRE_Tensor)
+    ]
+    rcre.rcre_nn_relu6.restype = ctypes.c_int
+
+    rcre.rcre_nn_softmax.argtypes = [
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.POINTER(RCRE_Tensor)
+    ]
+    rcre.rcre_nn_softmax.restype = ctypes.c_int
 
     # ML primitives
     rcre.rcre_ml_ols_fit.argtypes = [
@@ -124,6 +172,15 @@ def load_rcre():
         ctypes.c_void_p
     ]
     rcre.rcre_ml_kmeans_fit.restype = ctypes.c_int
+
+    rcre.rcre_ml_dbscan_fit.argtypes = [
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.POINTER(RCRE_DBSCANParams),
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p
+    ]
+    rcre.rcre_ml_dbscan_fit.restype = ctypes.c_int
 
     rcre.rcre_ml_pca_fit.argtypes = [
         ctypes.POINTER(RCRE_Tensor),
@@ -340,6 +397,172 @@ def test_pca_parity(rcre):
     rcre.rcre_arena_destroy(arena)
     print("     ✓ PCA principal components parity verified against Scikit-Learn")
 
+def test_dbscan_parity(rcre):
+    print("🔬 [Parity 7/7] Testing DBSCAN Density Clustering against Scikit-Learn...")
+    arena = rcre.rcre_arena_create(16 * 1024 * 1024)
+
+    np.random.seed(42)
+    # 2 dense clusters and 3 outliers
+    c0 = np.random.randn(25, 2).astype(np.float32) * 0.2 + np.array([-3.0, -3.0], dtype=np.float32)
+    c1 = np.random.randn(25, 2).astype(np.float32) * 0.2 + np.array([3.0, 3.0], dtype=np.float32)
+    noise = np.array([[-10.0, 10.0], [10.0, -10.0], [0.0, 0.0]], dtype=np.float32)
+    X = np.vstack([c0, c1, noise])
+    N, D = X.shape
+
+    eps = 0.8
+    min_samples = 4
+
+    sk_dbscan = DBSCAN(eps=eps, min_samples=min_samples)
+    sk_labels = sk_dbscan.fit_predict(X)
+
+    t_X = wrap_numpy_tensor(X, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, rcre, arena)
+    l_shape = (ctypes.c_size_t * 2)(N, 1)
+    t_L = rcre.rcre_tensor_create(l_shape, 2, RCRE_DTYPE_I32, RCRE_LAYOUT_TABULAR, arena)
+
+    params = RCRE_DBSCANParams(eps=eps, min_samples=min_samples)
+    num_clusters = ctypes.c_size_t(0)
+
+    status = rcre.rcre_ml_dbscan_fit(ctypes.byref(t_X), ctypes.byref(params), ctypes.byref(t_L), ctypes.byref(num_clusters), arena)
+    assert status == 0, f"rcre_ml_dbscan_fit returned {status}"
+
+    rcre_labels = np.ctypeslib.as_array(ctypes.cast(t_L.data, ctypes.POINTER(ctypes.c_int32)), shape=(N,))
+
+    # Verify noise points are identical
+    noise_match = np.array_equal((rcre_labels == -1), (sk_labels == -1))
+    assert noise_match, "Noise point detection mismatch vs Scikit-Learn!"
+
+    # Verify cluster count
+    sk_n_clusters = len(set(sk_labels)) - (1 if -1 in sk_labels else 0)
+    assert num_clusters.value == sk_n_clusters, f"Cluster count mismatch: {num_clusters.value} vs {sk_n_clusters}"
+
+    # Adjusted Rand Index between clusterings
+    from sklearn.metrics import adjusted_rand_score
+    ari = adjusted_rand_score(sk_labels, rcre_labels)
+    print(f"     Adjusted Rand Index vs Scikit-Learn: {ari:.6f}")
+    assert ari > 0.99, f"DBSCAN clustering discrepancy ARI={ari}!"
+
+    rcre.rcre_arena_destroy(arena)
+    print("     ✓ DBSCAN density clustering parity verified against Scikit-Learn")
+
+def test_fft_parity(rcre):
+    print("🔬 [Parity 8/8] Testing 2D Fast Fourier Transform against NumPy...")
+    arena = rcre.rcre_arena_create(16 * 1024 * 1024)
+
+    np.random.seed(999)
+    H, W = 16, 16
+    X = np.random.randn(H, W).astype(np.float32)
+
+    # NumPy reference 2D FFT & IFFT
+    np_fft = np.fft.fft2(X)
+    np_recon = np.fft.ifft2(np_fft).real.astype(np.float32)
+
+    t_X = wrap_numpy_tensor(X, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, rcre, arena)
+    shape_2d = (ctypes.c_size_t * 2)(H, W)
+    t_re = rcre.rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena)
+    t_im = rcre.rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena)
+    t_recon = rcre.rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena)
+
+    status = rcre.rcre_fft_2d(ctypes.byref(t_X), ctypes.byref(t_re), ctypes.byref(t_im), arena)
+    assert status == 0, f"rcre_fft_2d failed with status {status}"
+
+    rcre_re = np.ctypeslib.as_array(ctypes.cast(t_re.data, ctypes.POINTER(ctypes.c_float)), shape=(H, W))
+    rcre_im = np.ctypeslib.as_array(ctypes.cast(t_im.data, ctypes.POINTER(ctypes.c_float)), shape=(H, W))
+
+    diff_re = np.max(np.abs(rcre_re - np_fft.real))
+    diff_im = np.max(np.abs(rcre_im - np_fft.imag))
+    print(f"     Max 2D FFT real diff vs NumPy: {diff_re:.6e}")
+    print(f"     Max 2D FFT imag diff vs NumPy: {diff_im:.6e}")
+    assert diff_re < 1e-4, f"FFT real component divergence {diff_re}!"
+    assert diff_im < 1e-4, f"FFT imag component divergence {diff_im}!"
+
+    # 2D Inverse FFT
+    status = rcre.rcre_ifft_2d(ctypes.byref(t_re), ctypes.byref(t_im), ctypes.byref(t_recon), arena)
+    assert status == 0, f"rcre_ifft_2d failed with status {status}"
+
+    rcre_recon = np.ctypeslib.as_array(ctypes.cast(t_recon.data, ctypes.POINTER(ctypes.c_float)), shape=(H, W))
+    diff_recon = np.max(np.abs(rcre_recon - np_recon))
+    print(f"     Max 2D IFFT reconstruction diff vs NumPy: {diff_recon:.6e}")
+    assert diff_recon < 1e-4, f"IFFT reconstruction divergence {diff_recon}!"
+
+    rcre.rcre_arena_destroy(arena)
+    print("     ✓ 2D FFT & IFFT parity verified against NumPy (epsilon <= 1e-4)")
+
+def test_cnn_parity(rcre):
+    print("🔬 [Parity 9/9] Testing CNN Operators (Conv2D, ReLU6, Softmax) against NumPy...")
+    arena = rcre.rcre_arena_create(8 * 1024 * 1024)
+
+    # 1. Conv2D reference
+    np.random.seed(42)
+    C_in, H_in, W_in = 2, 6, 6
+    C_out = 3
+    K_h, K_w = 3, 3
+
+    X = np.random.randn(C_in, H_in, W_in).astype(np.float32)
+    W = np.random.randn(C_out, C_in, K_h, K_w).astype(np.float32)
+    B = np.random.randn(C_out).astype(np.float32)
+
+    # Manual NumPy Conv2D with pad=1, stride=1
+    pad = 1
+    X_pad = np.pad(X, ((0, 0), (pad, pad), (pad, pad)), mode='constant')
+    H_out = H_in
+    W_out = W_in
+    Y_ref = np.zeros((C_out, H_out, W_out), dtype=np.float32)
+
+    for oc in range(C_out):
+        for oh in range(H_out):
+            for ow in range(W_out):
+                patch = X_pad[:, oh:oh+K_h, ow:ow+K_w]
+                Y_ref[oc, oh, ow] = B[oc] + np.sum(patch * W[oc])
+
+    # RCRE Conv2D
+    t_X = wrap_numpy_tensor(X, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, rcre, arena)
+    t_W = wrap_numpy_tensor(W, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, rcre, arena)
+    t_B = wrap_numpy_tensor(B, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, rcre, arena)
+
+    params = RCRE_Conv2DParams(stride_h=1, stride_w=1, pad_h=1, pad_w=1)
+    out_shape = (ctypes.c_size_t * 3)(C_out, H_out, W_out)
+    t_out = rcre.rcre_tensor_create(out_shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena)
+
+    status = rcre.rcre_nn_conv2d(ctypes.byref(t_X), ctypes.byref(t_W), ctypes.byref(t_B), ctypes.byref(params), ctypes.byref(t_out), arena)
+    assert status == 0, f"rcre_nn_conv2d failed with status {status}"
+
+    rcre_out = np.ctypeslib.as_array(ctypes.cast(t_out.data, ctypes.POINTER(ctypes.c_float)), shape=(C_out, H_out, W_out))
+    diff_conv = np.max(np.abs(rcre_out - Y_ref))
+    print(f"     Max Conv2D diff vs NumPy reference: {diff_conv:.6e}")
+    assert diff_conv < 1e-4, f"Conv2D diverged from reference: {diff_conv}!"
+
+    # 2. ReLU6 reference
+    val = np.array([-3.0, -0.5, 0.0, 2.5, 6.0, 7.5], dtype=np.float32)
+    val_ref = np.clip(val, 0.0, 6.0)
+    t_val = wrap_numpy_tensor(val, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, rcre, arena)
+    val_shape = (ctypes.c_size_t * 1)(6)
+    t_val_out = rcre.rcre_tensor_create(val_shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena)
+
+    status = rcre.rcre_nn_relu6(ctypes.byref(t_val), ctypes.byref(t_val_out))
+    assert status == 0, f"rcre_nn_relu6 failed with status {status}"
+    rcre_relu = np.ctypeslib.as_array(ctypes.cast(t_val_out.data, ctypes.POINTER(ctypes.c_float)), shape=(6,))
+    diff_relu = np.max(np.abs(rcre_relu - val_ref))
+    assert diff_relu < 1e-6, f"ReLU6 diverged: {diff_relu}"
+
+    # 3. Softmax reference
+    logits = np.random.randn(100).astype(np.float32)
+    e = np.exp(logits - np.max(logits))
+    sm_ref = e / np.sum(e)
+
+    t_logits = wrap_numpy_tensor(logits, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, rcre, arena)
+    sm_shape = (ctypes.c_size_t * 1)(100)
+    t_sm_out = rcre.rcre_tensor_create(sm_shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena)
+
+    status = rcre.rcre_nn_softmax(ctypes.byref(t_logits), ctypes.byref(t_sm_out))
+    assert status == 0, f"rcre_nn_softmax failed with status {status}"
+    rcre_sm = np.ctypeslib.as_array(ctypes.cast(t_sm_out.data, ctypes.POINTER(ctypes.c_float)), shape=(100,))
+    diff_sm = np.max(np.abs(rcre_sm - sm_ref))
+    print(f"     Max Softmax diff vs NumPy reference: {diff_sm:.6e}")
+    assert diff_sm < 1e-5, f"Softmax diverged: {diff_sm}"
+
+    rcre.rcre_arena_destroy(arena)
+    print("     ✓ CNN operators (Conv2D, ReLU6, Softmax) parity verified against NumPy (epsilon <= 1e-4)")
+
 # ---------------------------------------------------------------------------
 # Main Runner
 # ---------------------------------------------------------------------------
@@ -356,6 +579,9 @@ def main():
     test_ols_parity(rcre)
     test_kmeans_parity(rcre)
     test_pca_parity(rcre)
+    test_dbscan_parity(rcre)
+    test_fft_parity(rcre)
+    test_cnn_parity(rcre)
 
     print("=" * 70)
     print("🎉 ALL LAYER 3 NUMERICAL PARITY GATES PASSED (OpenCV & Scikit-Learn)!")

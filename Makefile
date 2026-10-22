@@ -27,6 +27,8 @@ SRCS = src/core/arena.c \
        src/core/threadpool.c \
        src/cv/color.c \
        src/cv/filter.c \
+       src/cv/fft.c \
+       src/cv/nn.c \
        src/ml/linear.c \
        src/ml/cluster.c \
        src/ml/gbdt_infer.c \
@@ -44,7 +46,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -53,7 +55,7 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test project_lens_test project_lens_demo project_facex_test project_facex_demo
+.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo
 
 default: help
 
@@ -90,11 +92,11 @@ bin/test_amalgamated: tests/test_amalgamated.c $(AMALGAMATED_HEADER)
 
 bin/test_%: tests/test_%.c $(LIB)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $< -Llib -lrcre $(CAM_LDFLAGS) -lm -lpthread -o $@
+	$(CC) $(CFLAGS) $< $(LIB) $(CAM_LDFLAGS) -lm -lpthread -o $@
 
 bin/%: examples/%.c $(LIB)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $< -Llib -lrcre $(CAM_LDFLAGS) -lm -lpthread -o $@
+	$(CC) $(CFLAGS) $< $(LIB) $(CAM_LDFLAGS) -lm -lpthread -o $@
 
 examples: $(EXAMPLE_BINS)
 	@echo "✅ Built all RCRE examples in bin/"
@@ -161,6 +163,12 @@ project_facex_test: $(LIB)
 project_facex_demo: $(LIB)
 	@$(MAKE) -C projects/facial_expression_analysis demo
 
+project_mobilenet_test: $(LIB)
+	@$(MAKE) -C projects/cifar100_mobilenet test
+
+project_mobilenet_demo: $(LIB)
+	@$(MAKE) -C projects/cifar100_mobilenet demo
+
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@
@@ -179,6 +187,8 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@bin/test_adapt_spec
 	@bin/test_threadpool
 	@bin/test_cv_filters
+	@bin/test_fft
+	@bin/test_nn
 	@bin/test_ml_linear
 	@bin/test_hal
 	@bin/test_cluster
@@ -201,6 +211,10 @@ test-sanitizers: $(AMALGAMATED_HEADER)
 	@bin/test_threadpool_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cv_filters.c -lm -lpthread -o bin/test_cv_filters_asan
 	@bin/test_cv_filters_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_fft.c -lm -lpthread -o bin/test_fft_asan
+	@bin/test_fft_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_nn.c -lm -lpthread -o bin/test_nn_asan
+	@bin/test_nn_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_ml_linear.c -lm -lpthread -o bin/test_ml_linear_asan
 	@bin/test_ml_linear_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_hal.c -lm -lpthread -o bin/test_hal_asan

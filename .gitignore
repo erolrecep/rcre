@@ -3,6 +3,7 @@ dev_reports/
 
 # Build artifacts & libraries
 bin/
+**/bin/
 lib/
 *.o
 *.a
@@ -12,6 +13,7 @@ lib/
 # Python virtual environments & bytecode
 .venv/
 __pycache__/
+**/__pycache__/
 *.pyc
 
 # Operating system files

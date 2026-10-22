@@ -31,6 +31,8 @@ C_FILES = [
     SRC_DIR / "core" / "threadpool.c",
     SRC_DIR / "cv" / "color.c",
     SRC_DIR / "cv" / "filter.c",
+    SRC_DIR / "cv" / "fft.c",
+    SRC_DIR / "cv" / "nn.c",
     SRC_DIR / "ml" / "linear.c",
     SRC_DIR / "ml" / "cluster.c",
     SRC_DIR / "ml" / "gbdt_infer.c",

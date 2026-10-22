@@ -267,6 +267,165 @@ RCRE_NODISCARD int rcre_cv_sobel(const RCRE_Tensor* src, RCRE_Tensor* dst_dx,
                                  RCRE_Tensor* dst_dy, RCRE_Arena* arena);
 
 /* ========================================================================= */
+/* Fast Fourier Transform & Spectral Image Processing (FFT-REQ-01 to 04)     */
+/* ========================================================================= */
+
+typedef struct RCRE_Complex {
+    float re;
+    float im;
+} RCRE_Complex;
+
+/**
+ * @brief 1D In-Place Radix-2 Cooley-Tukey Fast Fourier Transform (Forward).
+ * @param data Array of complex numbers of length N (N must be a power of 2).
+ * @param n Length of the transform (must satisfy (n & (n - 1)) == 0).
+ * @param arena Optional scratchpad arena.
+ */
+RCRE_NODISCARD int rcre_fft_1d(RCRE_Complex* data, size_t n, RCRE_Arena* arena);
+
+/**
+ * @brief 1D In-Place Radix-2 Inverse Fast Fourier Transform with 1/N normalization.
+ */
+RCRE_NODISCARD int rcre_ifft_1d(RCRE_Complex* data, size_t n, RCRE_Arena* arena);
+
+/**
+ * @brief 2D Fast Fourier Transform on an image or matrix (Forward).
+ * @param input Real input tensor of shape [H, W] (F32).
+ * @param output_re Real part output tensor of shape [H, W] (F32).
+ * @param output_im Imaginary part output tensor of shape [H, W] (F32).
+ * @param arena Scratchpad arena for intermediate row/column buffers.
+ */
+RCRE_NODISCARD int rcre_fft_2d(const RCRE_Tensor* input,
+                               RCRE_Tensor* output_re,
+                               RCRE_Tensor* output_im,
+                               RCRE_Arena* arena);
+
+/**
+ * @brief 2D Inverse Fast Fourier Transform (Complex frequency domain -> Real spatial domain).
+ * @param input_re Real frequency tensor of shape [H, W] (F32).
+ * @param input_im Imaginary frequency tensor of shape [H, W] (F32).
+ * @param output Reconstructed real spatial tensor of shape [H, W] (F32).
+ * @param arena Scratchpad arena for intermediate row/column buffers.
+ */
+RCRE_NODISCARD int rcre_ifft_2d(const RCRE_Tensor* input_re,
+                                const RCRE_Tensor* input_im,
+                                RCRE_Tensor* output,
+                                RCRE_Arena* arena);
+
+/**
+ * @brief Shifts zero-frequency component to center of 2D spectrum [H/2, W/2].
+ */
+RCRE_NODISCARD int rcre_fftshift_2d(RCRE_Tensor* tensor_re, RCRE_Tensor* tensor_im);
+
+/**
+ * @brief Inverse shift: moves centered DC component back to top-left corner [0, 0].
+ */
+RCRE_NODISCARD int rcre_ifftshift_2d(RCRE_Tensor* tensor_re, RCRE_Tensor* tensor_im);
+
+/**
+ * @brief Frequency-domain 2D filtering (Ideal or Gaussian, Low-pass or High-pass).
+ * @param spectrum_re Real part of centered 2D spectrum.
+ * @param spectrum_im Imaginary part of centered 2D spectrum.
+ * @param cutoff_radius Cutoff frequency radius D_0 in pixels.
+ * @param is_highpass If true, creates high-pass filter; if false, low-pass filter.
+ * @param is_gaussian If true, applies smooth Gaussian attenuation; if false, sharp brickwall.
+ */
+RCRE_NODISCARD int rcre_fft_filter_2d(RCRE_Tensor* spectrum_re,
+                                      RCRE_Tensor* spectrum_im,
+                                      float cutoff_radius,
+                                      bool is_highpass,
+                                      bool is_gaussian);
+
+/* ========================================================================= */
+/* Convolutional Neural Network (CNN) Inference Primitives (NN-REQ-01 to 05) */
+/* ========================================================================= */
+
+typedef struct RCRE_Conv2DParams {
+    size_t stride_h;
+    size_t stride_w;
+    size_t pad_h;
+    size_t pad_w;
+} RCRE_Conv2DParams;
+
+/**
+ * @brief Standard 2D Spatial Convolution: [C_in, H_in, W_in] x [C_out, C_in, K_h, K_w] -> [C_out, H_out, W_out].
+ */
+RCRE_NODISCARD int rcre_nn_conv2d(const RCRE_Tensor* input,
+                                  const RCRE_Tensor* weights,
+                                  const RCRE_Tensor* bias,
+                                  const RCRE_Conv2DParams* params,
+                                  RCRE_Tensor* output,
+                                  RCRE_Arena* arena);
+
+/**
+ * @brief Depthwise 2D Convolution (channel-multiplier = 1):
+ *        Convolves each input channel independently with a spatial filter:
+ *        [C, H_in, W_in] x [C, 1, K_h, K_w] -> [C, H_out, W_out].
+ */
+RCRE_NODISCARD int rcre_nn_depthwise_conv2d(const RCRE_Tensor* input,
+                                            const RCRE_Tensor* weights,
+                                            const RCRE_Tensor* bias,
+                                            const RCRE_Conv2DParams* params,
+                                            RCRE_Tensor* output,
+                                            RCRE_Arena* arena);
+
+/**
+ * @brief Pointwise 1x1 Convolution / Channel Projection:
+ *        [C_in, H, W] x [C_out, C_in, 1, 1] -> [C_out, H, W].
+ */
+RCRE_NODISCARD int rcre_nn_pointwise_conv2d(const RCRE_Tensor* input,
+                                            const RCRE_Tensor* weights,
+                                            const RCRE_Tensor* bias,
+                                            RCRE_Tensor* output,
+                                            RCRE_Arena* arena);
+
+/**
+ * @brief Fused 2D Batch Normalization: y = gamma * (x - mean) / sqrt(var + eps) + beta.
+ */
+RCRE_NODISCARD int rcre_nn_batchnorm2d(const RCRE_Tensor* input,
+                                      const RCRE_Tensor* gamma,
+                                      const RCRE_Tensor* beta,
+                                      const RCRE_Tensor* mean,
+                                      const RCRE_Tensor* var,
+                                      float eps,
+                                      RCRE_Tensor* output);
+
+/**
+ * @brief Fold BatchNorm scale & shift directly into Conv2D weights and bias (Zero-Cost Edge BN).
+ */
+RCRE_NODISCARD int rcre_nn_fuse_conv_batchnorm(RCRE_Tensor* conv_weight,
+                                               RCRE_Tensor* conv_bias,
+                                               const RCRE_Tensor* gamma,
+                                               const RCRE_Tensor* beta,
+                                               const RCRE_Tensor* mean,
+                                               const RCRE_Tensor* var,
+                                               float eps);
+
+/**
+ * @brief Piecewise ReLU6 activation: y = min(max(x, 0), 6.0).
+ */
+RCRE_NODISCARD int rcre_nn_relu6(const RCRE_Tensor* input, RCRE_Tensor* output);
+
+/**
+ * @brief Global Average Pooling 2D: [C, H, W] -> [C, 1, 1].
+ */
+RCRE_NODISCARD int rcre_nn_global_avgpool(const RCRE_Tensor* input, RCRE_Tensor* output);
+
+/**
+ * @brief Fully connected linear projection: output = input * W^T + bias.
+ */
+RCRE_NODISCARD int rcre_nn_linear(const RCRE_Tensor* input,
+                                  const RCRE_Tensor* weights,
+                                  const RCRE_Tensor* bias,
+                                  RCRE_Tensor* output,
+                                  RCRE_Arena* arena);
+
+/**
+ * @brief Numerically stable Softmax activation.
+ */
+RCRE_NODISCARD int rcre_nn_softmax(const RCRE_Tensor* input, RCRE_Tensor* output);
+
+/* ========================================================================= */
 /* Classical Machine Learning Primitives (ML-REQ-01)                         */
 /* ========================================================================= */
 
@@ -303,23 +462,59 @@ RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tenso
 /* Clustering & Dimensionality Reduction (ML-REQ-02)                         */
 /* ========================================================================= */
 
+typedef struct RCRE_KMeansParams {
+    size_t   max_iter;    /* Maximum iterations (e.g. 100) */
+    size_t   n_init;      /* Number of independent initializations (e.g. 10) */
+    float    tol;         /* Centroid shift convergence tolerance (e.g. 1e-4f) */
+    uint64_t seed;        /* Random seed for PRNG reproducibility */
+} RCRE_KMeansParams;
+
 /**
- * @brief Fits k-Means clustering via k-Means++ initialization & Lloyd iterations.
- * @param X Matrix of shape [N, D] (F32).
- * @param k Number of clusters.
- * @param max_iter Maximum iterations (e.g. 100).
- * @param centroids Output matrix of shape [K, D] (F32).
- * @param labels Optional output vector of shape [N, 1] (I32 or F32).
+ * @brief Fits k-Means clustering via standard settings.
  */
 RCRE_NODISCARD int rcre_ml_kmeans_fit(const RCRE_Tensor* X, size_t k, size_t max_iter,
                                       RCRE_Tensor* centroids, RCRE_Tensor* labels,
                                       RCRE_Arena* arena);
 
 /**
+ * @brief Fits k-Means clustering with full control over initialization, tolerance, and multi-start.
+ * @param X Matrix of shape [N, D] (F32).
+ * @param k Number of clusters.
+ * @param params Advanced parameters (max_iter, n_init, tol, seed).
+ * @param centroids Output matrix of shape [K, D] (F32).
+ * @param labels Optional output vector of shape [N, 1] (I32 or F32).
+ * @param out_inertia Optional pointer to output the within-cluster sum of squared errors (WCSS).
+ * @param arena Scratchpad arena for transient allocations.
+ */
+RCRE_NODISCARD int rcre_ml_kmeans_fit_ex(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_KMeansParams* params,
+                                         RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                         float* out_inertia, RCRE_Arena* arena);
+
+/**
  * @brief Predicts closest cluster centroid index for input samples.
  */
 RCRE_NODISCARD int rcre_ml_kmeans_predict(const RCRE_Tensor* X, const RCRE_Tensor* centroids,
                                           RCRE_Tensor* labels);
+
+typedef struct RCRE_DBSCANParams {
+    float  eps;          /* Neighborhood radius distance epsilon */
+    size_t min_samples;  /* Minimum points within eps to form a core point */
+} RCRE_DBSCANParams;
+
+/**
+ * @brief Density-Based Spatial Clustering of Applications with Noise (DBSCAN).
+ * @param X Matrix of shape [N, D] (F32).
+ * @param params DBSCAN configuration (eps, min_samples).
+ * @param labels Output vector of shape [N, 1] (I32 or F32). Noise outliers are assigned -1.
+ * @param out_num_clusters Optional pointer to receive total number of discovered clusters.
+ * @param arena Scratchpad arena for transient allocations.
+ */
+RCRE_NODISCARD int rcre_ml_dbscan_fit(const RCRE_Tensor* X,
+                                      const RCRE_DBSCANParams* params,
+                                      RCRE_Tensor* labels,
+                                      size_t* out_num_clusters,
+                                      RCRE_Arena* arena);
 
 /**
  * @brief Computes top K Principal Components via covariance power iteration.

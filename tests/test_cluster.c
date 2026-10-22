@@ -131,9 +131,108 @@ static void test_pca(void) {
     printf("     ✓ PCA extracted primary eigenvector aligned with principal axis\n");
 }
 
+static void test_kmeans_ex(void) {
+    printf("  -> Testing k-Means++ multi-start & inertia (k=2)...\n");
+    RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
+    assert(arena != NULL);
+
+    const size_t N = 6;
+    const size_t D = 2;
+    const size_t K = 2;
+
+    size_t X_shape[2] = {N, D};
+    RCRE_Tensor X = rcre_tensor_create(X_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+
+    float X_raw[12] = {
+        0.9f, 1.1f,  1.0f, 0.9f,  1.1f, 1.0f,
+        9.9f, 10.1f, 10.0f, 9.9f, 10.1f, 10.0f
+    };
+    memcpy(X.data, X_raw, sizeof(X_raw));
+
+    size_t C_shape[2] = {K, D};
+    RCRE_Tensor centroids = rcre_tensor_create(C_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+
+    size_t L_shape[2] = {N, 1};
+    RCRE_Tensor labels = rcre_tensor_create(L_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+
+    RCRE_KMeansParams params = {
+        .max_iter = 100,
+        .n_init = 5,
+        .tol = 1e-5f,
+        .seed = 987654321ULL
+    };
+
+    float inertia = 0.0f;
+    int status = rcre_ml_kmeans_fit_ex(&X, K, &params, &centroids, &labels, &inertia, arena);
+    assert(status == RCRE_OK);
+    assert(inertia > 0.0f && inertia < 1.0f); /* Tight clusters have tiny WCSS */
+
+    float* C_data = (float*)centroids.data;
+    size_t idx_low = (C_data[0] < C_data[2]) ? 0 : 1;
+    size_t idx_high = 1 - idx_low;
+    assert(fabsf(C_data[idx_low * 2 + 0] - 1.0f) < 0.2f);
+    assert(fabsf(C_data[idx_high * 2 + 0] - 10.0f) < 0.2f);
+
+    rcre_arena_destroy(arena);
+    printf("     ✓ k-Means++ probabilistic initialization & inertia convergence verified\n");
+}
+
+static void test_dbscan(void) {
+    printf("  -> Testing DBSCAN density clustering & noise rejection...\n");
+    RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
+    assert(arena != NULL);
+
+    /* 7 points: 3 in cluster A, 3 in cluster B, 1 outlier */
+    const size_t N = 7;
+    const size_t D = 2;
+
+    size_t X_shape[2] = {N, D};
+    RCRE_Tensor X = rcre_tensor_create(X_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+
+    float X_raw[14] = {
+        1.0f, 1.0f,   1.1f, 1.0f,   1.0f, 1.1f,   /* Cluster 0 */
+        10.0f, 10.0f, 10.1f, 10.0f, 10.0f, 10.1f, /* Cluster 1 */
+        50.0f, 50.0f                               /* Isolated Outlier */
+    };
+    memcpy(X.data, X_raw, sizeof(X_raw));
+
+    size_t L_shape[2] = {N, 1};
+    RCRE_Tensor labels = rcre_tensor_create(L_shape, 2, RCRE_DTYPE_I32, RCRE_LAYOUT_TABULAR, arena);
+
+    RCRE_DBSCANParams params = {
+        .eps = 0.5f,
+        .min_samples = 2
+    };
+
+    size_t num_clusters = 0;
+    int status = rcre_ml_dbscan_fit(&X, &params, &labels, &num_clusters, arena);
+    assert(status == RCRE_OK);
+    assert(num_clusters == 2);
+
+    int32_t* l_data = (int32_t*)labels.data;
+    /* First 3 points must share same cluster ID */
+    assert(l_data[0] >= 0);
+    assert(l_data[0] == l_data[1]);
+    assert(l_data[0] == l_data[2]);
+
+    /* Points 3, 4, 5 must share same cluster ID, different from first */
+    assert(l_data[3] >= 0);
+    assert(l_data[3] != l_data[0]);
+    assert(l_data[3] == l_data[4]);
+    assert(l_data[3] == l_data[5]);
+
+    /* Outlier point 6 must be labeled as noise (-1) */
+    assert(l_data[6] == -1);
+
+    rcre_arena_destroy(arena);
+    printf("     ✓ DBSCAN isolated noise point (-1) and separated 2 dense clusters\n");
+}
+
 int main(void) {
     printf("🧪 Running RCRE Clustering & Dimensionality Tests (ML-REQ-02)...\n");
     test_kmeans();
+    test_kmeans_ex();
+    test_dbscan();
     test_pca();
     printf("✅ All Clustering & PCA Tests Passed Successfully!\n");
     return 0;
