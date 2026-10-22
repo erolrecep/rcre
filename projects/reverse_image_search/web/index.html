@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RCRE Lens — Reverse Image Search & Visual Clustering Studio</title>
+    <meta name="description" content="Pure C23 Zero-Dependency Reverse Image Search Engine with HNSW and Unsupervised k-Means Clustering.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Top Navigation Bar -->
+    <header class="app-header">
+        <div class="header-container">
+            <div class="brand">
+                <div class="logo-icon">🔍</div>
+                <div class="brand-text">
+                    <h1>RCRE Lens <span class="badge-accent">Studio v1.1.0</span></h1>
+                    <p class="subtitle">Pure C23 Multi-Core Visual Retrieval &amp; k-Means Clustering Engine</p>
+                </div>
+            </div>
+            <div class="system-stats">
+                <div class="stat-pill" title="Hardware Concurrency">
+                    <span class="dot green"></span>
+                    <span class="label">Threads:</span>
+                    <strong id="stat-threads">Auto</strong>
+                </div>
+                <div class="stat-pill" title="Hardware Abstraction Layer">
+                    <span class="dot blue"></span>
+                    <span class="label">HAL:</span>
+                    <strong id="stat-hal">SIMD Active</strong>
+                </div>
+                <div class="stat-pill" title="Database Size">
+                    <span class="dot purple"></span>
+                    <span class="label">Indexed:</span>
+                    <strong id="stat-indexed">0 imgs</strong>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Application Container -->
+    <main class="main-container">
+        <!-- Navigation Tabs -->
+        <nav class="nav-tabs" role="tablist">
+            <button class="tab-btn active" id="tab-search-btn" onclick="switchTab('search')">
+                <span class="tab-icon">⚡</span> Reverse Image Search
+            </button>
+            <button class="tab-btn" id="tab-clusters-btn" onclick="switchTab('clusters')">
+                <span class="tab-icon">🔮</span> Visual Clusters &amp; Gallery
+            </button>
+        </nav>
+
+        <!-- VIEW 1: REVERSE IMAGE SEARCH -->
+        <section id="view-search" class="tab-content active">
+            <div class="workspace-grid">
+                <!-- Left: Query Inspector -->
+                <div class="card panel-query">
+                    <div class="panel-header">
+                        <h2>1. Upload Probe Image</h2>
+                        <span class="chip">Query Target</span>
+                    </div>
+
+                    <!-- Dropzone -->
+                    <div class="dropzone" id="query-dropzone">
+                        <input type="file" id="query-file-input" accept="image/jpeg,image/png,image/bmp" hidden>
+                        <div class="dropzone-content" id="query-dropzone-prompt">
+                            <div class="upload-icon">📸</div>
+                            <p class="drop-text">Drag &amp; drop probe image here</p>
+                            <span class="drop-sub">or <button class="btn-link" onclick="document.getElementById('query-file-input').click()">Browse file</button> (JPG, PNG, BMP)</span>
+                        </div>
+                        <div class="preview-container" id="query-preview-container" style="display: none;">
+                            <img id="query-preview-img" src="" alt="Query Preview">
+                            <button class="btn-clear" onclick="clearQueryImage(event)" title="Clear image">✕</button>
+                        </div>
+                    </div>
+
+                    <!-- Controls -->
+                    <div class="search-controls">
+                        <div class="control-group">
+                            <div class="control-label">
+                                <span>Top-K Results:</span>
+                                <strong id="topk-val">5</strong>
+                            </div>
+                            <input type="range" id="topk-slider" min="1" max="20" value="5" oninput="document.getElementById('topk-val').innerText = this.value">
+                        </div>
+
+                        <button class="btn-primary" id="btn-run-search" onclick="executeSearch()">
+                            <span>⚡ Search Similar Images</span>
+                        </button>
+                    </div>
+
+                    <!-- Quick Sample Gallery -->
+                    <div class="samples-section">
+                        <span class="section-tag">Quick Demo Probes:</span>
+                        <div class="sample-pills">
+                            <button class="sample-pill" onclick="loadSampleProbe('demo_query_sun.bmp')">☀️ Red Sun</button>
+                            <button class="sample-pill" onclick="loadSampleProbe('gallery/02_deep_ocean.bmp')">🌊 Deep Ocean</button>
+                            <button class="sample-pill" onclick="loadSampleProbe('gallery/03_pine_forest.bmp')">🌲 Pine Forest</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right: Ranked Search Results -->
+                <div class="card panel-results">
+                    <div class="panel-header">
+                        <h2>2. Sub-Millisecond Similarity Results</h2>
+                        <div class="metrics-badge" id="search-metrics" style="display: none;">
+                            <span id="metric-latency">0.00 ms</span>
+                            <span class="badge-divider">•</span>
+                            <span id="metric-matches">0 Matches</span>
+                        </div>
+                    </div>
+
+                    <!-- Empty State -->
+                    <div class="empty-state" id="results-empty">
+                        <div class="empty-icon">🎯</div>
+                        <h3>No Search Executed Yet</h3>
+                        <p>Upload a query image on the left and click <strong>Search</strong> to retrieve visually similar matches ranked via HNSW graph proximity.</p>
+                    </div>
+
+                    <!-- Results Grid -->
+                    <div class="results-grid" id="results-grid" style="display: none;"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- VIEW 2: VISUAL CLUSTERING & GALLERY -->
+        <section id="view-clusters" class="tab-content">
+            <div class="cluster-actions-bar card">
+                <div class="action-left">
+                    <h2>Unsupervised Visual Clustering (k-Means++)</h2>
+                    <p class="subtitle">Extracts 64-D spatial pyramid color moments and automatically clusters image collections by aesthetic and color theme.</p>
+                </div>
+                <div class="action-right">
+                    <div class="k-selector">
+                        <label for="cluster-k-select">Clusters (K):</label>
+                        <select id="cluster-k-select">
+                            <option value="2">2 Clusters</option>
+                            <option value="3" selected>3 Clusters</option>
+                            <option value="4">4 Clusters</option>
+                            <option value="6">6 Clusters</option>
+                        </select>
+                    </div>
+                    <button class="btn-secondary" onclick="runClustering()">
+                        <span>🔮 Discover Clusters</span>
+                    </button>
+                    <button class="btn-primary" onclick="reindexGallery()">
+                        <span>⚡ Re-Index Gallery (Multi-Core)</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Upload New Gallery Batch -->
+            <div class="card gallery-upload-card">
+                <div class="upload-gallery-box" id="gallery-dropzone">
+                    <input type="file" id="gallery-file-input" multiple accept="image/jpeg,image/png,image/bmp" hidden>
+                    <div class="gallery-drop-content">
+                        <span class="icon">📁</span>
+                        <div class="text">
+                            <strong>Add Images to Gallery Collection</strong>
+                            <span>Drag &amp; drop multiple images here or <button class="btn-link" onclick="document.getElementById('gallery-file-input').click()">select files</button></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Discovered Clusters Container -->
+            <div class="clusters-container" id="clusters-container">
+                <div class="loading-spinner" id="clusters-loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>Executing Multi-Core k-Means++ Clustering on 64-D Embeddings...</p>
+                </div>
+                <div class="cluster-cards-grid" id="cluster-cards-grid"></div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="app-footer">
+        <p>Built with <strong>RCRE (Recep's Code Run Everywhere)</strong> • Pure C23 Architecture • HNSW Graph Retrieval • Single-Header Distribution</p>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>

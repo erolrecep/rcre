@@ -10,7 +10,7 @@ endif
 
 BINS = bin/rcre-lens bin/test_extractor bin/test_serializer
 
-.PHONY: all test demo clean
+.PHONY: all test demo cluster web serve clean
 
 all: $(BINS)
 
@@ -36,8 +36,15 @@ test: all
 demo: bin/rcre-lens
 	@./bin/rcre-lens demo
 
+cluster: bin/rcre-lens
+	@./bin/rcre-lens demo
+	@./bin/rcre-lens cluster -i demo_gallery.rcre_idx -k 3
+
+web: bin/rcre-lens
+	@python3 web_studio.py
+
+serve: web
+
 clean:
-	@rm -rf bin *.o demo_gallery *.bmp *.rcre_idx
+	@rm -rf bin *.o demo_gallery *.bmp *.rcre_idx uploads/*
 	@echo "🧹 Cleaned reverse_image_search build artifacts"
-
-

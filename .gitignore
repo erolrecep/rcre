@@ -22,3 +22,13 @@ __pycache__/
 # Temporary test video assets
 test_video/
 *.mp4
+
+# Temporary indices, bitstreams & demo outputs
+*.rcre_idx
+*.rpca
+projects/reverse_image_search/demo_gallery/
+projects/reverse_image_search/demo_gallery.rcre_idx
+projects/reverse_image_search/gallery/
+projects/reverse_image_search/uploads/
+projects/reverse_image_search/demo_query_sun.bmp
+projects/pca_compression/pca_demo_*

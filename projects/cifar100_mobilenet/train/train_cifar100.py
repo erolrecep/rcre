@@ -71,19 +71,29 @@ def export_test_samples(test_set, data_dir: Path, num_samples: int = 10, model: 
     manifest_path.write_text("\n".join(manifest_lines) + "\n")
     print(f"✅ Samples and manifest written to {manifest_path}")
 
-def train_epoch(model, loader, criterion, optimizer, device):
+def train_epoch(model, loader, criterion, optimizer, scaler, device, use_amp: bool = False):
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
 
     for inputs, targets in loader:
-        inputs, targets = inputs.to(device), targets.to(device)
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
+        inputs = inputs.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+        optimizer.zero_grad(set_to_none=True)
+
+        if use_amp and device.type == "cuda":
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
 
         running_loss += loss.item() * inputs.size(0)
         _, predicted = outputs.max(1)
@@ -92,7 +102,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
 
     return running_loss / total, 100.0 * correct / total
 
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion, device, use_amp: bool = False):
     model.eval()
     running_loss = 0.0
     top1_correct = 0
@@ -101,9 +111,17 @@ def evaluate(model, loader, criterion, device):
 
     with torch.no_grad():
         for inputs, targets in loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
+            inputs = inputs.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+
+            if use_amp and device.type == "cuda":
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    outputs = model(inputs)
+                    loss = criterion(outputs, targets)
+            else:
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+
             running_loss += loss.item() * inputs.size(0)
 
             _, pred5 = outputs.topk(5, 1, True, True)
@@ -117,6 +135,7 @@ def evaluate(model, loader, criterion, device):
     top1_acc = 100.0 * top1_correct / total
     top5_acc = 100.0 * top5_correct / total
     return running_loss / total, top1_acc, top5_acc
+
 
 CANONICAL_CLASSES = [
     "apple", "aquarium_fish", "baby", "bear", "beaver",
@@ -165,8 +184,28 @@ def main():
     parser.add_argument("--out-dir", type=str, default=str(Path(__file__).resolve().parent.parent), help="Output directory for binary model & data")
     args = parser.parse_args()
 
-    device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 Using compute device: {device}")
+    parser.add_argument("--workers", type=int, default=4, help="DataLoader worker processes")
+    parser.add_argument("--no-amp", action="store_true", help="Disable automatic mixed precision")
+    parser.add_argument("--device", type=str, default="auto", help="Compute device: cuda, mps, cpu, auto")
+    args = parser.parse_args()
+
+    if args.device == "auto":
+        device_str = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+    else:
+        device_str = args.device
+
+    device = torch.device(device_str)
+    print(f"🚀 Using compute device: {device} ({device.type.upper()})")
+
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        print(f"   CUDA Device: {torch.cuda.get_device_name(0)}")
+        print(f"   VRAM Total:  {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+
+    use_amp = (device.type == "cuda") and (not args.no_amp)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    if use_amp:
+        print("⚡ CUDA Automated Mixed Precision (AMP FP16) Enabled!")
 
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -196,23 +235,29 @@ def main():
         train_set = SyntheticCIFAR(1000)
         test_set = SyntheticCIFAR(100)
 
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    num_workers = args.workers if device.type == "cuda" else 0
+    pin_mem = (device.type == "cuda")
+
+    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False,
+                             num_workers=num_workers, pin_memory=pin_mem)
 
     if args.checkpoint and os.path.exists(args.checkpoint):
         print(f"📂 Loading weights from checkpoint: {args.checkpoint}")
         model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     elif not args.export_only and args.epochs > 0:
-        train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=0)
+        train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
+                                  num_workers=num_workers, pin_memory=pin_mem)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=4e-5)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
         print(f"🔥 Commencing training for {args.epochs} epoch(s)...")
         for ep in range(1, args.epochs + 1):
-            train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-            val_loss, top1, top5 = evaluate(model, test_loader, criterion, device)
+            train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scaler, device, use_amp=use_amp)
+            val_loss, top1, top5 = evaluate(model, test_loader, criterion, device, use_amp=use_amp)
             scheduler.step()
             print(f"   [Epoch {ep}/{args.epochs}] Train Loss: {train_loss:.4f} Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} Top-1: {top1:.2f}% Top-5: {top5:.2f}%")
+
 
     # Export Model to RCRE binary
     print(f"💾 Fusing BatchNorm layers and exporting model to {model_bin_path}...")

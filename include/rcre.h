@@ -532,6 +532,13 @@ RCRE_NODISCARD int rcre_ml_pca_fit(const RCRE_Tensor* X, size_t k,
 RCRE_NODISCARD int rcre_ml_pca_transform(const RCRE_Tensor* X, const RCRE_Tensor* components,
                                          const RCRE_Tensor* mean, RCRE_Tensor* X_proj);
 
+/**
+ * @brief Reconstructs data from principal component projections: X_recon = X_proj * components + mean.
+ */
+RCRE_NODISCARD int rcre_ml_pca_inverse_transform(const RCRE_Tensor* X_proj, const RCRE_Tensor* components,
+                                                 const RCRE_Tensor* mean, RCRE_Tensor* X_recon);
+
+
 /* ========================================================================= */
 /* Modern Tabular Ensemble: Flat-Array GBDT Inference (ML-REQ-03)            */
 /* ========================================================================= */

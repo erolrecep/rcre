@@ -127,8 +127,21 @@ static void test_pca(void) {
     status = rcre_ml_pca_transform(&X, &components, &mean, &X_proj);
     assert(status == RCRE_OK);
 
+    /* Test inverse transformation & exact 1D line reconstruction */
+    size_t R_shape[2] = {N, D};
+    RCRE_Tensor X_recon = rcre_tensor_create(R_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    status = rcre_ml_pca_inverse_transform(&X_proj, &components, &mean, &X_recon);
+    assert(status == RCRE_OK);
+
+    const float* X_orig = (const float*)X.data;
+    const float* X_rec = (const float*)X_recon.data;
+    for (size_t i = 0; i < N * D; ++i) {
+        assert(fabsf(X_orig[i] - X_rec[i]) < 1e-4f);
+    }
+
     rcre_arena_destroy(arena);
     printf("     ✓ PCA extracted primary eigenvector aligned with principal axis\n");
+    printf("     ✓ PCA inverse transform reconstructed original samples within epsilon < 1e-4\n");
 }
 
 static void test_kmeans_ex(void) {

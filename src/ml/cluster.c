@@ -535,3 +535,54 @@ RCRE_NODISCARD int rcre_ml_pca_transform(const RCRE_Tensor* X, const RCRE_Tensor
 
     return RCRE_OK;
 }
+
+RCRE_NODISCARD int rcre_ml_pca_inverse_transform(const RCRE_Tensor* X_proj, const RCRE_Tensor* components,
+                                                 const RCRE_Tensor* mean, RCRE_Tensor* X_recon) {
+    if (!X_proj || !X_proj->data || !components || !components->data ||
+        !mean || !mean->data || !X_recon || !X_recon->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    if (X_proj->ndim != 2 || components->ndim != 2 || X_recon->ndim != 2) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    size_t N = X_proj->shape[0];
+    size_t K = X_proj->shape[1];
+    size_t D = components->shape[1];
+
+    if (components->shape[0] != K || X_recon->shape[0] != N || X_recon->shape[1] != D) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    size_t mean_len = 1;
+    for (size_t d = 0; d < mean->ndim; ++d) {
+        mean_len *= mean->shape[d];
+    }
+    if (mean_len != D) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    const float* P_data = (const float*)X_proj->data;
+    const float* W_data = (const float*)components->data;
+    const float* mean_data = (const float*)mean->data;
+    float* out_data = (float*)X_recon->data;
+
+    for (size_t i = 0; i < N; ++i) {
+        float* row_out = &out_data[i * D];
+        /* Initialize row with mean */
+        memcpy(row_out, mean_data, D * sizeof(float));
+
+        /* Add linear combination of principal components */
+        const float* p_row = &P_data[i * K];
+        for (size_t k = 0; k < K; ++k) {
+            float alpha = p_row[k];
+            if (fabsf(alpha) > 1e-15f) {
+                rcre_hal.axpy_f32(D, alpha, &W_data[k * D], row_out);
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
