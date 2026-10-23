@@ -21,6 +21,15 @@ else
     OPEN_CMD = echo
 endif
 
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),x86_64)
+    AVX2_FLAGS ?= -mavx2 -mfma
+else ifeq ($(UNAME_M),amd64)
+    AVX2_FLAGS ?= -mavx2 -mfma
+else
+    AVX2_FLAGS ?=
+endif
+
 SRCS = src/core/arena.c \
        src/core/tensor.c \
        src/core/adapt.c \
@@ -79,6 +88,9 @@ $(DYLIB): $(ALL_OBJS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+src/hal/kernels_avx2.o: src/hal/kernels_avx2.c
+	$(CC) $(CFLAGS) $(AVX2_FLAGS) -c $< -o $@
 
 src/extras/%.o: src/extras/%.c
 	$(CC) $(CFLAGS) -Isrc/extras -c $< -o $@

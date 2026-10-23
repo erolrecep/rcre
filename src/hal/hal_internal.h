@@ -48,4 +48,18 @@ void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y);
 void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
 #endif
 
+/* WebAssembly 128-bit SIMD Micro-Kernels */
+#if defined(__wasm_simd128__)
+void rcre_wasm_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
+                        const float* A, size_t lda, 
+                        const float* B, size_t ldb, 
+                        float beta, float* C, size_t ldc);
+
+float rcre_wasm_dot_f32(const float* x, const float* y, size_t n);
+
+void rcre_wasm_axpy_f32(size_t n, float alpha, const float* x, float* y);
+
+void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
+#endif
+
 #endif /* RCRE_HAL_INTERNAL_H */

@@ -714,6 +714,20 @@ void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y);
 void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
 #endif
 
+/* WebAssembly 128-bit SIMD Micro-Kernels */
+#if defined(__wasm_simd128__)
+void rcre_wasm_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
+                        const float* A, size_t lda, 
+                        const float* B, size_t ldb, 
+                        float beta, float* C, size_t ldc);
+
+float rcre_wasm_dot_f32(const float* x, const float* y, size_t n);
+
+void rcre_wasm_axpy_f32(size_t n, float alpha, const float* x, float* y);
+
+void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
+#endif
+
 #endif /* RCRE_HAL_INTERNAL_H */
 
 /* --- Source: kernels_scalar.c --- */
@@ -1080,6 +1094,7 @@ void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
 
 #if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
 #include <immintrin.h>
+#include <string.h>
 
 float rcre_avx2_dot_f32(const float* x, const float* y, size_t n) {
     __m256 sum0 = _mm256_setzero_ps();
@@ -1134,16 +1149,235 @@ void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y) {
     }
 }
 
+/* 4x16 register-blocked GEMM micro-kernel on AVX2 + FMA (8 YMM accumulators) */
+static void avx2_gemm_microkernel_4x16(size_t K, float alpha,
+                                       const float* A, size_t lda,
+                                       const float* B, size_t ldb,
+                                       float beta, float* C, size_t ldc) {
+    __m256 c00 = _mm256_setzero_ps();
+    __m256 c01 = _mm256_setzero_ps();
+    __m256 c10 = _mm256_setzero_ps();
+    __m256 c11 = _mm256_setzero_ps();
+    __m256 c20 = _mm256_setzero_ps();
+    __m256 c21 = _mm256_setzero_ps();
+    __m256 c30 = _mm256_setzero_ps();
+    __m256 c31 = _mm256_setzero_ps();
+
+    for (size_t k = 0; k < K; ++k) {
+        __m256 b0 = _mm256_loadu_ps(&B[k * ldb + 0]);
+        __m256 b1 = _mm256_loadu_ps(&B[k * ldb + 8]);
+
+        __m256 a0 = _mm256_set1_ps(A[0 * lda + k]);
+        c00 = _mm256_fmadd_ps(a0, b0, c00);
+        c01 = _mm256_fmadd_ps(a0, b1, c01);
+
+        __m256 a1 = _mm256_set1_ps(A[1 * lda + k]);
+        c10 = _mm256_fmadd_ps(a1, b0, c10);
+        c11 = _mm256_fmadd_ps(a1, b1, c11);
+
+        __m256 a2 = _mm256_set1_ps(A[2 * lda + k]);
+        c20 = _mm256_fmadd_ps(a2, b0, c20);
+        c21 = _mm256_fmadd_ps(a2, b1, c21);
+
+        __m256 a3 = _mm256_set1_ps(A[3 * lda + k]);
+        c30 = _mm256_fmadd_ps(a3, b0, c30);
+        c31 = _mm256_fmadd_ps(a3, b1, c31);
+    }
+
+    __m256 a_vec = _mm256_set1_ps(alpha);
+    __m256 b_vec = _mm256_set1_ps(beta);
+
+    #define STORE_ROW_AVX2_16(row, acc0, acc1) do { \
+        __m256 old0 = (beta == 0.0f) ? _mm256_setzero_ps() : _mm256_loadu_ps(&C[(row) * ldc + 0]); \
+        __m256 old1 = (beta == 0.0f) ? _mm256_setzero_ps() : _mm256_loadu_ps(&C[(row) * ldc + 8]); \
+        __m256 out0 = _mm256_fmadd_ps(acc0, a_vec, _mm256_mul_ps(old0, b_vec)); \
+        __m256 out1 = _mm256_fmadd_ps(acc1, a_vec, _mm256_mul_ps(old1, b_vec)); \
+        _mm256_storeu_ps(&C[(row) * ldc + 0], out0); \
+        _mm256_storeu_ps(&C[(row) * ldc + 8], out1); \
+    } while(0)
+
+    STORE_ROW_AVX2_16(0, c00, c01);
+    STORE_ROW_AVX2_16(1, c10, c11);
+    STORE_ROW_AVX2_16(2, c20, c21);
+    STORE_ROW_AVX2_16(3, c30, c31);
+    #undef STORE_ROW_AVX2_16
+}
+
+/* 4x8 register-blocked GEMM micro-kernel fallback for narrower column blocks */
+static void avx2_gemm_microkernel_4x8(size_t K, float alpha,
+                                      const float* A, size_t lda,
+                                      const float* B, size_t ldb,
+                                      float beta, float* C, size_t ldc) {
+    __m256 c0 = _mm256_setzero_ps();
+    __m256 c1 = _mm256_setzero_ps();
+    __m256 c2 = _mm256_setzero_ps();
+    __m256 c3 = _mm256_setzero_ps();
+
+    for (size_t k = 0; k < K; ++k) {
+        __m256 b0 = _mm256_loadu_ps(&B[k * ldb + 0]);
+
+        c0 = _mm256_fmadd_ps(_mm256_set1_ps(A[0 * lda + k]), b0, c0);
+        c1 = _mm256_fmadd_ps(_mm256_set1_ps(A[1 * lda + k]), b0, c1);
+        c2 = _mm256_fmadd_ps(_mm256_set1_ps(A[2 * lda + k]), b0, c2);
+        c3 = _mm256_fmadd_ps(_mm256_set1_ps(A[3 * lda + k]), b0, c3);
+    }
+
+    __m256 a_vec = _mm256_set1_ps(alpha);
+    __m256 b_vec = _mm256_set1_ps(beta);
+
+    #define STORE_ROW_AVX2_8(row, acc) do { \
+        __m256 old = (beta == 0.0f) ? _mm256_setzero_ps() : _mm256_loadu_ps(&C[(row) * ldc + 0]); \
+        __m256 out = _mm256_fmadd_ps(acc, a_vec, _mm256_mul_ps(old, b_vec)); \
+        _mm256_storeu_ps(&C[(row) * ldc + 0], out); \
+    } while(0)
+
+    STORE_ROW_AVX2_8(0, c0);
+    STORE_ROW_AVX2_8(1, c1);
+    STORE_ROW_AVX2_8(2, c2);
+    STORE_ROW_AVX2_8(3, c3);
+    #undef STORE_ROW_AVX2_8
+}
+
 void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
                         const float* A, size_t lda, 
                         const float* B, size_t ldb, 
                         float beta, float* C, size_t ldc) {
-    /* Fallback to tiled scalar if AVX2 micro-kernel driver not specialized */
-    rcre_scalar_gemm_f32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    /* Cache-blocked driver: MB x NB x KB blocks */
+    const size_t MB = 64;
+    const size_t NB = 64;
+    const size_t KB = 64;
+
+    /* Initialize C with beta scaling if needed */
+    if (beta != 1.0f) {
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = 0; j < N; ++j) {
+                C[i * ldc + j] = (beta == 0.0f) ? 0.0f : C[i * ldc + j] * beta;
+            }
+        }
+    }
+
+    if (alpha == 0.0f) return;
+
+    for (size_t ii = 0; ii < M; ii += MB) {
+        size_t i_end = (ii + MB < M) ? ii + MB : M;
+
+        for (size_t jj = 0; jj < N; jj += NB) {
+            size_t j_end = (jj + NB < N) ? jj + NB : N;
+
+            for (size_t kk = 0; kk < K; kk += KB) {
+                size_t k_end = (kk + KB < K) ? kk + KB : K;
+                size_t sub_K = k_end - kk;
+
+                /* 4x16 and 4x8 tiled blocks */
+                size_t i = ii;
+                for (; i + 3 < i_end; i += 4) {
+                    size_t j = jj;
+                    for (; j + 15 < j_end; j += 16) {
+                        avx2_gemm_microkernel_4x16(sub_K, alpha,
+                                                   &A[i * lda + kk], lda,
+                                                   &B[kk * ldb + j], ldb,
+                                                   1.0f, /* C pre-scaled by beta */
+                                                   &C[i * ldc + j], ldc);
+                    }
+                    for (; j + 7 < j_end; j += 8) {
+                        avx2_gemm_microkernel_4x8(sub_K, alpha,
+                                                  &A[i * lda + kk], lda,
+                                                  &B[kk * ldb + j], ldb,
+                                                  1.0f,
+                                                  &C[i * ldc + j], ldc);
+                    }
+                    /* Remainder columns in 4-row block */
+                    for (; j < j_end; ++j) {
+                        for (size_t r = 0; r < 4; ++r) {
+                            float acc = 0.0f;
+                            for (size_t k = kk; k < k_end; ++k) {
+                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                            }
+                            C[(i + r) * ldc + j] += alpha * acc;
+                        }
+                    }
+                }
+
+                /* Remainder rows */
+                for (; i < i_end; ++i) {
+                    for (size_t j = jj; j < j_end; ++j) {
+                        float acc = 0.0f;
+                        for (size_t k = kk; k < k_end; ++k) {
+                            acc += A[i * lda + k] * B[k * ldb + j];
+                        }
+                        C[i * ldc + j] += alpha * acc;
+                    }
+                }
+            }
+        }
+    }
 }
 
 void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels) {
-    rcre_scalar_rgb_to_gray_u8(rgb, gray, num_pixels);
+    const __m128i shuf_r = _mm_setr_epi8(0, 3, 6, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    const __m128i shuf_g = _mm_setr_epi8(1, 4, 7, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    const __m128i shuf_b = _mm_setr_epi8(2, 5, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+
+    const __m256i coeff_r = _mm256_set1_epi32(9798);
+    const __m256i coeff_g = _mm256_set1_epi32(19235);
+    const __m256i coeff_b = _mm256_set1_epi32(3735);
+    const __m256i bias    = _mm256_set1_epi32(16384);
+
+    size_t i = 0;
+    for (; i + 7 < num_pixels; i += 8) {
+        /* Read exactly 24 bytes (8 pixels) safely without buffer over-read */
+        uint64_t lo0 = *(const uint64_t*)&rgb[i * 3 + 0];
+        uint32_t hi0 = *(const uint32_t*)&rgb[i * 3 + 8];
+        __m128i v0 = _mm_cvtsi64_si128((int64_t)lo0);
+        v0 = _mm_insert_epi32(v0, (int32_t)hi0, 2);
+
+        uint64_t lo1 = *(const uint64_t*)&rgb[i * 3 + 12];
+        uint32_t hi1 = *(const uint32_t*)&rgb[i * 3 + 20];
+        __m128i v1 = _mm_cvtsi64_si128((int64_t)lo1);
+        v1 = _mm_insert_epi32(v1, (int32_t)hi1, 2);
+
+        /* De-interleave R, G, B channels */
+        __m128i r0 = _mm_shuffle_epi8(v0, shuf_r);
+        __m128i r1 = _mm_shuffle_epi8(v1, shuf_r);
+        __m128i r8 = _mm_unpacklo_epi32(r0, r1);
+
+        __m128i g0 = _mm_shuffle_epi8(v0, shuf_g);
+        __m128i g1 = _mm_shuffle_epi8(v1, shuf_g);
+        __m128i g_chan8 = _mm_unpacklo_epi32(g0, g1);
+
+        __m128i b0 = _mm_shuffle_epi8(v0, shuf_b);
+        __m128i b1 = _mm_shuffle_epi8(v1, shuf_b);
+        __m128i b8 = _mm_unpacklo_epi32(b0, b1);
+
+        /* Zero-extend 8 uint8s into 8 uint32s in 256-bit registers */
+        __m256i r32 = _mm256_cvtepu8_epi32(r8);
+        __m256i g32 = _mm256_cvtepu8_epi32(g_chan8);
+        __m256i b32 = _mm256_cvtepu8_epi32(b8);
+
+        /* Fixed-point Rec.601 integer calculation */
+        __m256i acc = bias;
+        acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(r32, coeff_r));
+        acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(g32, coeff_g));
+        acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(b32, coeff_b));
+        __m256i gray32 = _mm256_srli_epi32(acc, 15);
+
+        /* Pack 8 32-bit integers down to 8 uint8 bytes */
+        __m128i g_lo = _mm256_castsi256_si128(gray32);
+        __m128i g_hi = _mm256_extracti128_si256(gray32, 1);
+        __m128i g16  = _mm_packus_epi32(g_lo, g_hi);
+        __m128i gray8 = _mm_packus_epi16(g16, g16);
+
+        uint64_t res8 = (uint64_t)_mm_cvtsi128_si64(gray8);
+        memcpy(&gray[i], &res8, 8);
+    }
+
+    /* Scalar remainder */
+    for (; i < num_pixels; ++i) {
+        uint32_t r = rgb[i * 3 + 0];
+        uint32_t g = rgb[i * 3 + 1];
+        uint32_t b = rgb[i * 3 + 2];
+        gray[i] = (uint8_t)((9798 * r + 19235 * g + 3735 * b + 16384) >> 15);
+    }
 }
 
 #endif /* (__x86_64__ || _M_X64) && __AVX2__ */
@@ -1204,6 +1438,173 @@ void rcre_wasm_axpy_f32(size_t n, float alpha, const float* x, float* y) {
 
     for (; i < n; ++i) {
         y[i] += alpha * x[i];
+    }
+}
+
+/* 4x8 register-blocked GEMM micro-kernel on WebAssembly 128-bit SIMD */
+static void wasm_gemm_microkernel_4x8(size_t K, float alpha,
+                                      const float* A, size_t lda,
+                                      const float* B, size_t ldb,
+                                      float beta, float* C, size_t ldc) {
+    v128_t c00 = wasm_f32x4_splat(0.0f);
+    v128_t c01 = wasm_f32x4_splat(0.0f);
+    v128_t c10 = wasm_f32x4_splat(0.0f);
+    v128_t c11 = wasm_f32x4_splat(0.0f);
+    v128_t c20 = wasm_f32x4_splat(0.0f);
+    v128_t c21 = wasm_f32x4_splat(0.0f);
+    v128_t c30 = wasm_f32x4_splat(0.0f);
+    v128_t c31 = wasm_f32x4_splat(0.0f);
+
+    for (size_t k = 0; k < K; ++k) {
+        v128_t b0 = wasm_v128_load(&B[k * ldb + 0]);
+        v128_t b1 = wasm_v128_load(&B[k * ldb + 4]);
+
+        v128_t a0 = wasm_f32x4_splat(A[0 * lda + k]);
+        c00 = wasm_f32x4_add(c00, wasm_f32x4_mul(b0, a0));
+        c01 = wasm_f32x4_add(c01, wasm_f32x4_mul(b1, a0));
+
+        v128_t a1 = wasm_f32x4_splat(A[1 * lda + k]);
+        c10 = wasm_f32x4_add(c10, wasm_f32x4_mul(b0, a1));
+        c11 = wasm_f32x4_add(c11, wasm_f32x4_mul(b1, a1));
+
+        v128_t a2 = wasm_f32x4_splat(A[2 * lda + k]);
+        c20 = wasm_f32x4_add(c20, wasm_f32x4_mul(b0, a2));
+        c21 = wasm_f32x4_add(c21, wasm_f32x4_mul(b1, a2));
+
+        v128_t a3 = wasm_f32x4_splat(A[3 * lda + k]);
+        c30 = wasm_f32x4_add(c30, wasm_f32x4_mul(b0, a3));
+        c31 = wasm_f32x4_add(c31, wasm_f32x4_mul(b1, a3));
+    }
+
+    v128_t a_vec = wasm_f32x4_splat(alpha);
+    v128_t b_vec = wasm_f32x4_splat(beta);
+
+    #define STORE_ROW_WASM(row, acc0, acc1) do { \
+        v128_t old0 = (beta == 0.0f) ? wasm_f32x4_splat(0.0f) : wasm_v128_load(&C[(row) * ldc + 0]); \
+        v128_t old1 = (beta == 0.0f) ? wasm_f32x4_splat(0.0f) : wasm_v128_load(&C[(row) * ldc + 4]); \
+        v128_t out0 = wasm_f32x4_add(wasm_f32x4_mul(old0, b_vec), wasm_f32x4_mul(acc0, a_vec)); \
+        v128_t out1 = wasm_f32x4_add(wasm_f32x4_mul(old1, b_vec), wasm_f32x4_mul(acc1, a_vec)); \
+        wasm_v128_store(&C[(row) * ldc + 0], out0); \
+        wasm_v128_store(&C[(row) * ldc + 4], out1); \
+    } while(0)
+
+    STORE_ROW_WASM(0, c00, c01);
+    STORE_ROW_WASM(1, c10, c11);
+    STORE_ROW_WASM(2, c20, c21);
+    STORE_ROW_WASM(3, c30, c31);
+    #undef STORE_ROW_WASM
+}
+
+void rcre_wasm_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
+                        const float* A, size_t lda, 
+                        const float* B, size_t ldb, 
+                        float beta, float* C, size_t ldc) {
+    /* Cache-blocked driver for 4x8 micro-kernel */
+    const size_t MB = 64;
+    const size_t NB = 64;
+    const size_t KB = 64;
+
+    /* Initialize C with beta scaling if needed */
+    if (beta != 1.0f) {
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = 0; j < N; ++j) {
+                C[i * ldc + j] = (beta == 0.0f) ? 0.0f : C[i * ldc + j] * beta;
+            }
+        }
+    }
+
+    if (alpha == 0.0f) return;
+
+    for (size_t ii = 0; ii < M; ii += MB) {
+        size_t i_end = (ii + MB < M) ? ii + MB : M;
+
+        for (size_t jj = 0; jj < N; jj += NB) {
+            size_t j_end = (jj + NB < N) ? jj + NB : N;
+
+            for (size_t kk = 0; kk < K; kk += KB) {
+                size_t k_end = (kk + KB < K) ? kk + KB : K;
+                size_t sub_K = k_end - kk;
+
+                /* 4x8 tiled blocks */
+                size_t i = ii;
+                for (; i + 3 < i_end; i += 4) {
+                    size_t j = jj;
+                    for (; j + 7 < j_end; j += 8) {
+                        wasm_gemm_microkernel_4x8(sub_K, alpha,
+                                                  &A[i * lda + kk], lda,
+                                                  &B[kk * ldb + j], ldb,
+                                                  1.0f, /* C already pre-scaled by beta */
+                                                  &C[i * ldc + j], ldc);
+                    }
+                    /* Remainder columns in 4-row block */
+                    for (; j < j_end; ++j) {
+                        for (size_t r = 0; r < 4; ++r) {
+                            float acc = 0.0f;
+                            for (size_t k = kk; k < k_end; ++k) {
+                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                            }
+                            C[(i + r) * ldc + j] += alpha * acc;
+                        }
+                    }
+                }
+
+                /* Remainder rows */
+                for (; i < i_end; ++i) {
+                    for (size_t j = jj; j < j_end; ++j) {
+                        float acc = 0.0f;
+                        for (size_t k = kk; k < k_end; ++k) {
+                            acc += A[i * lda + k] * B[k * ldb + j];
+                        }
+                        C[i * ldc + j] += alpha * acc;
+                    }
+                }
+            }
+        }
+    }
+}
+
+void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels) {
+    const v128_t r_coeff = wasm_i32x4_splat(9798);
+    const v128_t g_coeff = wasm_i32x4_splat(19235);
+    const v128_t b_coeff = wasm_i32x4_splat(3735);
+    const v128_t bias    = wasm_i32x4_splat(16384);
+
+    size_t i = 0;
+    for (; i + 7 < num_pixels; i += 8) {
+        v128_t r32_0 = wasm_i32x4_make(rgb[(i + 0) * 3 + 0], rgb[(i + 1) * 3 + 0], rgb[(i + 2) * 3 + 0], rgb[(i + 3) * 3 + 0]);
+        v128_t g32_0 = wasm_i32x4_make(rgb[(i + 0) * 3 + 1], rgb[(i + 1) * 3 + 1], rgb[(i + 2) * 3 + 1], rgb[(i + 3) * 3 + 1]);
+        v128_t b32_0 = wasm_i32x4_make(rgb[(i + 0) * 3 + 2], rgb[(i + 1) * 3 + 2], rgb[(i + 2) * 3 + 2], rgb[(i + 3) * 3 + 2]);
+
+        v128_t r32_1 = wasm_i32x4_make(rgb[(i + 4) * 3 + 0], rgb[(i + 5) * 3 + 0], rgb[(i + 6) * 3 + 0], rgb[(i + 7) * 3 + 0]);
+        v128_t g32_1 = wasm_i32x4_make(rgb[(i + 4) * 3 + 1], rgb[(i + 5) * 3 + 1], rgb[(i + 6) * 3 + 1], rgb[(i + 7) * 3 + 1]);
+        v128_t b32_1 = wasm_i32x4_make(rgb[(i + 4) * 3 + 2], rgb[(i + 5) * 3 + 2], rgb[(i + 6) * 3 + 2], rgb[(i + 7) * 3 + 2]);
+
+        v128_t acc0 = bias;
+        acc0 = wasm_i32x4_add(acc0, wasm_i32x4_mul(r32_0, r_coeff));
+        acc0 = wasm_i32x4_add(acc0, wasm_i32x4_mul(g32_0, g_coeff));
+        acc0 = wasm_i32x4_add(acc0, wasm_i32x4_mul(b32_0, b_coeff));
+        v128_t gray32_0 = wasm_u32x4_shr(acc0, 15);
+
+        v128_t acc1 = bias;
+        acc1 = wasm_i32x4_add(acc1, wasm_i32x4_mul(r32_1, r_coeff));
+        acc1 = wasm_i32x4_add(acc1, wasm_i32x4_mul(g32_1, g_coeff));
+        acc1 = wasm_i32x4_add(acc1, wasm_i32x4_mul(b32_1, b_coeff));
+        v128_t gray32_1 = wasm_u32x4_shr(acc1, 15);
+
+        v128_t gray16 = wasm_i16x8_narrow_i32x4(gray32_0, gray32_1);
+        v128_t gray8  = wasm_u8x16_narrow_i16x8(gray16, gray16);
+
+        uint64_t res8 = (uint64_t)(uint32_t)wasm_i32x4_extract_lane(gray8, 0) |
+                        ((uint64_t)(uint32_t)wasm_i32x4_extract_lane(gray8, 1) << 32);
+        __builtin_memcpy(&gray[i], &res8, 8);
+    }
+
+    /* Scalar remainder */
+    for (; i < num_pixels; ++i) {
+        uint32_t r = rgb[i * 3 + 0];
+        uint32_t g = rgb[i * 3 + 1];
+        uint32_t b = rgb[i * 3 + 2];
+        gray[i] = (uint8_t)((9798 * r + 19235 * g + 3735 * b + 16384) >> 15);
     }
 }
 
@@ -1348,6 +1749,19 @@ void rcre_hal_init(void) {
         rcre_hal.dot_f32        = rcre_avx2_dot_f32;
         rcre_hal.axpy_f32       = rcre_avx2_axpy_f32;
         rcre_hal.rgb_to_gray_u8 = rcre_avx2_rgb_to_gray_u8;
+        atomic_store(&s_hal_initialized, true);
+        return;
+    }
+#endif
+
+#if defined(__wasm_simd128__)
+    if (feats & RCRE_CPU_FEAT_WASM_SIMD) {
+        rcre_hal.backend_name   = "WebAssembly SIMD 128-bit";
+        rcre_hal.cpu_features   = feats;
+        rcre_hal.gemm_f32       = rcre_wasm_gemm_f32;
+        rcre_hal.dot_f32        = rcre_wasm_dot_f32;
+        rcre_hal.axpy_f32       = rcre_wasm_axpy_f32;
+        rcre_hal.rgb_to_gray_u8 = rcre_wasm_rgb_to_gray_u8;
         atomic_store(&s_hal_initialized, true);
         return;
     }

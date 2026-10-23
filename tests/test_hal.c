@@ -27,6 +27,16 @@ static void test_cpu_probe_and_backend(void) {
     assert(feats & RCRE_CPU_FEAT_NEON);
     printf("     ✓ Confirmed ARM NEON hardware capability bit\n");
 #endif
+
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+    assert(feats & RCRE_CPU_FEAT_AVX2);
+    printf("     ✓ Confirmed x86 AVX2 hardware capability bit\n");
+#endif
+
+#if defined(__wasm_simd128__)
+    assert(feats & RCRE_CPU_FEAT_WASM_SIMD);
+    printf("     ✓ Confirmed WebAssembly SIMD hardware capability bit\n");
+#endif
 }
 
 static void test_hal_dot_f32(void) {

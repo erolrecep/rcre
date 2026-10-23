@@ -53,6 +53,19 @@ void rcre_hal_init(void) {
     }
 #endif
 
+#if defined(__wasm_simd128__)
+    if (feats & RCRE_CPU_FEAT_WASM_SIMD) {
+        rcre_hal.backend_name   = "WebAssembly SIMD 128-bit";
+        rcre_hal.cpu_features   = feats;
+        rcre_hal.gemm_f32       = rcre_wasm_gemm_f32;
+        rcre_hal.dot_f32        = rcre_wasm_dot_f32;
+        rcre_hal.axpy_f32       = rcre_wasm_axpy_f32;
+        rcre_hal.rgb_to_gray_u8 = rcre_wasm_rgb_to_gray_u8;
+        atomic_store(&s_hal_initialized, true);
+        return;
+    }
+#endif
+
     rcre_hal.backend_name   = "ISO C23 Scalar Reference";
     rcre_hal.cpu_features   = feats;
     rcre_hal.gemm_f32       = rcre_scalar_gemm_f32;
