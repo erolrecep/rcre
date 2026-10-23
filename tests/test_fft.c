@@ -6,18 +6,13 @@
  */
 
 #include "rcre.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <assert.h>
+#include "test_framework.h"
 
 #define EPSILON 1e-5f
 
 static void test_fft_1d(void) {
-    printf("  -> Testing 1D FFT and Inverse IFFT round-trip (N=8)...\n");
     RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
-    assert(arena != NULL);
+    ASSERT_NOT_NULL(arena);
 
     const size_t N = 8;
     RCRE_Complex sig[8] = {
@@ -35,30 +30,28 @@ static void test_fft_1d(void) {
 
     /* Forward FFT */
     int status = rcre_fft_1d(sig, N, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* DC component for 1+2+...+8 = 36 */
-    assert(fabsf(sig[0].re - 36.0f) < 1e-4f);
-    assert(fabsf(sig[0].im - 0.0f) < 1e-4f);
+    ASSERT_FLOAT_NEAR(36.0f, sig[0].re, 1e-4f);
+    ASSERT_FLOAT_NEAR(0.0f, sig[0].im, 1e-4f);
 
     /* Inverse FFT */
     status = rcre_ifft_1d(sig, N, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* Assert exact reconstruction */
     for (size_t i = 0; i < N; ++i) {
-        assert(fabsf(sig[i].re - orig[i].re) < EPSILON);
-        assert(fabsf(sig[i].im - 0.0f) < EPSILON);
+        ASSERT_FLOAT_NEAR(orig[i].re, sig[i].re, EPSILON);
+        ASSERT_FLOAT_NEAR(0.0f, sig[i].im, EPSILON);
     }
 
     rcre_arena_destroy(arena);
-    printf("     ✓ 1D FFT/IFFT exact inversion verified (reconstruction error < 1e-5)\n");
 }
 
 static void test_fft_2d(void) {
-    printf("  -> Testing 2D FFT and Inverse 2D IFFT on image matrix (16x16)...\n");
     RCRE_Arena* arena = rcre_arena_create(4 * 1024 * 1024);
-    assert(arena != NULL);
+    ASSERT_NOT_NULL(arena);
 
     const size_t H = 16;
     const size_t W = 16;
@@ -78,32 +71,22 @@ static void test_fft_2d(void) {
 
     /* 1. Forward 2D FFT */
     int status = rcre_fft_2d(&img, &out_re, &out_im, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* 2. Inverse 2D IFFT */
     status = rcre_ifft_2d(&out_re, &out_im, &recon, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* 3. Check reconstruction fidelity */
     float* recon_data = (float*)recon.data;
-    float max_diff = 0.0f;
-    for (size_t i = 0; i < H * W; ++i) {
-        float diff = fabsf(img_data[i] - recon_data[i]);
-        if (diff > max_diff) {
-            max_diff = diff;
-        }
-    }
-
-    assert(max_diff < EPSILON);
+    ASSERT_FLOAT_ARRAY_NEAR(img_data, recon_data, H * W, EPSILON);
 
     rcre_arena_destroy(arena);
-    printf("     ✓ 2D FFT/IFFT round-trip reconstruction verified (max diff: %e)\n", max_diff);
 }
 
 static void test_fftshift(void) {
-    printf("  -> Testing 2D FFTShift and IFFTShift quadrant permutation (4x4)...\n");
     RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
-    assert(arena != NULL);
+    ASSERT_NOT_NULL(arena);
 
     const size_t H = 4;
     const size_t W = 4;
@@ -118,28 +101,26 @@ static void test_fftshift(void) {
     re[0] = 99.0f;
 
     int status = rcre_fftshift_2d(&mat_re, &mat_im);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* After fftshift on 4x4, (0, 0) shifts to (2, 2) */
-    assert(re[2 * W + 2] == 99.0f);
-    assert(re[0] == 0.0f);
+    ASSERT_FLOAT_NEAR(99.0f, re[2 * W + 2], 1e-5f);
+    ASSERT_FLOAT_NEAR(0.0f, re[0], 1e-5f);
 
     /* Invert shift */
     status = rcre_ifftshift_2d(&mat_re, &mat_im);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* Back to (0, 0) */
-    assert(re[0] == 99.0f);
-    assert(re[2 * W + 2] == 0.0f);
+    ASSERT_FLOAT_NEAR(99.0f, re[0], 1e-5f);
+    ASSERT_FLOAT_NEAR(0.0f, re[2 * W + 2], 1e-5f);
 
     rcre_arena_destroy(arena);
-    printf("     ✓ 2D FFTShift quadrant rotation centered DC frequency component\n");
 }
 
 static void test_fft_filter(void) {
-    printf("  -> Testing 2D frequency-domain Gaussian filtering...\n");
     RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
-    assert(arena != NULL);
+    ASSERT_NOT_NULL(arena);
 
     const size_t H = 8;
     const size_t W = 8;
@@ -155,25 +136,23 @@ static void test_fft_filter(void) {
 
     /* Apply Gaussian low-pass filter with cutoff radius 2.0 */
     int status = rcre_fft_filter_2d(&spec_re, &spec_im, 2.0f, false, true);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* Center (4, 4) distance = 0 -> filter value must be 1.0 */
     size_t center_idx = 4 * W + 4;
-    assert(fabsf(re[center_idx] - 1.0f) < 1e-4f);
+    ASSERT_FLOAT_NEAR(1.0f, re[center_idx], 1e-4f);
 
     /* Corner (0, 0) distance = sqrt(32) ~ 5.65 -> filter value should be significantly attenuated */
-    assert(re[0] < 0.1f);
+    ASSERT_TRUE(re[0] < 0.1f);
 
     rcre_arena_destroy(arena);
-    printf("     ✓ 2D Gaussian frequency-domain low-pass filter verified\n");
 }
 
 int main(void) {
-    printf("🧪 Running RCRE Fast Fourier Transform Tests (FFT-REQ-01 to 04)...\n");
-    test_fft_1d();
-    test_fft_2d();
-    test_fftshift();
-    test_fft_filter();
-    printf("✅ All Fast Fourier Transform Tests Passed Successfully!\n");
-    return 0;
+    test_suite_begin("RCRE Fast Fourier Transform & Spectral Filter (FFT-REQ-01 to 04)");
+    TEST_RUN(test_fft_1d);
+    TEST_RUN(test_fft_2d);
+    TEST_RUN(test_fftshift);
+    TEST_RUN(test_fft_filter);
+    return test_suite_report();
 }

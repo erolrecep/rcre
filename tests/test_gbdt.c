@@ -4,18 +4,13 @@
  */
 
 #include "rcre.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <assert.h>
+#include "test_framework.h"
 
 #define EPSILON 1e-4f
 
 static void test_gbdt_ensemble_inference(void) {
-    printf("  -> Testing flat-array GBDT 2-tree ensemble inference...\n");
     RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
-    assert(arena != NULL);
+    ASSERT_NOT_NULL(arena);
 
     /* Construct 2-tree ensemble */
     /* Tree 0: root at 0, leaves at 1 and 2 */
@@ -61,7 +56,7 @@ static void test_gbdt_ensemble_inference(void) {
     RCRE_Tensor preds = rcre_tensor_create(P_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
 
     int status = rcre_ml_gbdt_predict(&model, &X, &preds);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     float* p = (float*)preds.data;
 
@@ -70,18 +65,16 @@ static void test_gbdt_ensemble_inference(void) {
     float exp_2 = 1.0f / (1.0f + expf(-(-0.5f)));
     float exp_3 = 1.0f / (1.0f + expf(-(0.5f)));
 
-    assert(fabsf(p[0] - exp_0) < EPSILON);
-    assert(fabsf(p[1] - exp_1) < EPSILON);
-    assert(fabsf(p[2] - exp_2) < EPSILON);
-    assert(fabsf(p[3] - exp_3) < EPSILON);
+    ASSERT_FLOAT_NEAR(exp_0, p[0], EPSILON);
+    ASSERT_FLOAT_NEAR(exp_1, p[1], EPSILON);
+    ASSERT_FLOAT_NEAR(exp_2, p[2], EPSILON);
+    ASSERT_FLOAT_NEAR(exp_3, p[3], EPSILON);
 
     rcre_arena_destroy(arena);
-    printf("     ✓ GBDT tree traversal and sigmoid accumulation verified\n");
 }
 
 int main(void) {
-    printf("🧪 Running RCRE GBDT Inference Tests (ML-REQ-03)...\n");
-    test_gbdt_ensemble_inference();
-    printf("✅ All GBDT Inference Tests Passed Successfully!\n");
-    return 0;
+    test_suite_begin("RCRE Flat-Array GBDT Inference Engine (ML-REQ-03)");
+    TEST_RUN(test_gbdt_ensemble_inference);
+    return test_suite_report();
 }

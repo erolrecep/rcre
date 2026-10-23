@@ -13,20 +13,15 @@
  */
 
 #include "rcre.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <assert.h>
+#include "test_framework.h"
 
 #define EPSILON 1e-4f
 
-static void test_conv2d(RCRE_Arena* arena) {
-    printf("  -> Testing 2D spatial convolution (Conv2D)...\n");
+static void test_conv2d(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
 
     /* Input: 1 channel, 3x3 */
-    /* 1 2 3
-       4 5 6
-       7 8 9 */
     float in_data[9] = {
         1.0f, 2.0f, 3.0f,
         4.0f, 5.0f, 6.0f,
@@ -36,8 +31,6 @@ static void test_conv2d(RCRE_Arena* arena) {
     RCRE_Tensor in = rcre_tensor_from_buffer(in_data, in_shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW);
 
     /* Weights: 1 out_channel, 1 in_channel, 2x2 */
-    /* 1 0
-       0 1 */
     float w_data[4] = {
         1.0f, 0.0f,
         0.0f, 1.0f
@@ -58,8 +51,10 @@ static void test_conv2d(RCRE_Arena* arena) {
 
     RCRE_Tensor out = {0};
     int status = rcre_nn_conv2d(&in, &weights, &bias, &params, &out, arena);
-    assert(status == RCRE_OK);
-    assert(out.shape[0] == 1 && out.shape[1] == 2 && out.shape[2] == 2);
+    ASSERT_INT_EQ(RCRE_OK, status);
+    ASSERT_UINT_EQ(1, out.shape[0]);
+    ASSERT_UINT_EQ(2, out.shape[1]);
+    ASSERT_UINT_EQ(2, out.shape[2]);
 
     /* Expected:
        (0,0): 1*1 + 5*1 + 0.5 = 6.5
@@ -68,16 +63,17 @@ static void test_conv2d(RCRE_Arena* arena) {
        (1,1): 5*1 + 9*1 + 0.5 = 14.5
     */
     const float* out_data = (const float*)out.data;
-    assert(fabsf(out_data[0] - 6.5f) < EPSILON);
-    assert(fabsf(out_data[1] - 8.5f) < EPSILON);
-    assert(fabsf(out_data[2] - 12.5f) < EPSILON);
-    assert(fabsf(out_data[3] - 14.5f) < EPSILON);
+    ASSERT_FLOAT_NEAR(6.5f, out_data[0], EPSILON);
+    ASSERT_FLOAT_NEAR(8.5f, out_data[1], EPSILON);
+    ASSERT_FLOAT_NEAR(12.5f, out_data[2], EPSILON);
+    ASSERT_FLOAT_NEAR(14.5f, out_data[3], EPSILON);
 
-    printf("     ✓ Conv2D spatial convolution and bias accumulation verified\n");
+    rcre_arena_destroy(arena);
 }
 
-static void test_depthwise_conv2d(RCRE_Arena* arena) {
-    printf("  -> Testing Depthwise 2D separable convolution...\n");
+static void test_depthwise_conv2d(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
 
     /* 2 channels, 3x3 */
     float in_data[18] = {
@@ -113,21 +109,24 @@ static void test_depthwise_conv2d(RCRE_Arena* arena) {
     };
 
     RCRE_Tensor out = {0};
-    int status = rcre_nn_depthwise_conv2d(&in, &weights, nullptr, &params, &out, arena);
-    assert(status == RCRE_OK);
-    assert(out.shape[0] == 2 && out.shape[1] == 2 && out.shape[2] == 2);
+    int status = rcre_nn_depthwise_conv2d(&in, &weights, NULL, &params, &out, arena);
+    ASSERT_INT_EQ(RCRE_OK, status);
+    ASSERT_UINT_EQ(2, out.shape[0]);
+    ASSERT_UINT_EQ(2, out.shape[1]);
+    ASSERT_UINT_EQ(2, out.shape[2]);
 
     const float* out_data = (const float*)out.data;
     /* Both channels should evaluate to 4.0 for all elements */
     for (int i = 0; i < 8; ++i) {
-        assert(fabsf(out_data[i] - 4.0f) < EPSILON);
+        ASSERT_FLOAT_NEAR(4.0f, out_data[i], EPSILON);
     }
 
-    printf("     ✓ Depthwise convolution channel independence verified\n");
+    rcre_arena_destroy(arena);
 }
 
-static void test_pointwise_conv2d(RCRE_Arena* arena) {
-    printf("  -> Testing Pointwise 1x1 channel projection...\n");
+static void test_pointwise_conv2d(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
 
     /* 2 channels, 2x2 */
     float in_data[8] = {
@@ -154,28 +153,31 @@ static void test_pointwise_conv2d(RCRE_Arena* arena) {
     RCRE_Tensor weights = rcre_tensor_from_buffer(w_data, w_shape, 4, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW);
 
     RCRE_Tensor out = {0};
-    int status = rcre_nn_pointwise_conv2d(&in, &weights, nullptr, &out, arena);
-    assert(status == RCRE_OK);
-    assert(out.shape[0] == 3 && out.shape[1] == 2 && out.shape[2] == 2);
+    int status = rcre_nn_pointwise_conv2d(&in, &weights, NULL, &out, arena);
+    ASSERT_INT_EQ(RCRE_OK, status);
+    ASSERT_UINT_EQ(3, out.shape[0]);
+    ASSERT_UINT_EQ(2, out.shape[1]);
+    ASSERT_UINT_EQ(2, out.shape[2]);
 
     const float* out_data = (const float*)out.data;
     /* Out Ch 0 == in Ch 0 */
-    assert(fabsf(out_data[0] - 1.0f) < EPSILON);
-    assert(fabsf(out_data[3] - 4.0f) < EPSILON);
+    ASSERT_FLOAT_NEAR(1.0f, out_data[0], EPSILON);
+    ASSERT_FLOAT_NEAR(4.0f, out_data[3], EPSILON);
     /* Out Ch 1 == in Ch 1 */
-    assert(fabsf(out_data[4] - 5.0f) < EPSILON);
-    assert(fabsf(out_data[7] - 8.0f) < EPSILON);
+    ASSERT_FLOAT_NEAR(5.0f, out_data[4], EPSILON);
+    ASSERT_FLOAT_NEAR(8.0f, out_data[7], EPSILON);
     /* Out Ch 2 == in Ch 0 + in Ch 1: 1+5=6, 2+6=8, 3+7=10, 4+8=12 */
-    assert(fabsf(out_data[8] - 6.0f) < EPSILON);
-    assert(fabsf(out_data[9] - 8.0f) < EPSILON);
-    assert(fabsf(out_data[10] - 10.0f) < EPSILON);
-    assert(fabsf(out_data[11] - 12.0f) < EPSILON);
+    ASSERT_FLOAT_NEAR(6.0f, out_data[8], EPSILON);
+    ASSERT_FLOAT_NEAR(8.0f, out_data[9], EPSILON);
+    ASSERT_FLOAT_NEAR(10.0f, out_data[10], EPSILON);
+    ASSERT_FLOAT_NEAR(12.0f, out_data[11], EPSILON);
 
-    printf("     ✓ Pointwise 1x1 projection and SIMD axpy verified\n");
+    rcre_arena_destroy(arena);
 }
 
-static void test_batchnorm_and_fusion(RCRE_Arena* arena) {
-    printf("  -> Testing BatchNorm2D and Zero-Cost Conv-BN Folding parity...\n");
+static void test_batchnorm_and_fusion(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
 
     /* Create 1 channel 2x2 input */
     float in_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -195,7 +197,7 @@ static void test_batchnorm_and_fusion(RCRE_Arena* arena) {
     RCRE_Conv2DParams params = {.stride_h = 1, .stride_w = 1, .pad_h = 0, .pad_w = 0};
     RCRE_Tensor conv_out = {0};
     int status = rcre_nn_conv2d(&in, &weights, &bias, &params, &conv_out, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* 2. Run BatchNorm2D */
     float gamma_data[2] = {1.2f, 0.8f};
@@ -212,7 +214,7 @@ static void test_batchnorm_and_fusion(RCRE_Arena* arena) {
     size_t bn_out_shape[3] = {2, 2, 2};
     RCRE_Tensor bn_out = rcre_tensor_create(bn_out_shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
     status = rcre_nn_batchnorm2d(&conv_out, &gamma, &beta, &mean, &var, 1e-5f, &bn_out);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* 3. Fuse Conv + BN */
     float fused_w_data[2] = {2.0f, -1.0f};
@@ -221,26 +223,24 @@ static void test_batchnorm_and_fusion(RCRE_Arena* arena) {
     RCRE_Tensor fused_bias = rcre_tensor_from_buffer(fused_b_data, b_shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR);
 
     status = rcre_nn_fuse_conv_batchnorm(&fused_weights, &fused_bias, &gamma, &beta, &mean, &var, 1e-5f);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* 4. Run Fused Conv2D directly */
     RCRE_Tensor fused_out = {0};
     status = rcre_nn_conv2d(&in, &fused_weights, &fused_bias, &params, &fused_out, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* Compare bn_out vs fused_out */
     const float* p_bn = (const float*)bn_out.data;
     const float* p_fused = (const float*)fused_out.data;
-    for (int i = 0; i < 8; ++i) {
-        float diff = fabsf(p_bn[i] - p_fused[i]);
-        assert(diff < 1e-4f);
-    }
+    ASSERT_FLOAT_ARRAY_NEAR(p_bn, p_fused, 8, 1e-4f);
 
-    printf("     ✓ Fused Conv-BN produced bit-identical output to standalone Conv+BN (err < 1e-4)\n");
+    rcre_arena_destroy(arena);
 }
 
-static void test_relu6_and_pooling(RCRE_Arena* arena) {
-    printf("  -> Testing ReLU6 and Global Average Pooling...\n");
+static void test_relu6_and_pooling(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
 
     /* ReLU6 */
     float data[5] = {-2.0f, 0.0f, 3.5f, 6.0f, 8.5f};
@@ -249,13 +249,13 @@ static void test_relu6_and_pooling(RCRE_Arena* arena) {
     RCRE_Tensor t_out = rcre_tensor_create(shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
 
     int status = rcre_nn_relu6(&t_in, &t_out);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
     const float* out_data = (const float*)t_out.data;
-    assert(fabsf(out_data[0] - 0.0f) < EPSILON);
-    assert(fabsf(out_data[1] - 0.0f) < EPSILON);
-    assert(fabsf(out_data[2] - 3.5f) < EPSILON);
-    assert(fabsf(out_data[3] - 6.0f) < EPSILON);
-    assert(fabsf(out_data[4] - 6.0f) < EPSILON);
+    ASSERT_FLOAT_NEAR(0.0f, out_data[0], EPSILON);
+    ASSERT_FLOAT_NEAR(0.0f, out_data[1], EPSILON);
+    ASSERT_FLOAT_NEAR(3.5f, out_data[2], EPSILON);
+    ASSERT_FLOAT_NEAR(6.0f, out_data[3], EPSILON);
+    ASSERT_FLOAT_NEAR(6.0f, out_data[4], EPSILON);
 
     /* Global Avg Pool */
     float pool_in_data[8] = {
@@ -270,16 +270,17 @@ static void test_relu6_and_pooling(RCRE_Arena* arena) {
     RCRE_Tensor pool_out = rcre_tensor_create(pool_out_shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
 
     status = rcre_nn_global_avgpool(&pool_in, &pool_out);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
     const float* p_avg = (const float*)pool_out.data;
-    assert(fabsf(p_avg[0] - 2.5f) < EPSILON);
-    assert(fabsf(p_avg[1] - 25.0f) < EPSILON);
+    ASSERT_FLOAT_NEAR(2.5f, p_avg[0], EPSILON);
+    ASSERT_FLOAT_NEAR(25.0f, p_avg[1], EPSILON);
 
-    printf("     ✓ ReLU6 bounding [0, 6] and GlobalAvgPool spatial reduction verified\n");
+    rcre_arena_destroy(arena);
 }
 
-static void test_linear_and_softmax(RCRE_Arena* arena) {
-    printf("  -> Testing Linear layer projection & Softmax...\n");
+static void test_linear_and_softmax(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
 
     /* Linear: input [1.0, 2.0] */
     float in_data[2] = {1.0f, 2.0f};
@@ -287,8 +288,6 @@ static void test_linear_and_softmax(RCRE_Arena* arena) {
     RCRE_Tensor in = rcre_tensor_from_buffer(in_data, in_shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR);
 
     /* Weights: 2 out, 2 in */
-    /* [2.0, 1.0]
-       [0.0, 3.0] */
     float w_data[4] = {
         2.0f, 1.0f,
         0.0f, 3.0f
@@ -302,46 +301,38 @@ static void test_linear_and_softmax(RCRE_Arena* arena) {
 
     RCRE_Tensor out = {0};
     int status = rcre_nn_linear(&in, &weights, &bias, &out, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     /* Expected:
        out[0] = 1*2 + 2*1 + 0.5 = 4.5
        out[1] = 1*0 + 2*3 - 1.0 = 5.0
     */
     const float* out_data = (const float*)out.data;
-    assert(fabsf(out_data[0] - 4.5f) < EPSILON);
-    assert(fabsf(out_data[1] - 5.0f) < EPSILON);
+    ASSERT_FLOAT_NEAR(4.5f, out_data[0], EPSILON);
+    ASSERT_FLOAT_NEAR(5.0f, out_data[1], EPSILON);
 
     /* Softmax on logits */
     size_t sm_shape[1] = {2};
     RCRE_Tensor sm_out = rcre_tensor_create(sm_shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
     status = rcre_nn_softmax(&out, &sm_out);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     const float* probs = (const float*)sm_out.data;
-    assert(probs[0] > 0.0f && probs[1] > 0.0f);
-    assert(fabsf((probs[0] + probs[1]) - 1.0f) < EPSILON);
-    /* Since 5.0 > 4.5, probs[1] > probs[0] */
-    assert(probs[1] > probs[0]);
+    ASSERT_TRUE(probs[0] > 0.0f);
+    ASSERT_TRUE(probs[1] > 0.0f);
+    ASSERT_FLOAT_NEAR(1.0f, probs[0] + probs[1], EPSILON);
+    ASSERT_TRUE(probs[1] > probs[0]);
 
-    printf("     ✓ Linear dot product & numerically stable Softmax probability normalization verified\n");
+    rcre_arena_destroy(arena);
 }
 
 int main(void) {
-    printf("🧪 Running RCRE CNN Neural Network Tests (NN-REQ-01 to 05)...\n");
-
-    RCRE_Arena* arena = rcre_arena_create(4 * 1024 * 1024);
-    assert(arena != nullptr);
-
-    test_conv2d(arena);
-    test_depthwise_conv2d(arena);
-    test_pointwise_conv2d(arena);
-    test_batchnorm_and_fusion(arena);
-    test_relu6_and_pooling(arena);
-    test_linear_and_softmax(arena);
-
-    rcre_arena_destroy(arena);
-
-    printf("✅ All CNN Neural Network Tests Passed Successfully!\n");
-    return 0;
+    test_suite_begin("RCRE Convolutional Neural Network Operators (NN-REQ-01 to 05)");
+    TEST_RUN(test_conv2d);
+    TEST_RUN(test_depthwise_conv2d);
+    TEST_RUN(test_pointwise_conv2d);
+    TEST_RUN(test_batchnorm_and_fusion);
+    TEST_RUN(test_relu6_and_pooling);
+    TEST_RUN(test_linear_and_softmax);
+    return test_suite_report();
 }

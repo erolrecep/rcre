@@ -4,17 +4,13 @@
  */
 
 #include "rcre.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <assert.h>
+#include "test_framework.h"
 
 #define EPSILON 1e-2f
 
 static void test_ols_regression(void) {
-    printf("  -> Testing Ordinary Least Squares (OLS) normal equations...\n");
     RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
-    assert(arena != NULL);
+    ASSERT_NOT_NULL(arena);
 
     /* Synthetic ground truth: y = 2.0 * x0 - 3.0 * x1 */
     const size_t N = 10;
@@ -53,29 +49,27 @@ static void test_ols_regression(void) {
     RCRE_Tensor preds = rcre_tensor_create(p_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
 
     int status = rcre_ml_ols_fit(&X, &y, &weights, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     float* w_data = (float*)weights.data;
     /* Assert learned weights match ground truth [2.0, -3.0] */
-    assert(fabsf(w_data[0] - 2.0f) < EPSILON);
-    assert(fabsf(w_data[1] - (-3.0f)) < EPSILON);
+    ASSERT_FLOAT_NEAR(2.0f, w_data[0], EPSILON);
+    ASSERT_FLOAT_NEAR(-3.0f, w_data[1], EPSILON);
 
     status = rcre_ml_predict_linear(&X, &weights, &preds);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     float* p_data = (float*)preds.data;
     for (size_t i = 0; i < N; ++i) {
-        assert(fabsf(p_data[i] - y_data[i]) < EPSILON);
+        ASSERT_FLOAT_NEAR(y_data[i], p_data[i], EPSILON);
     }
 
-    printf("     ✓ OLS fitted weights [%.4f, %.4f] within epsilon 1e-2\n", w_data[0], w_data[1]);
     rcre_arena_destroy(arena);
 }
 
 static void test_logistic_regression(void) {
-    printf("  -> Testing Logistic Regression gradient descent...\n");
     RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
-    assert(arena != NULL);
+    ASSERT_NOT_NULL(arena);
 
     /* 6 points: 3 negative (-2, -2 region), 3 positive (+2, +2 region) */
     const size_t N = 6;
@@ -110,33 +104,31 @@ static void test_logistic_regression(void) {
     RCRE_Tensor preds = rcre_tensor_create(p_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
 
     int status = rcre_ml_logistic_fit(&X, &y, &weights, 0.5f, 200, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     float* w_data = (float*)weights.data;
     /* Weights should be positive in both coordinates */
-    assert(w_data[0] > 0.1f);
-    assert(w_data[1] > 0.1f);
+    ASSERT_TRUE(w_data[0] > 0.1f);
+    ASSERT_TRUE(w_data[1] > 0.1f);
 
     status = rcre_ml_predict_linear(&X, &weights, &preds);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     float* p_data = (float*)preds.data;
     /* Classification accuracy check: sign should match class (0 -> negative, 1 -> positive) */
     for (size_t i = 0; i < 3; ++i) {
-        assert(p_data[i] < 0.0f);
+        ASSERT_TRUE(p_data[i] < 0.0f);
     }
     for (size_t i = 3; i < 6; ++i) {
-        assert(p_data[i] > 0.0f);
+        ASSERT_TRUE(p_data[i] > 0.0f);
     }
 
     rcre_arena_destroy(arena);
-    printf("     ✓ Logistic regression converged to 100%% classification accuracy\n");
 }
 
 static void test_pegasos_svm(void) {
-    printf("  -> Testing Pegasos Soft-Margin Linear SVM...\n");
     RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
-    assert(arena != NULL);
+    ASSERT_NOT_NULL(arena);
 
     const size_t N = 6;
     const size_t D = 2;
@@ -171,32 +163,30 @@ static void test_pegasos_svm(void) {
     RCRE_Tensor preds = rcre_tensor_create(p_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
 
     int status = rcre_ml_pegasos_svm_fit(&X, &y, &weights, 0.01f, 100, arena);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     float* w_data = (float*)weights.data;
-    assert(w_data[0] > 0.0f);
-    assert(w_data[1] > 0.0f);
+    ASSERT_TRUE(w_data[0] > 0.0f);
+    ASSERT_TRUE(w_data[1] > 0.0f);
 
     status = rcre_ml_predict_linear(&X, &weights, &preds);
-    assert(status == RCRE_OK);
+    ASSERT_INT_EQ(RCRE_OK, status);
 
     float* p_data = (float*)preds.data;
     for (size_t i = 0; i < 3; ++i) {
-        assert(p_data[i] < 0.0f);
+        ASSERT_TRUE(p_data[i] < 0.0f);
     }
     for (size_t i = 3; i < 6; ++i) {
-        assert(p_data[i] > 0.0f);
+        ASSERT_TRUE(p_data[i] > 0.0f);
     }
 
     rcre_arena_destroy(arena);
-    printf("     ✓ Pegasos SVM separated classes with correct hyperplanes\n");
 }
 
 int main(void) {
-    printf("🧪 Running RCRE Classical ML Linear Model Tests (ML-REQ-01)...\n");
-    test_ols_regression();
-    test_logistic_regression();
-    test_pegasos_svm();
-    printf("✅ All Classical ML Linear Model Tests Passed Successfully!\n");
-    return 0;
+    test_suite_begin("RCRE Classical ML Linear Models (ML-REQ-01)");
+    TEST_RUN(test_ols_regression);
+    TEST_RUN(test_logistic_regression);
+    TEST_RUN(test_pegasos_svm);
+    return test_suite_report();
 }

@@ -4,9 +4,7 @@
  */
 
 #include "rcre.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <assert.h>
+#include "test_framework.h"
 #include <stdatomic.h>
 
 typedef struct {
@@ -38,13 +36,12 @@ static void tile_task(void* arg, size_t y_start, size_t y_end, size_t x_start, s
 }
 
 static void test_parallel_for_1d(void) {
-    printf("  -> Testing parallel_for 1D dispatch...\n");
     RCRE_ThreadPool* pool = rcre_threadpool_create(4);
-    assert(pool != NULL);
+    ASSERT_NOT_NULL(pool);
 
     const size_t N = 10000;
     int* data = (int*)calloc(N, sizeof(int));
-    assert(data != NULL);
+    ASSERT_NOT_NULL(data);
 
     TaskPayload payload = {
         .array = data,
@@ -53,20 +50,18 @@ static void test_parallel_for_1d(void) {
 
     rcre_threadpool_parallel_for(pool, N, increment_task, &payload);
 
-    assert(atomic_load(&payload.executed_count) == N);
+    ASSERT_UINT_EQ(N, atomic_load(&payload.executed_count));
     for (size_t i = 0; i < N; ++i) {
-        assert(data[i] == (int)(i * 3 + 7));
+        ASSERT_INT_EQ((int)(i * 3 + 7), data[i]);
     }
 
     free(data);
     rcre_threadpool_destroy(pool);
-    printf("     ✓ 10,000 tasks dispatched and verified across 4 threads\n");
 }
 
 static void test_parallel_for_2d_tiling(void) {
-    printf("  -> Testing parallel_for_2d tile partitioning...\n");
     RCRE_ThreadPool* pool = rcre_threadpool_create(0); /* Auto-detect hardware concurrency */
-    assert(pool != NULL);
+    ASSERT_NOT_NULL(pool);
 
     const size_t H = 105; /* Non-multiple of tile size */
     const size_t W = 197;
@@ -74,7 +69,7 @@ static void test_parallel_for_2d_tiling(void) {
     const size_t tile_w = 32;
 
     uint8_t* grid = (uint8_t*)calloc(H * W, sizeof(uint8_t));
-    assert(grid != NULL);
+    ASSERT_NOT_NULL(grid);
 
     TilePayload payload = {
         .grid = grid,
@@ -85,21 +80,19 @@ static void test_parallel_for_2d_tiling(void) {
 
     rcre_threadpool_parallel_for_2d(pool, H, W, tile_h, tile_w, tile_task, &payload);
 
-    assert(atomic_load(&payload.pixel_visits) == (H * W));
+    ASSERT_UINT_EQ(H * W, atomic_load(&payload.pixel_visits));
 
     for (size_t y = 0; y < H; ++y) {
         for (size_t x = 0; x < W; ++x) {
-            assert(grid[y * W + x] == 1); /* Exact single visit per pixel */
+            ASSERT_UINT_EQ(1, grid[y * W + x]); /* Exact single visit per pixel */
         }
     }
 
     free(grid);
     rcre_threadpool_destroy(pool);
-    printf("     ✓ 2D non-uniform grid (%zux%zu) partitioned and covered with 0 overlaps\n", H, W);
 }
 
 static void test_single_threaded_fallback(void) {
-    printf("  -> Testing single-threaded fallback when pool is NULL...\n");
     const size_t N = 50;
     int data[50] = {0};
 
@@ -110,18 +103,16 @@ static void test_single_threaded_fallback(void) {
 
     rcre_threadpool_parallel_for(NULL, N, increment_task, &payload);
 
-    assert(atomic_load(&payload.executed_count) == N);
+    ASSERT_UINT_EQ(N, atomic_load(&payload.executed_count));
     for (size_t i = 0; i < N; ++i) {
-        assert(data[i] == (int)(i * 3 + 7));
+        ASSERT_INT_EQ((int)(i * 3 + 7), data[i]);
     }
-    printf("     ✓ Single-threaded fallback executed without failure\n");
 }
 
 int main(void) {
-    printf("🧪 Running RCRE Multicore Threadpool Tests (THR-REQ-01 to THR-REQ-03)...\n");
-    test_parallel_for_1d();
-    test_parallel_for_2d_tiling();
-    test_single_threaded_fallback();
-    printf("✅ All Threadpool Tests Passed Successfully!\n");
-    return 0;
+    test_suite_begin("RCRE Multicore Threadpool & Work Stealing (THR-REQ-01 to 03)");
+    TEST_RUN(test_parallel_for_1d);
+    TEST_RUN(test_parallel_for_2d_tiling);
+    TEST_RUN(test_single_threaded_fallback);
+    return test_suite_report();
 }

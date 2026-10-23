@@ -4,43 +4,33 @@
  */
 
 #include "rcre.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <assert.h>
+#include "test_framework.h"
 
 #define EPSILON 1e-4f
 
 static void test_cpu_probe_and_backend(void) {
-    printf("  -> Testing CPU feature probing and dynamic HAL backend...\n");
     rcre_hal_init();
 
     uint32_t feats = rcre_cpu_get_features();
     const char* brand = rcre_cpu_get_brand();
-    assert(feats & RCRE_CPU_FEAT_SCALAR);
-    assert(brand != NULL && brand[0] != '\0');
-
-    printf("     Detected CPU: '%s'\n", brand);
-    printf("     Active HAL Backend: '%s'\n", rcre_hal.backend_name);
+    ASSERT_TRUE(feats & RCRE_CPU_FEAT_SCALAR);
+    ASSERT_NOT_NULL(brand);
+    ASSERT_TRUE(brand[0] != '\0');
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
-    assert(feats & RCRE_CPU_FEAT_NEON);
-    printf("     ✓ Confirmed ARM NEON hardware capability bit\n");
+    ASSERT_TRUE(feats & RCRE_CPU_FEAT_NEON);
 #endif
 
 #if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
-    assert(feats & RCRE_CPU_FEAT_AVX2);
-    printf("     ✓ Confirmed x86 AVX2 hardware capability bit\n");
+    ASSERT_TRUE(feats & RCRE_CPU_FEAT_AVX2);
 #endif
 
 #if defined(__wasm_simd128__)
-    assert(feats & RCRE_CPU_FEAT_WASM_SIMD);
-    printf("     ✓ Confirmed WebAssembly SIMD hardware capability bit\n");
+    ASSERT_TRUE(feats & RCRE_CPU_FEAT_WASM_SIMD);
 #endif
 }
 
 static void test_hal_dot_f32(void) {
-    printf("  -> Testing SIMD dot_f32 across various vector lengths...\n");
     const size_t test_sizes[] = {1, 3, 4, 7, 8, 15, 16, 23, 32, 63, 64, 127, 256, 1024};
     const size_t num_sizes = sizeof(test_sizes) / sizeof(test_sizes[0]);
 
@@ -48,6 +38,8 @@ static void test_hal_dot_f32(void) {
         size_t n = test_sizes[s];
         float* x = (float*)malloc(n * sizeof(float));
         float* y = (float*)malloc(n * sizeof(float));
+        ASSERT_NOT_NULL(x);
+        ASSERT_NOT_NULL(y);
 
         float scalar_truth = 0.0f;
         for (size_t i = 0; i < n; ++i) {
@@ -58,22 +50,22 @@ static void test_hal_dot_f32(void) {
 
         float simd_result = rcre_hal.dot_f32(x, y, n);
         float diff = fabsf(simd_result - scalar_truth);
-        float rel_err = diff / (fabsf(scalar_truth) + 1.0f);
-
-        assert(rel_err < EPSILON);
+        float tolerance = (fabsf(scalar_truth) + 1.0f) * EPSILON;
+        ASSERT_TRUE(diff <= tolerance);
 
         free(x);
         free(y);
     }
-    printf("     ✓ dot_f32 verified across 14 vector sizes (rel_err < 1e-4)\n");
 }
 
 static void test_hal_axpy_f32(void) {
-    printf("  -> Testing SIMD axpy_f32 (y = alpha * x + y)...\n");
     const size_t n = 250; /* Non-multiple of 16 */
     float* x = (float*)malloc(n * sizeof(float));
     float* y_simd = (float*)malloc(n * sizeof(float));
     float* y_ref = (float*)malloc(n * sizeof(float));
+    ASSERT_NOT_NULL(x);
+    ASSERT_NOT_NULL(y_simd);
+    ASSERT_NOT_NULL(y_ref);
 
     float alpha = 2.5f;
     for (size_t i = 0; i < n; ++i) {
@@ -88,19 +80,14 @@ static void test_hal_axpy_f32(void) {
     }
 
     rcre_hal.axpy_f32(n, alpha, x, y_simd);
-
-    for (size_t i = 0; i < n; ++i) {
-        assert(fabsf(y_simd[i] - y_ref[i]) < EPSILON);
-    }
+    ASSERT_FLOAT_ARRAY_NEAR(y_ref, y_simd, n, EPSILON);
 
     free(x);
     free(y_simd);
     free(y_ref);
-    printf("     ✓ axpy_f32 numerical parity verified\n");
 }
 
 static void test_hal_gemm_f32(void) {
-    printf("  -> Testing cache-blocked SIMD gemm_f32...\n");
     /* Test non-multiple dimensions: M=37, N=43, K=29 */
     const size_t M = 37;
     const size_t N = 43;
@@ -114,6 +101,10 @@ static void test_hal_gemm_f32(void) {
     float* B = (float*)malloc(K * ldb * sizeof(float));
     float* C_simd = (float*)malloc(M * ldc * sizeof(float));
     float* C_ref  = (float*)malloc(M * ldc * sizeof(float));
+    ASSERT_NOT_NULL(A);
+    ASSERT_NOT_NULL(B);
+    ASSERT_NOT_NULL(C_simd);
+    ASSERT_NOT_NULL(C_ref);
 
     for (size_t i = 0; i < M * lda; ++i) A[i] = (float)((int)(i % 11) - 5) * 0.2f;
     for (size_t i = 0; i < K * ldb; ++i) B[i] = (float)((int)(i % 7) - 3) * 0.3f;
@@ -137,29 +128,22 @@ static void test_hal_gemm_f32(void) {
     }
 
     rcre_hal.gemm_f32(M, N, K, alpha, A, lda, B, ldb, beta, C_simd, ldc);
-
-    float max_diff = 0.0f;
-    for (size_t i = 0; i < M; ++i) {
-        for (size_t j = 0; j < N; ++j) {
-            float diff = fabsf(C_simd[i * ldc + j] - C_ref[i * ldc + j]);
-            if (diff > max_diff) max_diff = diff;
-            assert(diff < 1e-3f);
-        }
-    }
+    ASSERT_FLOAT_ARRAY_NEAR(C_ref, C_simd, M * ldc, 1e-3f);
 
     free(A);
     free(B);
     free(C_simd);
     free(C_ref);
-    printf("     ✓ gemm_f32 (%zux%zux%zu) matched reference (max diff: %.6e)\n", M, N, K, max_diff);
 }
 
 static void test_hal_rgb_to_gray_u8(void) {
-    printf("  -> Testing SIMD rgb_to_gray_u8 exact bit-parity...\n");
     const size_t num_pixels = 345; /* Non-multiple of 16 */
     uint8_t* rgb = (uint8_t*)malloc(num_pixels * 3);
     uint8_t* gray_simd = (uint8_t*)malloc(num_pixels);
     uint8_t* gray_ref  = (uint8_t*)malloc(num_pixels);
+    ASSERT_NOT_NULL(rgb);
+    ASSERT_NOT_NULL(gray_simd);
+    ASSERT_NOT_NULL(gray_ref);
 
     for (size_t i = 0; i < num_pixels * 3; ++i) {
         rgb[i] = (uint8_t)(i * 37 + 13);
@@ -174,24 +158,19 @@ static void test_hal_rgb_to_gray_u8(void) {
     }
 
     rcre_hal.rgb_to_gray_u8(rgb, gray_simd, num_pixels);
-
-    for (size_t i = 0; i < num_pixels; ++i) {
-        assert(gray_simd[i] == gray_ref[i]); /* Exact bit match */
-    }
+    ASSERT_MEM_EQ(gray_ref, gray_simd, num_pixels); /* Exact bit match */
 
     free(rgb);
     free(gray_simd);
     free(gray_ref);
-    printf("     ✓ rgb_to_gray_u8 exact 0-diff bit parity verified\n");
 }
 
 int main(void) {
-    printf("🧪 Running RCRE Hardware Abstraction Layer Tests (HAL-REQ-01 to HAL-REQ-04)...\n");
-    test_cpu_probe_and_backend();
-    test_hal_dot_f32();
-    test_hal_axpy_f32();
-    test_hal_gemm_f32();
-    test_hal_rgb_to_gray_u8();
-    printf("✅ All Hardware Abstraction Layer Tests Passed Successfully!\n");
-    return 0;
+    test_suite_begin("RCRE Hardware Abstraction Layer & SIMD (HAL-REQ-01 to 04)");
+    TEST_RUN(test_cpu_probe_and_backend);
+    TEST_RUN(test_hal_dot_f32);
+    TEST_RUN(test_hal_axpy_f32);
+    TEST_RUN(test_hal_gemm_f32);
+    TEST_RUN(test_hal_rgb_to_gray_u8);
+    return test_suite_report();
 }
