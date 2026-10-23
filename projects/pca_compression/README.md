@@ -87,3 +87,25 @@ make -C apps/rcre/projects/pca_compression all
 ```bash
 ./bin/rcre-pca --decompress photo.rpca reconstructed.bmp
 ```
+
+---
+
+## 🌐 Interactive In-Browser PCA Web Playground
+
+You can test this exact PCA image compression codec live directly in your browser without any installation:
+
+* **Live Demo**: [https://erolrecep.github.io/rcre/playground.html#pca-lab-section](https://erolrecep.github.io/rcre/playground.html#pca-lab-section)
+* **Local Web Server**:
+  ```bash
+  make up_web_app
+  # Opens http://localhost:8080/playground.html
+  ```
+
+### Web Studio Features
+1. **Live Camera & Synthetic Test Patterns**: Compress video feeds in real time or test custom synthetic colorbars and grid patterns.
+2. **📸 Snapshot Capture with Filesystem Storage**: Take high-resolution photos and save them directly to disk using the **File System Access API** (PNG, JPEG, BMP).
+3. **Interactive Split-Comparison Slider**: Drag the divider across the viewport to compare original vs. reconstructed images with pixel-level precision.
+4. **Error Heatmap Visualization**: Inspect magnified ($\times 5$) reconstruction residuals mapped to an inferno pseudo-colormap.
+5. **Learned Eigen-Bases Gallery**: Visualize the learned orthogonal spatial basis patches ($W_k$) and their individual variance contributions.
+6. **Bitstream Filesystem Export**: Save reconstructed photos or export standalone `.rpca` binary files that can be loaded and decompressed directly with the CLI tool (`./bin/rcre-pca --decompress`).
+

@@ -218,12 +218,23 @@ fn main() {
 
 ## 🎮 Interactive Educational Suite (`web/`)
 
-RCRE includes four dedicated interactive educational visualizers to master low-level systems programming:
+RCRE includes four dedicated interactive educational visualizers to master low-level systems programming and real-time vision algorithms:
 
-🌐 **Live Web Demo**: [https://erolrecep.github.io/rcre/](https://erolrecep.github.io/rcre/)
+🌐 **Live Web Portal**: [https://erolrecep.github.io/rcre/](https://erolrecep.github.io/rcre/)  
+🔬 **Live Playground & PCA Lab**: [https://erolrecep.github.io/rcre/playground.html](https://erolrecep.github.io/rcre/playground.html)
 
-* **[web/index.html](web/index.html)**: Main interactive portal with real-time hardware diagnostics.
-* **[web/playground.html](web/playground.html)**: Live in-browser webcam playground connecting real camera feeds to Gaussian blur, Sobel edge magnitude, and GBDT inference.
+* **[web/index.html](web/index.html)**: Main interactive showcase portal featuring real-time hardware diagnostics, architecture principles, and visualizer directory.
+* **[web/playground.html](web/playground.html)**: **Live In-Browser Webcam Playground & PCA Image Compression Lab**:
+  * **5-Stage Live Vision Pipeline**: Ordered sequentially from Stage 1 (Raw RGB) $\rightarrow$ Stage 2 (Rec.601 Grayscale) $\rightarrow$ Stage 3 (Separable Gaussian Blur) $\rightarrow$ Stage 4 (3&times;3 Sobel Edge Magnitude) $\rightarrow$ Stage 5 (Real-Time PCA Compression & Quantization).
+  * **📸 Take Photo Button with Direct Filesystem Storage**: Shutter flash effect, synthesized camera sound, format options (PNG, JPEG, BMP), and storage to disk using the modern **File System Access API** (`window.showSaveFilePicker`) with automatic download fallback.
+  * **📁 Captured Snapshots Gallery Tray**: Instant thumbnail previews, filesystem re-saving, and 1-click loading into the PCA Lab.
+  * **🔬 Interactive PCA Image Compression Test Lab**:
+    * Zero-dependency client-side implementation of RCRE's C23 PCA spatial block codec ([`projects/pca_compression/`](projects/pca_compression/)).
+    * Interactive parameter tuning: Block size $B$ ($4\times 4$, $8\times 8$, $16\times 16$), component count $K$ (slider 1 to 64 with presets $K=2, 8, 12, 24, 48$), RGB vs Grayscale, and 8-bit uniform quantization.
+    * 4 display modes: Draggable interactive **Split Comparison Slider**, **Side-by-Side View**, **Error Heatmap ($\times 5$)**, and **Learned Eigen-Basis Filter Gallery**.
+    * Real-time metrics: PSNR (dB), Compression Ratio, MSE, Bitstream size, and Latency.
+    * Filesystem export: Reconstructed image PNG, Comparison PNG, and standalone `.rpca` binary bitstreams matching RCRE's C23 codec format.
+    * **Automated Rate-Distortion Benchmark Sweep**: One-click sweep across $K \in [2, 4, 8, 12, 16, 24, 32, 48, 64]$ generating rate-distortion curves identical to `rcre-pca --benchmark`.
 * **[web/learn/strides.html](web/learn/strides.html)**: Three.js 3D voxel grid visualizing tensor strides, row-major ($HWC$) vs planar ($CHW$) memory layouts, and zero-copy $\mathcal{O}(1)$ slicing.
 * **[web/learn/gemm_cache.html](web/learn/gemm_cache.html)**: Animated memory hierarchy showing DRAM, L1 cache tiles, and CPU vector registers during matrix multiplication.
 * **[web/learn/stencils.html](web/learn/stencils.html)**: Sliding $3 \times 3$ convolution stencil showing SIMD vector lanes processing 4 or 8 pixels in parallel.

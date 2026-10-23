@@ -13,6 +13,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-lens`** | [`reverse_image_search/`](reverse_image_search/) | High-speed reverse image search engine & visual database indexing | Spatial Pyramid Features, Sobel Gradients, HNSW Vector Index |
 | **`rcre-facex`** | [`facial_expression_analysis/`](facial_expression_analysis/) | Real-time face detection, 13-point landmarks, FACS Action Units & emotion classification | Skin SAT Integral Image, Valley Tracking, FACS Biomechanics, Softmax |
 | **`rcre-mobilenet`** | [`cifar100_mobilenet/`](cifar100_mobilenet/) | Sub-4ms MobileNet CNN training and zero-heap inference on CIFAR-100 | Depthwise Separable Conv, Edge BN Folding, SIMD axpy, Softmax |
+| **`rcre-pca`** | [`pca_compression/`](pca_compression/) | Zero-dependency spatial PCA image compression & 8-bit quantization codec | Power Iteration, Deflation, 8-bit Uniform Quant, Web Playground Studio |
 
 ---
 
@@ -84,4 +85,31 @@ make -C projects/cifar100_mobilenet benchmark
 For complete CLI documentation, architecture diagrams, and weight formats, see [`projects/cifar100_mobilenet/README.md`](cifar100_mobilenet/README.md).
 
 For complete CLI documentation, mathematical formulas, and rendered pipeline diagrams, see [`projects/facial_expression_analysis/README.md`](facial_expression_analysis/README.md).
+
+---
+
+## 4. `rcre-pca` (PCA Image Compression & Quantization Engine)
+
+A pure C23, zero-dependency dimensionality reduction codec that projects spatial image patches onto principal orthogonal eigenvectors and applies 8-bit uniform scalar quantization.
+
+### Key Capabilities
+* **High Compression with Linear Arenas**: Yields $8.8\times$ to $25\times$ compression with $0$ dynamic heap reallocations in loops.
+* **Fidelity & Rate-Distortion**: Delivers $33.5\text{ dB}$ to $58.0\text{ dB}$ PSNR with sub-millisecond SIMD inverse reconstruction.
+* **Standalone Binary Format (`.rpca`)**: Portable binary bitstream serialization with Little-Endian headers.
+* **🌐 Interactive Web Studio**: Test live in your browser with webcam feeds, filesystem storage, error heatmaps, and rate-distortion sweeps at [`web/playground.html`](../web/playground.html) or [live on GitHub Pages](https://erolrecep.github.io/rcre/playground.html#pca-lab-section).
+
+### Quick Start
+```bash
+# Compile standalone CLI tool:
+make -C projects/pca_compression all
+
+# Run automated end-to-end compression & reconstruction demo:
+./projects/pca_compression/bin/rcre-pca --demo
+
+# Run rate-distortion benchmark on an image:
+./projects/pca_compression/bin/rcre-pca --benchmark [image.bmp] -b 8
+```
+
+For complete CLI documentation, mathematical formulas, and benchmark tables, see [`projects/pca_compression/README.md`](pca_compression/README.md).
+
 
