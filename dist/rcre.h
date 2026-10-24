@@ -2444,8 +2444,12 @@ static void* worker_routine(void* arg) {
 
 RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads) {
     if (num_threads == 0) {
+#if defined(_SC_NPROCESSORS_ONLN)
         long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
         num_threads = (nprocs > 0) ? (size_t)nprocs : 4;
+#else
+        num_threads = 4;
+#endif
     }
 
     RCRE_ThreadPool* pool = (RCRE_ThreadPool*)malloc(sizeof(RCRE_ThreadPool));
