@@ -81,6 +81,16 @@ typedef struct RCRE_Arena {
     size_t   offset;
 } RCRE_Arena;
 
+typedef struct {
+    RCRE_Arena* arena;
+    size_t      saved_offset;
+} RCRE_ArenaTemp;
+
+typedef struct RCRE_GraphCtx {
+    RCRE_Arena* persistent_arena; /* Model weights, persistent states */
+    RCRE_Arena* tape_arena;       /* Ephemeral forward/backward computational graph tape */
+} RCRE_GraphCtx;
+
 /**
  * @brief Creates a contiguous linear memory arena.
  * @param capacity Maximum allocation capacity in bytes.
@@ -106,6 +116,31 @@ void rcre_arena_reset(RCRE_Arena* arena);
  * @brief Releases the arena memory buffer back to the operating system.
  */
 void rcre_arena_destroy(RCRE_Arena* arena);
+
+/**
+ * @brief Saves current arena allocation offset for scoped scratchpad rewinding.
+ */
+RCRE_NODISCARD RCRE_ArenaTemp rcre_arena_temp_begin(RCRE_Arena* arena);
+
+/**
+ * @brief Restores arena offset back to the checkpoint saved in temp.
+ */
+void rcre_arena_temp_end(RCRE_ArenaTemp temp);
+
+/**
+ * @brief Creates a dual-arena execution context (persistent weights + ephemeral tape).
+ */
+RCRE_NODISCARD RCRE_GraphCtx* rcre_graph_ctx_create(size_t persistent_cap, size_t tape_cap);
+
+/**
+ * @brief Resets the ephemeral tape arena back to zero offset.
+ */
+void rcre_graph_ctx_reset_tape(RCRE_GraphCtx* ctx);
+
+/**
+ * @brief Destroys both arenas and frees the graph context.
+ */
+void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx);
 
 /* ========================================================================= */
 /* Tensor Abstraction & Zero-Copy Views (TNS-REQ-01 to TNS-REQ-05)           */

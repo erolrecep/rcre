@@ -69,11 +69,64 @@ static void test_arena_capacity_exhaustion(void) {
     rcre_arena_destroy(arena);
 }
 
+static void test_arena_temp_checkpoint(void) {
+    RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+
+    void* p1 = rcre_arena_alloc(arena, 256, 64);
+    ASSERT_NOT_NULL(p1);
+    size_t offset_before = arena->offset;
+
+    /* Begin scoped checkpoint */
+    RCRE_ArenaTemp temp = rcre_arena_temp_begin(arena);
+    ASSERT_UINT_EQ(offset_before, temp.saved_offset);
+
+    /* Allocate scratchpad memory */
+    void* p_temp = rcre_arena_alloc(arena, 1024, 64);
+    ASSERT_NOT_NULL(p_temp);
+    ASSERT_TRUE(arena->offset > offset_before);
+
+    /* End scoped checkpoint - rewinds offset */
+    rcre_arena_temp_end(temp);
+    ASSERT_UINT_EQ(offset_before, arena->offset);
+
+    /* Next allocation reuses scratchpad space */
+    void* p2 = rcre_arena_alloc(arena, 1024, 64);
+    ASSERT_NOT_NULL(p2);
+    ASSERT_TRUE(p2 == p_temp);
+
+    rcre_arena_destroy(arena);
+}
+
+static void test_graph_ctx_lifecycle(void) {
+    RCRE_GraphCtx* ctx = rcre_graph_ctx_create(512 * 1024, 1024 * 1024);
+    ASSERT_NOT_NULL(ctx);
+    ASSERT_NOT_NULL(ctx->persistent_arena);
+    ASSERT_NOT_NULL(ctx->tape_arena);
+
+    void* weight = rcre_arena_alloc(ctx->persistent_arena, 256, 64);
+    void* act = rcre_arena_alloc(ctx->tape_arena, 512, 64);
+    ASSERT_NOT_NULL(weight);
+    ASSERT_NOT_NULL(act);
+
+    size_t weight_offset = ctx->persistent_arena->offset;
+    ASSERT_TRUE(weight_offset > 0);
+
+    /* Reset ephemeral tape only */
+    rcre_graph_ctx_reset_tape(ctx);
+    ASSERT_UINT_EQ(0, ctx->tape_arena->offset);
+    ASSERT_UINT_EQ(weight_offset, ctx->persistent_arena->offset);
+
+    rcre_graph_ctx_destroy(ctx);
+}
+
 int main(void) {
     test_suite_begin("RCRE Linear Memory Arena Allocator (CORE-REQ-01)");
     TEST_RUN(test_arena_create_and_lifecycle);
     TEST_RUN(test_arena_64byte_alignment);
     TEST_RUN(test_arena_bulk_reset_o1);
     TEST_RUN(test_arena_capacity_exhaustion);
+    TEST_RUN(test_arena_temp_checkpoint);
+    TEST_RUN(test_graph_ctx_lifecycle);
     return test_suite_report();
 }

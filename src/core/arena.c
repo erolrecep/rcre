@@ -96,3 +96,48 @@ void rcre_arena_destroy(RCRE_Arena* arena) {
         free(arena);
     }
 }
+
+RCRE_NODISCARD RCRE_ArenaTemp rcre_arena_temp_begin(RCRE_Arena* arena) {
+    RCRE_ArenaTemp temp = {
+        .arena = arena,
+        .saved_offset = arena ? arena->offset : 0
+    };
+    return temp;
+}
+
+void rcre_arena_temp_end(RCRE_ArenaTemp temp) {
+    if (temp.arena && temp.saved_offset <= temp.arena->capacity) {
+        temp.arena->offset = temp.saved_offset;
+    }
+}
+
+RCRE_NODISCARD RCRE_GraphCtx* rcre_graph_ctx_create(size_t persistent_cap, size_t tape_cap) {
+    RCRE_GraphCtx* ctx = (RCRE_GraphCtx*)malloc(sizeof(RCRE_GraphCtx));
+    if (!ctx) return NULL;
+
+    ctx->persistent_arena = rcre_arena_create(persistent_cap);
+    ctx->tape_arena = rcre_arena_create(tape_cap);
+
+    if (!ctx->persistent_arena || !ctx->tape_arena) {
+        if (ctx->persistent_arena) rcre_arena_destroy(ctx->persistent_arena);
+        if (ctx->tape_arena) rcre_arena_destroy(ctx->tape_arena);
+        free(ctx);
+        return NULL;
+    }
+
+    return ctx;
+}
+
+void rcre_graph_ctx_reset_tape(RCRE_GraphCtx* ctx) {
+    if (ctx && ctx->tape_arena) {
+        rcre_arena_reset(ctx->tape_arena);
+    }
+}
+
+void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx) {
+    if (ctx) {
+        if (ctx->persistent_arena) rcre_arena_destroy(ctx->persistent_arena);
+        if (ctx->tape_arena) rcre_arena_destroy(ctx->tape_arena);
+        free(ctx);
+    }
+}
