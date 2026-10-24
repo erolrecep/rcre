@@ -2,8 +2,8 @@
 """
 RCRE Single-Header Amalgamation Script (Phase 6 Packaging)
 
-Bundles the public C23 header and all core kernel implementations into a single
-standalone header file: dist/rcre.h.
+Bundles the public C23 header, autograd extensions, and all core kernel implementations
+into a single standalone header file: dist/rcre.h.
 
 Usage:
     python3 scripts/amalgamate.py
@@ -37,13 +37,19 @@ C_FILES = [
     SRC_DIR / "ml" / "cluster.c",
     SRC_DIR / "ml" / "gbdt_infer.c",
     SRC_DIR / "ml" / "hnsw.c",
+    SRC_DIR / "autograd" / "scalar_autograd.c",
+    SRC_DIR / "autograd" / "tensor_autograd.c",
+    SRC_DIR / "nn" / "loss.c",
+    SRC_DIR / "nn" / "optim.c",
+    SRC_DIR / "nn" / "data.c",
+    SRC_DIR / "nn" / "vis.c",
 ]
 
 def clean_file_content(content: str) -> str:
     """Removes local includes that are redundant in amalgamated file."""
     lines = []
     for line in content.splitlines():
-        if re.match(r'^\s*#include\s*["<](rcre\.h|hal_internal\.h|ml_internal\.h)[">]', line):
+        if re.match(r'^\s*#include\s*["<](rcre\.h|rcre_autograd\.h|hal_internal\.h|ml_internal\.h)[">]', line):
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -69,6 +75,10 @@ def main():
     verify_symbol_uniqueness(C_FILES)
 
     header_content = (INCLUDE_DIR / "rcre.h").read_text(encoding="utf-8")
+    autograd_header = (INCLUDE_DIR / "rcre_autograd.h").read_text(encoding="utf-8")
+    autograd_clean = clean_file_content(autograd_header)
+    header_content = header_content.replace('#include "rcre_autograd.h"', autograd_clean)
+
     hal_internal = (SRC_DIR / "hal" / "hal_internal.h").read_text(encoding="utf-8")
     ml_internal = (SRC_DIR / "ml" / "ml_internal.h").read_text(encoding="utf-8")
 

@@ -44,6 +44,12 @@ SRCS = src/core/arena.c \
        src/ml/cluster.c \
        src/ml/gbdt_infer.c \
        src/ml/hnsw.c \
+       src/autograd/scalar_autograd.c \
+       src/autograd/tensor_autograd.c \
+       src/nn/loss.c \
+       src/nn/optim.c \
+       src/nn/data.c \
+       src/nn/vis.c \
        src/hal/cpu_probe.c \
        src/hal/hal_dispatch.c \
        src/hal/kernels_scalar.c \
@@ -57,16 +63,16 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
-EXAMPLES = webcam_edge_filter tabular_gbdt_predict hnsw_vector_search
+EXAMPLES = webcam_edge_filter tabular_gbdt_predict hnsw_vector_search mlp_autograd_train
 EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo
+.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo
 
 default: help
 
@@ -167,6 +173,9 @@ gbdt_test: bin/tabular_gbdt_predict
 hnsw_test: bin/hnsw_vector_search
 	@bin/hnsw_vector_search
 
+mlp_train: bin/mlp_autograd_train
+	@bin/mlp_autograd_train
+
 project_lens_test: $(LIB)
 	@$(MAKE) -C projects/reverse_image_search test
 
@@ -212,6 +221,9 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@bin/test_hnsw
 	@bin/test_cam
 	@bin/test_amalgamated
+	@bin/test_autograd_scalar
+	@bin/test_autograd_tensor
+	@bin/test_nn_train
 	@echo "🎉 All RCRE Unit Tests Passed!"
 
 test-sanitizers: $(AMALGAMATED_HEADER)
@@ -249,6 +261,12 @@ endif
 	@bin/test_cam_asan
 	$(CC) $(SANITIZER_FLAGS) tests/test_amalgamated.c -lm -lpthread -o bin/test_amalgamated_asan
 	@bin/test_amalgamated_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_autograd_scalar.c -lm -lpthread -o bin/test_autograd_scalar_asan
+	@bin/test_autograd_scalar_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_autograd_tensor.c -lm -lpthread -o bin/test_autograd_tensor_asan
+	@bin/test_autograd_tensor_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_nn_train.c -lm -lpthread -o bin/test_nn_train_asan
+	@bin/test_nn_train_asan
 	@echo "🎉 Zero Memory Leaks & Zero Undefined Behavior Detected!"
 
 test-parity: $(DYLIB)

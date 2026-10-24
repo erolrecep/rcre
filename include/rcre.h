@@ -685,6 +685,13 @@ uint32_t rcre_cpu_get_features(void);
  */
 const char* rcre_cpu_get_brand(void);
 
+/* ========================================================================= */
+/* Autograd & Neural Network Extensions                                      */
+/* ========================================================================= */
+#ifndef RCRE_NO_AUTOGRAD
+#include "rcre_autograd.h"
+#endif
+
 #ifdef __cplusplus
 }
 #endif

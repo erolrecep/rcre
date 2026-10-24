@@ -23,8 +23,10 @@
 * **Zero Heap Allocations in Inference Loops**: All memory is managed strictly through 64-byte aligned linear scratchpad memory arenas (`RCRE_Arena`) with $\mathcal{O}(1)$ bulk rewinding. `malloc` is strictly forbidden in hot paths.
 * **OpenCV & Scikit-Learn Bit-Exact Parity**: 15-bit fixed-point integer color kernels deliver **0 LSB discrepancy** against OpenCV `cv2.cvtColor(RGB2GRAY)`. Linear SVM, $k$-Means, and PCA match Scikit-Learn within float numerical tolerance ($\epsilon \le 10^{-4}$).
 * **Dynamic Hardware Abstraction Layer (HAL)**: Runtime CPU feature detection dispatching single-cycle function pointers to ARM NEON (Apple Silicon), x86 AVX2/FMA, WebAssembly SIMD128, or optimized scalar reference fallbacks.
+* **Dual Reverse-Mode Autograd Engine**: Micrograd-style scalar computation DAGs (`RCRE_ScalarVal`) with topological backprop and Graphviz export, alongside high-performance Tensor Tape autograd (`RCRE_AGTensor`) with automatic Vector-Jacobian Product (VJP) propagation and cache-blocked GEMM.
+* **Zero-Allocation Deep Learning Suite**: Production loss functions (MSE, BCE, Softmax Cross-Entropy, KL Divergence), optimizers (Decoupled AdamW, Momentum SGD), streaming CSV dataset loaders, and live terminal ANSI/SVG/WebGL visualizers.
 * **Isolated Camera Companion (`rcre_cam.h`)**: Native hardware ingestion using macOS AVFoundation (`CVPixelBuffer` zero-copy), Linux Video4Linux2 (`mmap`), and deterministic synthetic test generators for headless CI.
-* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (102.8 KB).
+* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~250 KB).
 * **Interactive Educational Visualizers**: Three.js 3D tensor stride visualizers, cache hierarchy simulators, and live in-browser webcam playgrounds in [`web/`](web/).
 
 ---
@@ -48,18 +50,22 @@
 ```
 apps/rcre/
 ├── dist/
-│   └── rcre.h                  # Amalgamated single-header C23 release (102.8 KB)
+│   └── rcre.h                  # Amalgamated single-header C23 release (250 KB)
 ├── include/
 │   ├── rcre.h                  # Core public C23 header
+│   ├── rcre_autograd.h         # Autograd, Losses, Optimizers, Ingestion & Vis C23 header
 │   └── extras/
 │       └── rcre_cam.h          # Hardware camera companion header
 ├── src/
-│   ├── core/                   # Arena allocator, strided tensor, input adapt, threadpool
+│   ├── core/                   # Arena allocator, temp checkpoints, strided tensor, threadpool
 │   ├── cv/                     # Rec.601 color conversion, separable Gaussian, Sobel
 │   ├── ml/                     # OLS regression, Logistic, Linear SVM, KMeans, PCA, GBDT, HNSW
+│   ├── autograd/               # Scalar reverse-mode DAG autograd & Tensor tape VJP autograd
+│   ├── nn/                     # Losses, AdamW/SGD optimizers, CSV streaming, ANSI/SVG visualizers
 │   ├── hal/                    # CPU probing, dynamic dispatch, NEON, AVX2, WASM SIMD
 │   └── extras/                 # AVFoundation (macOS), V4L2 (Linux), Dummy camera backends
 ├── examples/                   # Standalone real-world applications & benchmarks
+│   ├── mlp_autograd_train.c    # 2-layer MLP training with AdamW, MSE, and terminal curve vis
 │   ├── webcam_edge_filter.c    # Real-time camera streaming with Gaussian + Sobel at 239 FPS
 │   ├── tabular_gbdt_predict.c  # High-throughput tabular GBDT inference benchmark
 │   ├── hnsw_vector_search.c    # Approximate Nearest Neighbor vector search on 64-D embeddings
@@ -67,7 +73,7 @@ apps/rcre/
 ├── bindings/
 │   ├── python/                 # Python FFI bindings (ctypes + NumPy interop)
 │   └── rust/                   # Safe Rust FFI bindings crate
-├── tests/                      # 12 Unit tests, sanitizer tests, Python parity suite
+├── tests/                      # 17 Unit tests, sanitizer tests, Python parity suite
 ├── benchmarks/                 # Micro-benchmarks for HAL kernels and GEMM
 ├── web/                        # Interactive Three.js 3D visualizers and webcam playground
 └── Makefile                    # Unified, self-contained, zero-dependency build system
@@ -139,6 +145,9 @@ make webcam_test_terminal
 
 # 📷 Launch synthetic camera stream (ideal for headless SSH or CI)
 make webcam_test_dummy
+
+# 🧠 Train a 2-layer MLP using C23 Tensor Tape Autograd & AdamW with live terminal ANSI loss curve
+make mlp_train
 
 # ⚡ Run high-throughput GBDT inference benchmark (100k samples)
 make gbdt_test

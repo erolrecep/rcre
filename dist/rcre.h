@@ -86,6 +86,16 @@ typedef struct RCRE_Arena {
     size_t   offset;
 } RCRE_Arena;
 
+typedef struct {
+    RCRE_Arena* arena;
+    size_t      saved_offset;
+} RCRE_ArenaTemp;
+
+typedef struct RCRE_GraphCtx {
+    RCRE_Arena* persistent_arena; /* Model weights, persistent states */
+    RCRE_Arena* tape_arena;       /* Ephemeral forward/backward computational graph tape */
+} RCRE_GraphCtx;
+
 /**
  * @brief Creates a contiguous linear memory arena.
  * @param capacity Maximum allocation capacity in bytes.
@@ -111,6 +121,31 @@ void rcre_arena_reset(RCRE_Arena* arena);
  * @brief Releases the arena memory buffer back to the operating system.
  */
 void rcre_arena_destroy(RCRE_Arena* arena);
+
+/**
+ * @brief Saves current arena allocation offset for scoped scratchpad rewinding.
+ */
+RCRE_NODISCARD RCRE_ArenaTemp rcre_arena_temp_begin(RCRE_Arena* arena);
+
+/**
+ * @brief Restores arena offset back to the checkpoint saved in temp.
+ */
+void rcre_arena_temp_end(RCRE_ArenaTemp temp);
+
+/**
+ * @brief Creates a dual-arena execution context (persistent weights + ephemeral tape).
+ */
+RCRE_NODISCARD RCRE_GraphCtx* rcre_graph_ctx_create(size_t persistent_cap, size_t tape_cap);
+
+/**
+ * @brief Resets the ephemeral tape arena back to zero offset.
+ */
+void rcre_graph_ctx_reset_tape(RCRE_GraphCtx* ctx);
+
+/**
+ * @brief Destroys both arenas and frees the graph context.
+ */
+void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx);
 
 /* ========================================================================= */
 /* Tensor Abstraction & Zero-Copy Views (TNS-REQ-01 to TNS-REQ-05)           */
@@ -654,6 +689,288 @@ uint32_t rcre_cpu_get_features(void);
  * @brief Returns human-readable CPU brand/model string.
  */
 const char* rcre_cpu_get_brand(void);
+
+/* ========================================================================= */
+/* Autograd & Neural Network Extensions                                      */
+/* ========================================================================= */
+#ifndef RCRE_NO_AUTOGRAD
+/**
+ * @file rcre_autograd.h
+ * @brief RCRE Unified Automatic Differentiation & Deep Learning Engine
+ * 
+ * Part of Recep's Code Run Everywhere (RCRE).
+ * Strict ISO C23 compliant, zero external dependencies.
+ */
+
+#ifndef RCRE_AUTOGRAD_H
+#define RCRE_AUTOGRAD_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Scalar Reverse-Mode Automatic Differentiation (DAG / Micrograd-style)   */
+/* ========================================================================= */
+
+typedef enum : uint8_t {
+    RCRE_SCALAR_OP_CONST = 0,
+    RCRE_SCALAR_OP_PARAM,
+    RCRE_SCALAR_OP_ADD,
+    RCRE_SCALAR_OP_SUB,
+    RCRE_SCALAR_OP_MUL,
+    RCRE_SCALAR_OP_DIV,
+    RCRE_SCALAR_OP_POW,
+    RCRE_SCALAR_OP_RELU,
+    RCRE_SCALAR_OP_TANH,
+    RCRE_SCALAR_OP_SIGMOID,
+    RCRE_SCALAR_OP_EXP,
+    RCRE_SCALAR_OP_LOG,
+    RCRE_SCALAR_OP_NEG
+} RCRE_ScalarOp;
+
+typedef struct RCRE_ScalarVal RCRE_ScalarVal;
+
+struct RCRE_ScalarVal {
+    double data;
+    double grad;
+    void (*backward)(RCRE_ScalarVal* self);
+    RCRE_ScalarVal* prev[2];
+    RCRE_ScalarOp op;
+    const char* label;
+    uint32_t visited_id;
+};
+
+/* Scalar Value Constructors */
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_val_new(RCRE_GraphCtx* ctx, double data, const char* label);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_val_param(RCRE_GraphCtx* ctx, double data, const char* label);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_val_const(RCRE_GraphCtx* ctx, double data);
+
+/* Scalar Elementary & Transcendental Operators */
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_add(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a, RCRE_ScalarVal* b);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_sub(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a, RCRE_ScalarVal* b);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_mul(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a, RCRE_ScalarVal* b);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_div(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a, RCRE_ScalarVal* b);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_pow(RCRE_GraphCtx* ctx, RCRE_ScalarVal* base, RCRE_ScalarVal* exponent);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_relu(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_tanh(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_sigmoid(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_exp(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_log(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_neg(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a);
+
+/* Scalar Reverse-Mode Execution */
+void rcre_scalar_backward(RCRE_ScalarVal* root);
+void rcre_scalar_zero_grad(RCRE_ScalarVal* root);
+bool rcre_scalar_export_dot(RCRE_ScalarVal* root, const char* filename);
+
+/* ========================================================================= */
+/* 2. Autograd Tensor Primitives & Operations                                */
+/* ========================================================================= */
+
+#define RCRE_AG_MAX_DIMS 4
+
+typedef struct RCRE_AGTensor {
+    float*      data;
+    float*      grad;
+    size_t      shape[RCRE_AG_MAX_DIMS];
+    size_t      strides[RCRE_AG_MAX_DIMS];
+    size_t      ndim;
+    size_t      numel;
+    bool        is_view;
+    const char* label;
+} RCRE_AGTensor;
+
+typedef RCRE_AGTensor RCRE_TensorAG;
+
+/* Allocation & Tensor Creation */
+RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_create(RCRE_Arena* arena, const size_t* shape, size_t ndim);
+RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_create_1d(RCRE_Arena* arena, size_t d0);
+RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_create_2d(RCRE_Arena* arena, size_t rows, size_t cols);
+RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_create_4d(RCRE_Arena* arena, size_t n, size_t c, size_t h, size_t w);
+
+/* Interoperability with core RCRE_Tensor */
+RCRE_NODISCARD RCRE_Tensor   rcre_ag_to_tensor(const RCRE_AGTensor* ag);
+RCRE_NODISCARD RCRE_AGTensor rcre_ag_from_tensor(const RCRE_Tensor* t, float* grad, const char* label);
+
+/* Initialization Routines */
+void rcre_ag_tensor_fill(RCRE_AGTensor* t, float val);
+void rcre_ag_tensor_zeros(RCRE_AGTensor* t);
+void rcre_ag_tensor_ones(RCRE_AGTensor* t);
+void rcre_ag_tensor_init_xavier(RCRE_AGTensor* t, size_t fan_in, size_t fan_out, uint64_t* rng);
+void rcre_ag_tensor_init_he(RCRE_AGTensor* t, size_t fan_in, uint64_t* rng);
+void rcre_ag_tensor_zero_grad(RCRE_AGTensor* t);
+
+/* View & Shape Manipulations */
+RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_view(RCRE_Arena* arena, const RCRE_AGTensor* src);
+RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_reshape(RCRE_Arena* arena, const RCRE_AGTensor* src, const size_t* new_shape, size_t new_ndim);
+void rcre_ag_tensor_print(const RCRE_AGTensor* t, const char* name);
+
+/* Basic Tensor Algebraic Kernels */
+RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_matmul(RCRE_Arena* arena, const RCRE_AGTensor* a, const RCRE_AGTensor* b);
+void rcre_ag_tensor_add_inplace(RCRE_AGTensor* a, const RCRE_AGTensor* b);
+
+/* ========================================================================= */
+/* 3. Reverse-Mode Dynamic Tensor Tape Autograd Engine                       */
+/* ========================================================================= */
+
+typedef struct RCRE_TensorNode RCRE_TensorNode;
+
+struct RCRE_TensorNode {
+    RCRE_AGTensor*  out;
+    RCRE_AGTensor*  inputs[3];
+    size_t          num_inputs;
+    void (*backward)(RCRE_TensorNode* node);
+};
+
+typedef struct {
+    RCRE_TensorNode* nodes;
+    size_t           count;
+    size_t           capacity;
+    RCRE_Arena*      arena;
+} RCRE_TensorTape;
+
+RCRE_NODISCARD RCRE_TensorTape* rcre_tensor_tape_create(RCRE_Arena* arena, size_t initial_cap);
+void rcre_tensor_tape_reset(RCRE_TensorTape* tape);
+void rcre_tensor_tape_backward(RCRE_TensorTape* tape);
+
+/* Differentiable Tape Operators */
+RCRE_NODISCARD RCRE_AGTensor* rcre_autograd_matmul(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCRE_AGTensor* b);
+RCRE_NODISCARD RCRE_AGTensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCRE_AGTensor* b);
+RCRE_NODISCARD RCRE_AGTensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_AGTensor* x, RCRE_AGTensor* bias);
+RCRE_NODISCARD RCRE_AGTensor* rcre_autograd_relu(RCRE_TensorTape* tape, RCRE_AGTensor* x);
+RCRE_NODISCARD RCRE_AGTensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_AGTensor* x);
+
+/* ========================================================================= */
+/* 4. Loss Functions & Gradients                                             */
+/* ========================================================================= */
+
+/* Tensor-based Loss Functions */
+float rcre_loss_mse(const RCRE_AGTensor* preds, const RCRE_AGTensor* targets, RCRE_AGTensor* grad_out);
+float rcre_loss_bce(const RCRE_AGTensor* preds, const RCRE_AGTensor* targets, RCRE_AGTensor* grad_out);
+float rcre_loss_cross_entropy_logits(const RCRE_AGTensor* logits, const size_t* targets, size_t batch_size, size_t num_classes, RCRE_AGTensor* grad_out);
+float rcre_loss_kl_divergence(const RCRE_AGTensor* mu, const RCRE_AGTensor* logvar, RCRE_AGTensor* grad_mu, RCRE_AGTensor* grad_logvar);
+
+/* Scalar-based Loss Functions */
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_loss_mse(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_loss_bce(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count);
+
+/* ========================================================================= */
+/* 5. Optimizers: SGD w/ Momentum & Decoupled Weight Decay AdamW             */
+/* ========================================================================= */
+
+typedef enum : uint8_t {
+    RCRE_OPTIM_SGD = 0,
+    RCRE_OPTIM_ADAMW
+} RCRE_OptimType;
+
+typedef struct {
+    RCRE_OptimType type;
+    RCRE_AGTensor** params;
+    size_t         num_params;
+    float          lr;
+    float          weight_decay;
+
+    /* SGD momentum */
+    float          momentum;
+    float**        v_momentum;
+
+    /* AdamW moments */
+    float          beta1;
+    float          beta2;
+    float          eps;
+    size_t         step_count;
+    float**        m; /* 1st moment */
+    float**        v; /* 2nd moment */
+} RCRE_TensorOptim;
+
+RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float momentum, float weight_decay);
+RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float beta1, float beta2, float eps, float weight_decay);
+void rcre_tensor_optim_step(RCRE_TensorOptim* opt);
+void rcre_tensor_optim_zero_grad(RCRE_TensorOptim* opt);
+
+/* Scalar Autograd Optimizer */
+typedef struct {
+    RCRE_OptimType   type;
+    RCRE_ScalarVal** params;
+    size_t           num_params;
+    double           lr;
+    double           weight_decay;
+    double           momentum;
+    double*          v_momentum;
+    double           beta1;
+    double           beta2;
+    double           eps;
+    size_t           step_count;
+    double*          m;
+    double*          v;
+} RCRE_ScalarOptim;
+
+RCRE_NODISCARD RCRE_ScalarOptim* rcre_scalar_optim_adamw_create(RCRE_Arena* arena, RCRE_ScalarVal** params, size_t num_params, double lr, double beta1, double beta2, double eps, double weight_decay);
+void rcre_scalar_optim_step(RCRE_ScalarOptim* opt);
+void rcre_scalar_optim_zero_grad(RCRE_ScalarOptim* opt);
+
+/* ========================================================================= */
+/* 6. Data Ingestion, Streaming CSV Parser & Scalers                         */
+/* ========================================================================= */
+
+typedef struct {
+    float* mean;
+    float* std;
+    size_t num_features;
+} RCRE_StandardScaler;
+
+typedef struct {
+    float* min_val;
+    float* max_val;
+    size_t num_features;
+} RCRE_MinMaxScaler;
+
+typedef struct {
+    RCRE_AGTensor* X;
+    RCRE_AGTensor* y;
+    size_t         batch_size;
+    size_t         current_idx;
+    size_t         num_samples;
+    bool           shuffle;
+    uint64_t       rng_state;
+    size_t*        indices;
+} RCRE_BatchIter;
+
+RCRE_NODISCARD RCRE_AGTensor* rcre_data_load_csv(RCRE_Arena* arena, const char* filepath, bool skip_header, size_t max_rows);
+
+RCRE_NODISCARD RCRE_StandardScaler* rcre_standard_scaler_fit(RCRE_Arena* arena, const RCRE_AGTensor* X);
+void rcre_standard_scaler_transform(const RCRE_StandardScaler* scaler, RCRE_AGTensor* X);
+void rcre_standard_scaler_inverse_transform(const RCRE_StandardScaler* scaler, RCRE_AGTensor* X);
+
+RCRE_NODISCARD RCRE_MinMaxScaler* rcre_minmax_scaler_fit(RCRE_Arena* arena, const RCRE_AGTensor* X);
+void rcre_minmax_scaler_transform(const RCRE_MinMaxScaler* scaler, RCRE_AGTensor* X);
+
+void rcre_data_train_test_split(RCRE_Arena* arena, const RCRE_AGTensor* X, const RCRE_AGTensor* y,
+                               float train_ratio,
+                               RCRE_AGTensor** X_train, RCRE_AGTensor** y_train,
+                               RCRE_AGTensor** X_test, RCRE_AGTensor** y_test);
+
+RCRE_NODISCARD RCRE_BatchIter* rcre_batch_iter_create(RCRE_Arena* arena, RCRE_AGTensor* X, RCRE_AGTensor* y, size_t batch_size, bool shuffle);
+bool rcre_batch_iter_next(RCRE_BatchIter* iter, RCRE_AGTensor* batch_X, RCRE_AGTensor* batch_y);
+void rcre_batch_iter_reset(RCRE_BatchIter* iter);
+
+/* ========================================================================= */
+/* 7. Visualizations: Terminal Loss Curves, Confusion Matrix & 3D WebGL      */
+/* ========================================================================= */
+
+void rcre_vis_loss_history(const float* loss_history, size_t count, const char* title);
+void rcre_vis_confusion_matrix(const size_t* confusion_matrix, size_t num_classes, const char* const* class_names);
+bool rcre_vis_export_svg_curve(const float* y_vals, size_t count, const char* filepath, const char* title);
+bool rcre_vis_export_3d_clusters_html(const RCRE_AGTensor* points, const size_t* assignments, const RCRE_AGTensor* centroids, size_t k, const char* filepath);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_AUTOGRAD_H */
+#endif
 
 #ifdef __cplusplus
 }
@@ -1930,6 +2247,51 @@ void rcre_arena_destroy(RCRE_Arena* arena) {
             arena->buffer = NULL;
         }
         free(arena);
+    }
+}
+
+RCRE_NODISCARD RCRE_ArenaTemp rcre_arena_temp_begin(RCRE_Arena* arena) {
+    RCRE_ArenaTemp temp = {
+        .arena = arena,
+        .saved_offset = arena ? arena->offset : 0
+    };
+    return temp;
+}
+
+void rcre_arena_temp_end(RCRE_ArenaTemp temp) {
+    if (temp.arena && temp.saved_offset <= temp.arena->capacity) {
+        temp.arena->offset = temp.saved_offset;
+    }
+}
+
+RCRE_NODISCARD RCRE_GraphCtx* rcre_graph_ctx_create(size_t persistent_cap, size_t tape_cap) {
+    RCRE_GraphCtx* ctx = (RCRE_GraphCtx*)malloc(sizeof(RCRE_GraphCtx));
+    if (!ctx) return NULL;
+
+    ctx->persistent_arena = rcre_arena_create(persistent_cap);
+    ctx->tape_arena = rcre_arena_create(tape_cap);
+
+    if (!ctx->persistent_arena || !ctx->tape_arena) {
+        if (ctx->persistent_arena) rcre_arena_destroy(ctx->persistent_arena);
+        if (ctx->tape_arena) rcre_arena_destroy(ctx->tape_arena);
+        free(ctx);
+        return NULL;
+    }
+
+    return ctx;
+}
+
+void rcre_graph_ctx_reset_tape(RCRE_GraphCtx* ctx) {
+    if (ctx && ctx->tape_arena) {
+        rcre_arena_reset(ctx->tape_arena);
+    }
+}
+
+void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx) {
+    if (ctx) {
+        if (ctx->persistent_arena) rcre_arena_destroy(ctx->persistent_arena);
+        if (ctx->tape_arena) rcre_arena_destroy(ctx->tape_arena);
+        free(ctx);
     }
 }
 
@@ -5172,6 +5534,1748 @@ RCRE_NODISCARD int rcre_hnsw_search(const RCRE_HNSWIndex* index, const float* qu
     }
 
     return RCRE_OK;
+}
+
+/* --- Source: scalar_autograd.c --- */
+/**
+ * @file scalar_autograd.c
+ * @brief ISO C23 Micrograd-style scalar reverse-mode automatic differentiation engine.
+ * 
+ * Part of RCRE Unified Engine.
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+static uint32_t g_visited_epoch = 1;
+
+static RCRE_ScalarVal* rcre_scalar_alloc_internal(RCRE_GraphCtx* ctx, bool is_param) {
+    RCRE_Arena* target_arena = (ctx != nullptr)
+        ? (is_param ? ctx->persistent_arena : ctx->tape_arena)
+        : nullptr;
+
+    RCRE_ScalarVal* v = nullptr;
+    if (target_arena != nullptr) {
+        v = (RCRE_ScalarVal*)rcre_arena_alloc(target_arena, sizeof(RCRE_ScalarVal), alignof(RCRE_ScalarVal));
+    } else {
+        v = (RCRE_ScalarVal*)malloc(sizeof(RCRE_ScalarVal));
+    }
+    if (!v) return nullptr;
+
+    v->data = 0.0;
+    v->grad = 0.0;
+    v->backward = nullptr;
+    v->prev[0] = nullptr;
+    v->prev[1] = nullptr;
+    v->op = RCRE_SCALAR_OP_CONST;
+    v->label = nullptr;
+    v->visited_id = 0;
+    return v;
+}
+
+RCRE_ScalarVal* rcre_scalar_val_new(RCRE_GraphCtx* ctx, double data, const char* label) {
+    RCRE_ScalarVal* v = rcre_scalar_alloc_internal(ctx, false);
+    if (!v) return nullptr;
+    v->data = data;
+    v->label = label;
+    v->op = RCRE_SCALAR_OP_CONST;
+    return v;
+}
+
+RCRE_ScalarVal* rcre_scalar_val_param(RCRE_GraphCtx* ctx, double data, const char* label) {
+    RCRE_ScalarVal* v = rcre_scalar_alloc_internal(ctx, true);
+    if (!v) return nullptr;
+    v->data = data;
+    v->label = label;
+    v->op = RCRE_SCALAR_OP_PARAM;
+    return v;
+}
+
+RCRE_ScalarVal* rcre_scalar_val_const(RCRE_GraphCtx* ctx, double data) {
+    return rcre_scalar_val_new(ctx, data, nullptr);
+}
+
+/* Backward callbacks */
+static void scalar_backward_add(RCRE_ScalarVal* self) {
+    if (self->prev[0]) self->prev[0]->grad += self->grad;
+    if (self->prev[1]) self->prev[1]->grad += self->grad;
+}
+
+static void scalar_backward_sub(RCRE_ScalarVal* self) {
+    if (self->prev[0]) self->prev[0]->grad += self->grad;
+    if (self->prev[1]) self->prev[1]->grad -= self->grad;
+}
+
+static void scalar_backward_mul(RCRE_ScalarVal* self) {
+    if (self->prev[0] && self->prev[1]) {
+        self->prev[0]->grad += self->prev[1]->data * self->grad;
+        self->prev[1]->grad += self->prev[0]->data * self->grad;
+    }
+}
+
+static void scalar_backward_div(RCRE_ScalarVal* self) {
+    if (self->prev[0] && self->prev[1]) {
+        double d = self->prev[1]->data;
+        self->prev[0]->grad += (1.0 / d) * self->grad;
+        self->prev[1]->grad += (-self->prev[0]->data / (d * d)) * self->grad;
+    }
+}
+
+static void scalar_backward_pow(RCRE_ScalarVal* self) {
+    if (self->prev[0] && self->prev[1]) {
+        double base = self->prev[0]->data;
+        double exp_val = self->prev[1]->data;
+        self->prev[0]->grad += (exp_val * pow(base, exp_val - 1.0)) * self->grad;
+        if (base > 0.0) {
+            self->prev[1]->grad += (pow(base, exp_val) * log(base)) * self->grad;
+        }
+    }
+}
+
+static void scalar_backward_relu(RCRE_ScalarVal* self) {
+    if (self->prev[0]) {
+        self->prev[0]->grad += (self->data > 0.0 ? 1.0 : 0.0) * self->grad;
+    }
+}
+
+static void scalar_backward_tanh(RCRE_ScalarVal* self) {
+    if (self->prev[0]) {
+        double t = self->data;
+        self->prev[0]->grad += (1.0 - t * t) * self->grad;
+    }
+}
+
+static void scalar_backward_sigmoid(RCRE_ScalarVal* self) {
+    if (self->prev[0]) {
+        double s = self->data;
+        self->prev[0]->grad += s * (1.0 - s) * self->grad;
+    }
+}
+
+static void scalar_backward_exp(RCRE_ScalarVal* self) {
+    if (self->prev[0]) {
+        self->prev[0]->grad += self->data * self->grad;
+    }
+}
+
+static void scalar_backward_log(RCRE_ScalarVal* self) {
+    if (self->prev[0]) {
+        self->prev[0]->grad += (1.0 / (self->prev[0]->data + 1e-15)) * self->grad;
+    }
+}
+
+static void scalar_backward_neg(RCRE_ScalarVal* self) {
+    if (self->prev[0]) {
+        self->prev[0]->grad -= self->grad;
+    }
+}
+
+RCRE_ScalarVal* rcre_scalar_add(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a, RCRE_ScalarVal* b) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = a->data + b->data;
+    out->prev[0] = a;
+    out->prev[1] = b;
+    out->op = RCRE_SCALAR_OP_ADD;
+    out->backward = scalar_backward_add;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_sub(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a, RCRE_ScalarVal* b) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = a->data - b->data;
+    out->prev[0] = a;
+    out->prev[1] = b;
+    out->op = RCRE_SCALAR_OP_SUB;
+    out->backward = scalar_backward_sub;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_mul(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a, RCRE_ScalarVal* b) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = a->data * b->data;
+    out->prev[0] = a;
+    out->prev[1] = b;
+    out->op = RCRE_SCALAR_OP_MUL;
+    out->backward = scalar_backward_mul;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_div(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a, RCRE_ScalarVal* b) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = a->data / (b->data + 1e-15);
+    out->prev[0] = a;
+    out->prev[1] = b;
+    out->op = RCRE_SCALAR_OP_DIV;
+    out->backward = scalar_backward_div;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_pow(RCRE_GraphCtx* ctx, RCRE_ScalarVal* base, RCRE_ScalarVal* exponent) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = pow(base->data, exponent->data);
+    out->prev[0] = base;
+    out->prev[1] = exponent;
+    out->op = RCRE_SCALAR_OP_POW;
+    out->backward = scalar_backward_pow;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_relu(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = a->data > 0.0 ? a->data : 0.0;
+    out->prev[0] = a;
+    out->op = RCRE_SCALAR_OP_RELU;
+    out->backward = scalar_backward_relu;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_tanh(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = tanh(a->data);
+    out->prev[0] = a;
+    out->op = RCRE_SCALAR_OP_TANH;
+    out->backward = scalar_backward_tanh;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_sigmoid(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = 1.0 / (1.0 + exp(-a->data));
+    out->prev[0] = a;
+    out->op = RCRE_SCALAR_OP_SIGMOID;
+    out->backward = scalar_backward_sigmoid;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_exp(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = exp(a->data);
+    out->prev[0] = a;
+    out->op = RCRE_SCALAR_OP_EXP;
+    out->backward = scalar_backward_exp;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_log(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = log(a->data > 1e-15 ? a->data : 1e-15);
+    out->prev[0] = a;
+    out->op = RCRE_SCALAR_OP_LOG;
+    out->backward = scalar_backward_log;
+    return out;
+}
+
+RCRE_ScalarVal* rcre_scalar_neg(RCRE_GraphCtx* ctx, RCRE_ScalarVal* a) {
+    RCRE_ScalarVal* out = rcre_scalar_alloc_internal(ctx, false);
+    if (!out) return nullptr;
+    out->data = -a->data;
+    out->prev[0] = a;
+    out->op = RCRE_SCALAR_OP_NEG;
+    out->backward = scalar_backward_neg;
+    return out;
+}
+
+/* Topological sort vector */
+typedef struct {
+    RCRE_ScalarVal** items;
+    size_t count;
+    size_t capacity;
+} RCRE_ValVec;
+
+static void scalar_vec_push(RCRE_ValVec* vec, RCRE_ScalarVal* v) {
+    if (vec->count >= vec->capacity) {
+        vec->capacity = vec->capacity == 0 ? 128 : vec->capacity * 2;
+        vec->items = (RCRE_ScalarVal**)realloc(vec->items, vec->capacity * sizeof(RCRE_ScalarVal*));
+    }
+    if (vec->items) {
+        vec->items[vec->count++] = v;
+    }
+}
+
+static void build_topo(RCRE_ScalarVal* v, uint32_t epoch, RCRE_ValVec* topo) {
+    if (v == nullptr || v->visited_id == epoch) {
+        return;
+    }
+    v->visited_id = epoch;
+    if (v->prev[0] != nullptr) build_topo(v->prev[0], epoch, topo);
+    if (v->prev[1] != nullptr) build_topo(v->prev[1], epoch, topo);
+    scalar_vec_push(topo, v);
+}
+
+void rcre_scalar_backward(RCRE_ScalarVal* root) {
+    if (root == nullptr) return;
+
+    uint32_t epoch = ++g_visited_epoch;
+    RCRE_ValVec topo = { .items = nullptr, .count = 0, .capacity = 0 };
+    build_topo(root, epoch, &topo);
+
+    root->grad = 1.0;
+
+    for (size_t i = topo.count; i > 0; --i) {
+        RCRE_ScalarVal* curr = topo.items[i - 1];
+        if (curr->backward != nullptr) {
+            curr->backward(curr);
+        }
+    }
+
+    if (topo.items != nullptr) {
+        free(topo.items);
+    }
+}
+
+void rcre_scalar_zero_grad(RCRE_ScalarVal* root) {
+    if (root == nullptr) return;
+    uint32_t epoch = ++g_visited_epoch;
+    RCRE_ValVec topo = { .items = nullptr, .count = 0, .capacity = 0 };
+    build_topo(root, epoch, &topo);
+    for (size_t i = 0; i < topo.count; ++i) {
+        topo.items[i]->grad = 0.0;
+    }
+    if (topo.items != nullptr) {
+        free(topo.items);
+    }
+}
+
+bool rcre_scalar_export_dot(RCRE_ScalarVal* root, const char* filename) {
+    if (root == nullptr || filename == nullptr) return false;
+
+    FILE* f = fopen(filename, "w");
+    if (!f) return false;
+
+    fprintf(f, "digraph AutogradGraph {\n");
+    fprintf(f, "  rankdir=LR;\n");
+    fprintf(f, "  node [shape=record, style=filled, fillcolor=\"#F0F4F8\", fontname=\"Helvetica\"];\n");
+
+    uint32_t epoch = ++g_visited_epoch;
+    RCRE_ValVec topo = { .items = nullptr, .count = 0, .capacity = 0 };
+    build_topo(root, epoch, &topo);
+
+    for (size_t i = 0; i < topo.count; ++i) {
+        RCRE_ScalarVal* n = topo.items[i];
+        const char* lbl = n->label ? n->label : "";
+        fprintf(f, "  node_%p [label=\"{%s|data: %.4f|grad: %.4f}\"];\n", (void*)n, lbl, n->data, n->grad);
+        if (n->prev[0] != nullptr) {
+            fprintf(f, "  node_%p -> node_%p;\n", (void*)n->prev[0], (void*)n);
+        }
+        if (n->prev[1] != nullptr) {
+            fprintf(f, "  node_%p -> node_%p;\n", (void*)n->prev[1], (void*)n);
+        }
+    }
+
+    fprintf(f, "}\n");
+    fclose(f);
+    if (topo.items != nullptr) free(topo.items);
+    return true;
+}
+
+/* --- Source: tensor_autograd.c --- */
+/**
+ * @file tensor_autograd.c
+ * @brief Dynamic Tensor Tape and Automatic Differentiation Engine for RCRE.
+ * 
+ * Part of RCRE Unified Engine.
+ */
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
+
+#if defined(__APPLE__) && defined(RCRE_USE_BLAS)
+#include <Accelerate/Accelerate.h>
+#endif
+
+/* ========================================================================= */
+/* Internal General GEMM with Transpose Support                              */
+/* ========================================================================= */
+
+static void rcre_ag_gemm(bool transA, bool transB, size_t M, size_t N, size_t K,
+                         float alpha, const float* A, size_t lda,
+                         const float* B, size_t ldb,
+                         float beta, float* C, size_t ldc) {
+#if defined(__APPLE__) && defined(RCRE_USE_BLAS)
+    cblas_sgemm(CblasRowMajor,
+                transA ? CblasTrans : CblasNoTrans,
+                transB ? CblasTrans : CblasNoTrans,
+                (int)M, (int)N, (int)K,
+                alpha, A, (int)lda,
+                B, (int)ldb,
+                beta, C, (int)ldc);
+#else
+    if (!transA && !transB) {
+        rcre_hal.gemm_f32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+
+    #define BLOCK_M 64
+    #define BLOCK_N 64
+    #define BLOCK_K 64
+
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            if (beta == 0.0f) {
+                C[i * ldc + j] = 0.0f;
+            } else {
+                C[i * ldc + j] *= beta;
+            }
+        }
+    }
+
+    for (size_t ii = 0; ii < M; ii += BLOCK_M) {
+        size_t m_end = (ii + BLOCK_M < M) ? ii + BLOCK_M : M;
+        for (size_t kk = 0; kk < K; kk += BLOCK_K) {
+            size_t k_end = (kk + BLOCK_K < K) ? kk + BLOCK_K : K;
+            for (size_t jj = 0; jj < N; jj += BLOCK_N) {
+                size_t j_end = (jj + BLOCK_N < N) ? jj + BLOCK_N : N;
+
+                for (size_t i = ii; i < m_end; ++i) {
+                    for (size_t k = kk; k < k_end; ++k) {
+                        float a_val = alpha * (transA ? A[k * lda + i] : A[i * lda + k]);
+                        for (size_t j = jj; j < j_end; ++j) {
+                            float b_val = transB ? B[j * ldb + k] : B[k * ldb + j];
+                            C[i * ldc + j] += a_val * b_val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
+}
+
+/* ========================================================================= */
+/* Autograd Tensor Allocation & Initialization                               */
+/* ========================================================================= */
+
+static void rcre_ag_compute_contiguous_strides(RCRE_AGTensor* t) {
+    if (t->ndim == 0) return;
+    t->strides[t->ndim - 1] = 1;
+    for (size_t i = t->ndim - 1; i > 0; --i) {
+        t->strides[i - 1] = t->strides[i] * t->shape[i];
+    }
+}
+
+RCRE_AGTensor* rcre_ag_tensor_create(RCRE_Arena* arena, const size_t* shape, size_t ndim) {
+    if (ndim > RCRE_AG_MAX_DIMS || ndim == 0) return nullptr;
+
+    RCRE_AGTensor* t = nullptr;
+    if (arena != nullptr) {
+        t = (RCRE_AGTensor*)rcre_arena_alloc(arena, sizeof(RCRE_AGTensor), alignof(RCRE_AGTensor));
+    } else {
+        t = (RCRE_AGTensor*)malloc(sizeof(RCRE_AGTensor));
+    }
+    if (!t) return nullptr;
+
+    t->ndim = ndim;
+    t->numel = 1;
+    for (size_t i = 0; i < ndim; ++i) {
+        t->shape[i] = shape[i];
+        t->numel *= shape[i];
+    }
+    rcre_ag_compute_contiguous_strides(t);
+    t->is_view = false;
+    t->label = nullptr;
+
+    size_t byte_size = t->numel * sizeof(float);
+    if (arena != nullptr) {
+        t->data = (float*)rcre_arena_alloc(arena, byte_size, 64);
+        t->grad = (float*)rcre_arena_alloc(arena, byte_size, 64);
+    } else {
+        t->data = (float*)aligned_alloc(64, (byte_size + 63) & ~63ULL);
+        t->grad = (float*)aligned_alloc(64, (byte_size + 63) & ~63ULL);
+    }
+
+    if (!t->data || !t->grad) {
+        return nullptr;
+    }
+
+    memset(t->data, 0, byte_size);
+    memset(t->grad, 0, byte_size);
+    return t;
+}
+
+RCRE_AGTensor* rcre_ag_tensor_create_1d(RCRE_Arena* arena, size_t d0) {
+    size_t shape[1] = { d0 };
+    return rcre_ag_tensor_create(arena, shape, 1);
+}
+
+RCRE_AGTensor* rcre_ag_tensor_create_2d(RCRE_Arena* arena, size_t rows, size_t cols) {
+    size_t shape[2] = { rows, cols };
+    return rcre_ag_tensor_create(arena, shape, 2);
+}
+
+RCRE_AGTensor* rcre_ag_tensor_create_4d(RCRE_Arena* arena, size_t n, size_t c, size_t h, size_t w) {
+    size_t shape[4] = { n, c, h, w };
+    return rcre_ag_tensor_create(arena, shape, 4);
+}
+
+RCRE_Tensor rcre_ag_to_tensor(const RCRE_AGTensor* ag) {
+    RCRE_Tensor t = {
+        .data = ag->data,
+        .ndim = (uint8_t)ag->ndim,
+        .dtype = RCRE_DTYPE_F32,
+        .layout = RCRE_LAYOUT_TABULAR
+    };
+    for (size_t i = 0; i < 4; ++i) {
+        t.shape[i] = (i < ag->ndim) ? ag->shape[i] : 1;
+        t.strides[i] = (i < ag->ndim) ? (ptrdiff_t)ag->strides[i] : 0;
+    }
+    return t;
+}
+
+RCRE_AGTensor rcre_ag_from_tensor(const RCRE_Tensor* t, float* grad, const char* label) {
+    RCRE_AGTensor ag = {
+        .data = (float*)t->data,
+        .grad = grad,
+        .ndim = t->ndim,
+        .numel = 1,
+        .is_view = true,
+        .label = label
+    };
+    for (size_t i = 0; i < t->ndim; ++i) {
+        ag.shape[i] = t->shape[i];
+        ag.strides[i] = (size_t)t->strides[i];
+        ag.numel *= t->shape[i];
+    }
+    return ag;
+}
+
+void rcre_ag_tensor_fill(RCRE_AGTensor* t, float val) {
+    if (!t || !t->data) return;
+    for (size_t i = 0; i < t->numel; ++i) {
+        t->data[i] = val;
+    }
+}
+
+void rcre_ag_tensor_zeros(RCRE_AGTensor* t) {
+    rcre_ag_tensor_fill(t, 0.0f);
+}
+
+void rcre_ag_tensor_ones(RCRE_AGTensor* t) {
+    rcre_ag_tensor_fill(t, 1.0f);
+}
+
+void rcre_ag_tensor_zero_grad(RCRE_AGTensor* t) {
+    if (t && t->grad) {
+        memset(t->grad, 0, t->numel * sizeof(float));
+    }
+}
+
+/* XorShift64 PRNG */
+static uint64_t xorshift64(uint64_t* state) {
+    uint64_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    return *state = x;
+}
+
+static float rand_uniform(uint64_t* rng, float min_val, float max_val) {
+    uint64_t r = xorshift64(rng);
+    double u = (double)(r >> 11) * (1.0 / 9007199254740992.0);
+    return min_val + (float)(u * (max_val - min_val));
+}
+
+void rcre_ag_tensor_init_xavier(RCRE_AGTensor* t, size_t fan_in, size_t fan_out, uint64_t* rng) {
+    if (!t || !t->data) return;
+    float limit = sqrtf(6.0f / (float)(fan_in + fan_out));
+    for (size_t i = 0; i < t->numel; ++i) {
+        t->data[i] = rand_uniform(rng, -limit, limit);
+    }
+}
+
+void rcre_ag_tensor_init_he(RCRE_AGTensor* t, size_t fan_in, uint64_t* rng) {
+    if (!t || !t->data) return;
+    float std = sqrtf(2.0f / (float)fan_in);
+    for (size_t i = 0; i < t->numel; ++i) {
+        /* Box-Muller normal distribution */
+        float u1 = rand_uniform(rng, 1e-7f, 1.0f);
+        float u2 = rand_uniform(rng, 0.0f, 1.0f);
+        float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.1415926535f * u2);
+        t->data[i] = z * std;
+    }
+}
+
+RCRE_AGTensor* rcre_ag_tensor_view(RCRE_Arena* arena, const RCRE_AGTensor* src) {
+    if (!src) return nullptr;
+    RCRE_AGTensor* v = nullptr;
+    if (arena != nullptr) {
+        v = (RCRE_AGTensor*)rcre_arena_alloc(arena, sizeof(RCRE_AGTensor), alignof(RCRE_AGTensor));
+    } else {
+        v = (RCRE_AGTensor*)malloc(sizeof(RCRE_AGTensor));
+    }
+    if (!v) return nullptr;
+    memcpy(v, src, sizeof(RCRE_AGTensor));
+    v->is_view = true;
+    return v;
+}
+
+RCRE_AGTensor* rcre_ag_tensor_reshape(RCRE_Arena* arena, const RCRE_AGTensor* src, const size_t* new_shape, size_t new_ndim) {
+    if (!src || new_ndim > RCRE_AG_MAX_DIMS || new_ndim == 0) return nullptr;
+    size_t new_numel = 1;
+    for (size_t i = 0; i < new_ndim; ++i) {
+        new_numel *= new_shape[i];
+    }
+    if (new_numel != src->numel) return nullptr;
+
+    RCRE_AGTensor* v = rcre_ag_tensor_view(arena, src);
+    if (!v) return nullptr;
+    v->ndim = new_ndim;
+    for (size_t i = 0; i < new_ndim; ++i) {
+        v->shape[i] = new_shape[i];
+    }
+    rcre_ag_compute_contiguous_strides(v);
+    return v;
+}
+
+void rcre_ag_tensor_print(const RCRE_AGTensor* t, const char* name) {
+    if (!t) return;
+    printf("Tensor '%s' [ndim=%zu, numel=%zu]:\n", name ? name : "unnamed", t->ndim, t->numel);
+    if (t->ndim == 1) {
+        printf("  [");
+        for (size_t i = 0; i < t->numel && i < 10; ++i) {
+            printf("%.4f%s", t->data[i], (i + 1 < t->numel) ? ", " : "");
+        }
+        if (t->numel > 10) printf("...");
+        printf("]\n");
+    } else if (t->ndim == 2) {
+        for (size_t r = 0; r < t->shape[0] && r < 5; ++r) {
+            printf("  [");
+            for (size_t c = 0; c < t->shape[1] && c < 8; ++c) {
+                printf("%.4f%s", t->data[r * t->strides[0] + c], (c + 1 < t->shape[1]) ? ", " : "");
+            }
+            if (t->shape[1] > 8) printf("...");
+            printf("]\n");
+        }
+        if (t->shape[0] > 5) printf("  ...\n");
+    }
+}
+
+RCRE_AGTensor* rcre_ag_tensor_matmul(RCRE_Arena* arena, const RCRE_AGTensor* a, const RCRE_AGTensor* b) {
+    if (!a || !b || a->ndim != 2 || b->ndim != 2 || a->shape[1] != b->shape[0]) return nullptr;
+    size_t M = a->shape[0];
+    size_t K = a->shape[1];
+    size_t N = b->shape[1];
+
+    RCRE_AGTensor* c = rcre_ag_tensor_create_2d(arena, M, N);
+    if (!c) return nullptr;
+    rcre_ag_gemm(false, false, M, N, K, 1.0f, a->data, a->strides[0], b->data, b->strides[0], 0.0f, c->data, c->strides[0]);
+    return c;
+}
+
+void rcre_ag_tensor_add_inplace(RCRE_AGTensor* a, const RCRE_AGTensor* b) {
+    if (!a || !b || a->numel != b->numel) return;
+    for (size_t i = 0; i < a->numel; ++i) {
+        a->data[i] += b->data[i];
+    }
+}
+
+/* ========================================================================= */
+/* Dynamic Tensor Tape Autograd Engine                                       */
+/* ========================================================================= */
+
+RCRE_TensorTape* rcre_tensor_tape_create(RCRE_Arena* arena, size_t initial_cap) {
+    RCRE_TensorTape* tape = nullptr;
+    if (arena != nullptr) {
+        tape = (RCRE_TensorTape*)rcre_arena_alloc(arena, sizeof(RCRE_TensorTape), alignof(RCRE_TensorTape));
+        tape->nodes = (RCRE_TensorNode*)rcre_arena_alloc(arena, initial_cap * sizeof(RCRE_TensorNode), alignof(RCRE_TensorNode));
+    } else {
+        tape = (RCRE_TensorTape*)malloc(sizeof(RCRE_TensorTape));
+        tape->nodes = (RCRE_TensorNode*)malloc(initial_cap * sizeof(RCRE_TensorNode));
+    }
+    if (!tape || !tape->nodes) return nullptr;
+    tape->count = 0;
+    tape->capacity = initial_cap;
+    tape->arena = arena;
+    return tape;
+}
+
+void rcre_tensor_tape_reset(RCRE_TensorTape* tape) {
+    if (tape != nullptr) {
+        tape->count = 0;
+    }
+}
+
+static RCRE_TensorNode* tape_push_node(RCRE_TensorTape* tape) {
+    if (tape->count >= tape->capacity) {
+        size_t new_cap = tape->capacity * 2;
+        if (tape->arena != nullptr) {
+            RCRE_TensorNode* new_nodes = (RCRE_TensorNode*)rcre_arena_alloc(tape->arena, new_cap * sizeof(RCRE_TensorNode), alignof(RCRE_TensorNode));
+            memcpy(new_nodes, tape->nodes, tape->count * sizeof(RCRE_TensorNode));
+            tape->nodes = new_nodes;
+        } else {
+            tape->nodes = (RCRE_TensorNode*)realloc(tape->nodes, new_cap * sizeof(RCRE_TensorNode));
+        }
+        if (!tape->nodes) return nullptr;
+        tape->capacity = new_cap;
+    }
+    return &tape->nodes[tape->count++];
+}
+
+static void backward_matmul(RCRE_TensorNode* node) {
+    RCRE_AGTensor* out = node->out;
+    RCRE_AGTensor* a = node->inputs[0];
+    RCRE_AGTensor* b = node->inputs[1];
+
+    size_t M = a->shape[0];
+    size_t K = a->shape[1];
+    size_t N = b->shape[1];
+
+    /* dA += dC * B^T */
+    if (a->grad != nullptr) {
+        rcre_ag_gemm(false, true, M, K, N, 1.0f, out->grad, N, b->data, N, 1.0f, a->grad, K);
+    }
+
+    /* dB += A^T * dC */
+    if (b->grad != nullptr) {
+        rcre_ag_gemm(true, false, K, N, M, 1.0f, a->data, K, out->grad, N, 1.0f, b->grad, N);
+    }
+}
+
+static void backward_add(RCRE_TensorNode* node) {
+    RCRE_AGTensor* out = node->out;
+    RCRE_AGTensor* a = node->inputs[0];
+    RCRE_AGTensor* b = node->inputs[1];
+
+    for (size_t i = 0; i < out->numel; ++i) {
+        if (a->grad != nullptr) a->grad[i] += out->grad[i];
+        if (b->grad != nullptr) b->grad[i] += out->grad[i];
+    }
+}
+
+static void backward_add_bias(RCRE_TensorNode* node) {
+    RCRE_AGTensor* out = node->out;
+    RCRE_AGTensor* x = node->inputs[0];
+    RCRE_AGTensor* bias = node->inputs[1];
+
+    size_t rows = out->shape[0];
+    size_t cols = out->shape[1];
+
+    for (size_t r = 0; r < rows; ++r) {
+        const float* out_grad_row = out->grad + r * cols;
+        float* x_grad_row = (x->grad != nullptr) ? (x->grad + r * cols) : nullptr;
+        for (size_t c = 0; c < cols; ++c) {
+            if (x_grad_row != nullptr) x_grad_row[c] += out_grad_row[c];
+            if (bias->grad != nullptr) bias->grad[c] += out_grad_row[c];
+        }
+    }
+}
+
+static void backward_relu(RCRE_TensorNode* node) {
+    RCRE_AGTensor* out = node->out;
+    RCRE_AGTensor* x = node->inputs[0];
+
+    if (x->grad == nullptr) return;
+
+    for (size_t i = 0; i < out->numel; ++i) {
+        if (x->data[i] > 0.0f) {
+            x->grad[i] += out->grad[i];
+        }
+    }
+}
+
+static void backward_sigmoid(RCRE_TensorNode* node) {
+    RCRE_AGTensor* out = node->out;
+    RCRE_AGTensor* x = node->inputs[0];
+
+    if (x->grad == nullptr) return;
+
+    for (size_t i = 0; i < out->numel; ++i) {
+        float s = out->data[i];
+        x->grad[i] += s * (1.0f - s) * out->grad[i];
+    }
+}
+
+void rcre_tensor_tape_backward(RCRE_TensorTape* tape) {
+    if (!tape || tape->count == 0) return;
+    for (size_t i = tape->count; i > 0; --i) {
+        RCRE_TensorNode* node = &tape->nodes[i - 1];
+        if (node->backward != nullptr) {
+            node->backward(node);
+        }
+    }
+}
+
+RCRE_AGTensor* rcre_autograd_matmul(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCRE_AGTensor* b) {
+    RCRE_AGTensor* out = rcre_ag_tensor_matmul(tape->arena, a, b);
+    if (!out) return nullptr;
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    node->out = out;
+    node->inputs[0] = a;
+    node->inputs[1] = b;
+    node->num_inputs = 2;
+    node->backward = backward_matmul;
+    return out;
+}
+
+RCRE_AGTensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCRE_AGTensor* b) {
+    RCRE_AGTensor* out = rcre_ag_tensor_create(tape->arena, a->shape, a->ndim);
+    if (!out) return nullptr;
+    for (size_t i = 0; i < out->numel; ++i) {
+        out->data[i] = a->data[i] + b->data[i];
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    node->out = out;
+    node->inputs[0] = a;
+    node->inputs[1] = b;
+    node->num_inputs = 2;
+    node->backward = backward_add;
+    return out;
+}
+
+RCRE_AGTensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_AGTensor* x, RCRE_AGTensor* bias) {
+    size_t rows = x->shape[0];
+    size_t cols = x->shape[1];
+
+    RCRE_AGTensor* out = rcre_ag_tensor_create_2d(tape->arena, rows, cols);
+    if (!out) return nullptr;
+    for (size_t r = 0; r < rows; ++r) {
+        const float* x_row = x->data + r * cols;
+        float* out_row = out->data + r * cols;
+        for (size_t c = 0; c < cols; ++c) {
+            out_row[c] = x_row[c] + bias->data[c];
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    node->out = out;
+    node->inputs[0] = x;
+    node->inputs[1] = bias;
+    node->num_inputs = 2;
+    node->backward = backward_add_bias;
+    return out;
+}
+
+RCRE_AGTensor* rcre_autograd_relu(RCRE_TensorTape* tape, RCRE_AGTensor* x) {
+    RCRE_AGTensor* out = rcre_ag_tensor_create(tape->arena, x->shape, x->ndim);
+    if (!out) return nullptr;
+    for (size_t i = 0; i < out->numel; ++i) {
+        out->data[i] = (x->data[i] > 0.0f) ? x->data[i] : 0.0f;
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    node->out = out;
+    node->inputs[0] = x;
+    node->num_inputs = 1;
+    node->backward = backward_relu;
+    return out;
+}
+
+RCRE_AGTensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_AGTensor* x) {
+    RCRE_AGTensor* out = rcre_ag_tensor_create(tape->arena, x->shape, x->ndim);
+    if (!out) return nullptr;
+    for (size_t i = 0; i < out->numel; ++i) {
+        out->data[i] = 1.0f / (1.0f + expf(-x->data[i]));
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    node->out = out;
+    node->inputs[0] = x;
+    node->num_inputs = 1;
+    node->backward = backward_sigmoid;
+    return out;
+}
+
+/* --- Source: loss.c --- */
+/**
+ * @file loss.c
+ * @brief Numerical and autograd loss functions: MSE, BCE, Cross-Entropy, and KL Divergence.
+ * 
+ * Part of RCRE Unified Engine.
+ */
+
+#include <math.h>
+#include <string.h>
+
+float rcre_loss_mse(const RCRE_AGTensor* preds, const RCRE_AGTensor* targets, RCRE_AGTensor* grad_out) {
+    if (!preds || !targets || preds->numel != targets->numel || preds->numel == 0) return 0.0f;
+
+    size_t n = preds->numel;
+    float sum_sq = 0.0f;
+    float scale = 2.0f / (float)n;
+
+    for (size_t i = 0; i < n; ++i) {
+        float diff = preds->data[i] - targets->data[i];
+        sum_sq += diff * diff;
+        float g = diff * scale;
+        if (grad_out != nullptr) {
+            if (grad_out->grad != nullptr) {
+                grad_out->grad[i] = g;
+            }
+            if (grad_out->data != nullptr && grad_out != preds) {
+                grad_out->data[i] = g;
+            }
+        }
+    }
+    return sum_sq / (float)n;
+}
+
+float rcre_loss_bce(const RCRE_AGTensor* preds, const RCRE_AGTensor* targets, RCRE_AGTensor* grad_out) {
+    if (!preds || !targets || preds->numel != targets->numel || preds->numel == 0) return 0.0f;
+
+    size_t n = preds->numel;
+    float total_loss = 0.0f;
+    const float eps = 1e-12f;
+
+    for (size_t i = 0; i < n; ++i) {
+        float p = preds->data[i];
+        if (p < eps) p = eps;
+        if (p > 1.0f - eps) p = 1.0f - eps;
+        float y = targets->data[i];
+
+        total_loss -= (y * logf(p) + (1.0f - y) * logf(1.0f - p));
+        if (grad_out != nullptr) {
+            float g = ((p - y) / (p * (1.0f - p))) / (float)n;
+            if (grad_out->grad != nullptr) {
+                grad_out->grad[i] = g;
+            }
+            if (grad_out->data != nullptr && grad_out != preds) {
+                grad_out->data[i] = g;
+            }
+        }
+    }
+    return total_loss / (float)n;
+}
+
+float rcre_loss_cross_entropy_logits(const RCRE_AGTensor* logits, const size_t* targets, size_t batch_size, size_t num_classes, RCRE_AGTensor* grad_out) {
+    if (!logits || !targets || batch_size == 0 || num_classes == 0) return 0.0f;
+
+    float total_loss = 0.0f;
+
+    for (size_t b = 0; b < batch_size; ++b) {
+        const float* row = logits->data + b * num_classes;
+        float max_val = row[0];
+        for (size_t c = 1; c < num_classes; ++c) {
+            if (row[c] > max_val) max_val = row[c];
+        }
+
+        float sum_exp = 0.0f;
+        for (size_t c = 0; c < num_classes; ++c) {
+            sum_exp += expf(row[c] - max_val);
+        }
+
+        size_t target_cls = targets[b];
+        if (target_cls >= num_classes) target_cls = num_classes - 1;
+
+        float log_p = (row[target_cls] - max_val) - logf(sum_exp + 1e-12f);
+        total_loss -= log_p;
+
+        if (grad_out != nullptr) {
+            for (size_t c = 0; c < num_classes; ++c) {
+                float prob = expf(row[c] - max_val) / (sum_exp + 1e-12f);
+                float g = (c == target_cls) ? (prob - 1.0f) / (float)batch_size : prob / (float)batch_size;
+                if (grad_out->grad != nullptr) {
+                    grad_out->grad[b * num_classes + c] = g;
+                }
+                if (grad_out->data != nullptr && grad_out != logits) {
+                    grad_out->data[b * num_classes + c] = g;
+                }
+            }
+        }
+    }
+
+    return total_loss / (float)batch_size;
+}
+
+float rcre_loss_kl_divergence(const RCRE_AGTensor* mu, const RCRE_AGTensor* logvar, RCRE_AGTensor* grad_mu, RCRE_AGTensor* grad_logvar) {
+    if (!mu || !logvar || mu->numel != logvar->numel || mu->numel == 0) return 0.0f;
+
+    size_t n = mu->numel;
+    float kl_sum = 0.0f;
+
+    for (size_t i = 0; i < n; ++i) {
+        float m = mu->data[i];
+        float lv = logvar->data[i];
+        float var = expf(lv);
+
+        /* KL = -0.5 * sum(1 + log(var) - mu^2 - var) */
+        kl_sum += -0.5f * (1.0f + lv - m * m - var);
+
+        if (grad_mu != nullptr) {
+            float gm = m / (float)n;
+            if (grad_mu->grad != nullptr) grad_mu->grad[i] = gm;
+            if (grad_mu->data != nullptr && grad_mu != mu) grad_mu->data[i] = gm;
+        }
+        if (grad_logvar != nullptr) {
+            float glv = 0.5f * (var - 1.0f) / (float)n;
+            if (grad_logvar->grad != nullptr) grad_logvar->grad[i] = glv;
+            if (grad_logvar->data != nullptr && grad_logvar != logvar) grad_logvar->data[i] = glv;
+        }
+    }
+    return kl_sum / (float)n;
+}
+
+/* Scalar Autograd Losses */
+RCRE_ScalarVal* rcre_scalar_loss_mse(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count) {
+    if (!preds || !targets || count == 0) return nullptr;
+    RCRE_ScalarVal* total_loss = rcre_scalar_val_const(ctx, 0.0);
+    RCRE_ScalarVal* two = rcre_scalar_val_const(ctx, 2.0);
+
+    for (size_t i = 0; i < count; ++i) {
+        RCRE_ScalarVal* t = rcre_scalar_val_const(ctx, targets[i]);
+        RCRE_ScalarVal* diff = rcre_scalar_sub(ctx, preds[i], t);
+        RCRE_ScalarVal* sq = rcre_scalar_pow(ctx, diff, two);
+        total_loss = rcre_scalar_add(ctx, total_loss, sq);
+    }
+    RCRE_ScalarVal* n_val = rcre_scalar_val_const(ctx, (double)count);
+    return rcre_scalar_div(ctx, total_loss, n_val);
+}
+
+RCRE_ScalarVal* rcre_scalar_loss_bce(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count) {
+    if (!preds || !targets || count == 0) return nullptr;
+    RCRE_ScalarVal* total_loss = rcre_scalar_val_const(ctx, 0.0);
+    RCRE_ScalarVal* one = rcre_scalar_val_const(ctx, 1.0);
+
+    for (size_t i = 0; i < count; ++i) {
+        RCRE_ScalarVal* p = preds[i];
+        RCRE_ScalarVal* y = rcre_scalar_val_const(ctx, targets[i]);
+        RCRE_ScalarVal* one_minus_y = rcre_scalar_val_const(ctx, 1.0 - targets[i]);
+
+        RCRE_ScalarVal* log_p = rcre_scalar_log(ctx, p);
+        RCRE_ScalarVal* one_minus_p = rcre_scalar_sub(ctx, one, p);
+        RCRE_ScalarVal* log_one_minus_p = rcre_scalar_log(ctx, one_minus_p);
+
+        RCRE_ScalarVal* term1 = rcre_scalar_mul(ctx, y, log_p);
+        RCRE_ScalarVal* term2 = rcre_scalar_mul(ctx, one_minus_y, log_one_minus_p);
+        RCRE_ScalarVal* sample_loss = rcre_scalar_neg(ctx, rcre_scalar_add(ctx, term1, term2));
+
+        total_loss = rcre_scalar_add(ctx, total_loss, sample_loss);
+    }
+    RCRE_ScalarVal* n_val = rcre_scalar_val_const(ctx, (double)count);
+    return rcre_scalar_div(ctx, total_loss, n_val);
+}
+
+/* --- Source: optim.c --- */
+/**
+ * @file optim.c
+ * @brief High-performance numerical and autograd optimizers: SGD w/ Momentum & AdamW.
+ * 
+ * Part of RCRE Unified Engine.
+ */
+
+#include <stdlib.h>
+#include <math.h>
+#include <string.h>
+
+RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float momentum, float weight_decay) {
+    if (!params || num_params == 0) return nullptr;
+
+    RCRE_TensorOptim* opt = nullptr;
+    if (arena != nullptr) {
+        opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
+    } else {
+        opt = (RCRE_TensorOptim*)malloc(sizeof(RCRE_TensorOptim));
+    }
+    if (!opt) return nullptr;
+
+    opt->type = RCRE_OPTIM_SGD;
+    opt->params = params;
+    opt->num_params = num_params;
+    opt->lr = lr;
+    opt->weight_decay = weight_decay;
+    opt->momentum = momentum;
+
+    if (arena != nullptr) {
+        opt->v_momentum = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+    } else {
+        opt->v_momentum = (float**)malloc(num_params * sizeof(float*));
+    }
+    if (!opt->v_momentum) return nullptr;
+
+    for (size_t p = 0; p < num_params; ++p) {
+        size_t bytes = params[p]->numel * sizeof(float);
+        if (arena != nullptr) {
+            opt->v_momentum[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
+        } else {
+            opt->v_momentum[p] = (float*)aligned_alloc(64, (bytes + 63) & ~63ULL);
+        }
+        if (opt->v_momentum[p]) {
+            memset(opt->v_momentum[p], 0, bytes);
+        }
+    }
+    return opt;
+}
+
+RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float beta1, float beta2, float eps, float weight_decay) {
+    if (!params || num_params == 0) return nullptr;
+
+    RCRE_TensorOptim* opt = nullptr;
+    if (arena != nullptr) {
+        opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
+    } else {
+        opt = (RCRE_TensorOptim*)malloc(sizeof(RCRE_TensorOptim));
+    }
+    if (!opt) return nullptr;
+
+    opt->type = RCRE_OPTIM_ADAMW;
+    opt->params = params;
+    opt->num_params = num_params;
+    opt->lr = lr;
+    opt->beta1 = beta1;
+    opt->beta2 = beta2;
+    opt->eps = eps;
+    opt->weight_decay = weight_decay;
+    opt->step_count = 0;
+
+    if (arena != nullptr) {
+        opt->m = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+        opt->v = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+    } else {
+        opt->m = (float**)malloc(num_params * sizeof(float*));
+        opt->v = (float**)malloc(num_params * sizeof(float*));
+    }
+    if (!opt->m || !opt->v) return nullptr;
+
+    for (size_t p = 0; p < num_params; ++p) {
+        size_t bytes = params[p]->numel * sizeof(float);
+        if (arena != nullptr) {
+            opt->m[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
+            opt->v[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
+        } else {
+            opt->m[p] = (float*)aligned_alloc(64, (bytes + 63) & ~63ULL);
+            opt->v[p] = (float*)aligned_alloc(64, (bytes + 63) & ~63ULL);
+        }
+        if (opt->m[p]) memset(opt->m[p], 0, bytes);
+        if (opt->v[p]) memset(opt->v[p], 0, bytes);
+    }
+    return opt;
+}
+
+void rcre_tensor_optim_step(RCRE_TensorOptim* opt) {
+    if (opt == nullptr) return;
+
+    if (opt->type == RCRE_OPTIM_SGD) {
+        for (size_t p = 0; p < opt->num_params; ++p) {
+            RCRE_AGTensor* t = opt->params[p];
+            float* v_mom = opt->v_momentum[p];
+            for (size_t i = 0; i < t->numel; ++i) {
+                float g = t->grad[i] + opt->weight_decay * t->data[i];
+                v_mom[i] = opt->momentum * v_mom[i] + g;
+                t->data[i] -= opt->lr * v_mom[i];
+            }
+        }
+    } else if (opt->type == RCRE_OPTIM_ADAMW) {
+        opt->step_count++;
+        float b1 = opt->beta1;
+        float b2 = opt->beta2;
+        float lr = opt->lr;
+        float wd = opt->weight_decay;
+        float eps = opt->eps;
+
+        float bias_corr1 = 1.0f - powf(b1, (float)opt->step_count);
+        float bias_corr2 = 1.0f - powf(b2, (float)opt->step_count);
+
+        for (size_t p = 0; p < opt->num_params; ++p) {
+            RCRE_AGTensor* t = opt->params[p];
+            float* m_arr = opt->m[p];
+            float* v_arr = opt->v[p];
+
+            for (size_t i = 0; i < t->numel; ++i) {
+                float g = t->grad[i];
+                /* Decoupled weight decay */
+                t->data[i] -= lr * wd * t->data[i];
+
+                m_arr[i] = b1 * m_arr[i] + (1.0f - b1) * g;
+                v_arr[i] = b2 * v_arr[i] + (1.0f - b2) * (g * g);
+
+                float m_hat = m_arr[i] / bias_corr1;
+                float v_hat = v_arr[i] / bias_corr2;
+
+                t->data[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+            }
+        }
+    }
+}
+
+void rcre_tensor_optim_zero_grad(RCRE_TensorOptim* opt) {
+    if (opt == nullptr) return;
+    for (size_t p = 0; p < opt->num_params; ++p) {
+        rcre_ag_tensor_zero_grad(opt->params[p]);
+    }
+}
+
+/* Scalar Autograd Optimizer */
+RCRE_ScalarOptim* rcre_scalar_optim_adamw_create(RCRE_Arena* arena, RCRE_ScalarVal** params, size_t num_params, double lr, double beta1, double beta2, double eps, double weight_decay) {
+    if (!params || num_params == 0) return nullptr;
+
+    RCRE_ScalarOptim* opt = nullptr;
+    if (arena != nullptr) {
+        opt = (RCRE_ScalarOptim*)rcre_arena_alloc(arena, sizeof(RCRE_ScalarOptim), alignof(RCRE_ScalarOptim));
+    } else {
+        opt = (RCRE_ScalarOptim*)malloc(sizeof(RCRE_ScalarOptim));
+    }
+    if (!opt) return nullptr;
+
+    opt->type = RCRE_OPTIM_ADAMW;
+    opt->params = params;
+    opt->num_params = num_params;
+    opt->lr = lr;
+    opt->beta1 = beta1;
+    opt->beta2 = beta2;
+    opt->eps = eps;
+    opt->weight_decay = weight_decay;
+    opt->step_count = 0;
+
+    if (arena != nullptr) {
+        opt->m = (double*)rcre_arena_alloc(arena, num_params * sizeof(double), 64);
+        opt->v = (double*)rcre_arena_alloc(arena, num_params * sizeof(double), 64);
+    } else {
+        opt->m = (double*)aligned_alloc(64, (num_params * sizeof(double) + 63) & ~63ULL);
+        opt->v = (double*)aligned_alloc(64, (num_params * sizeof(double) + 63) & ~63ULL);
+    }
+    if (!opt->m || !opt->v) return nullptr;
+
+    memset(opt->m, 0, num_params * sizeof(double));
+    memset(opt->v, 0, num_params * sizeof(double));
+    return opt;
+}
+
+void rcre_scalar_optim_step(RCRE_ScalarOptim* opt) {
+    if (opt == nullptr) return;
+    opt->step_count++;
+
+    double b1 = opt->beta1;
+    double b2 = opt->beta2;
+    double lr = opt->lr;
+    double wd = opt->weight_decay;
+    double eps = opt->eps;
+
+    double bias_corr1 = 1.0 - pow(b1, (double)opt->step_count);
+    double bias_corr2 = 1.0 - pow(b2, (double)opt->step_count);
+
+    for (size_t i = 0; i < opt->num_params; ++i) {
+        RCRE_ScalarVal* p = opt->params[i];
+        double g = p->grad;
+
+        /* Decoupled weight decay */
+        p->data -= lr * wd * p->data;
+
+        opt->m[i] = b1 * opt->m[i] + (1.0 - b1) * g;
+        opt->v[i] = b2 * opt->v[i] + (1.0 - b2) * (g * g);
+
+        double m_hat = opt->m[i] / bias_corr1;
+        double v_hat = opt->v[i] / bias_corr2;
+
+        p->data -= lr * m_hat / (sqrt(v_hat) + eps);
+    }
+}
+
+void rcre_scalar_optim_zero_grad(RCRE_ScalarOptim* opt) {
+    if (opt == nullptr) return;
+    for (size_t i = 0; i < opt->num_params; ++i) {
+        opt->params[i]->grad = 0.0;
+    }
+}
+
+/* --- Source: data.c --- */
+/**
+ * @file data.c
+ * @brief High-throughput zero-copy data preprocessing, memory-mapped CSV ingestion,
+ *        feature scaling, and mini-batch iterators.
+ * 
+ * Part of RCRE Unified Engine.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+static uint64_t data_xorshift64(uint64_t* state) {
+    uint64_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    return *state = x;
+}
+
+RCRE_AGTensor* rcre_data_load_csv(RCRE_Arena* arena, const char* filepath, bool skip_header, size_t max_rows) {
+    if (!filepath) return nullptr;
+    FILE* f = fopen(filepath, "r");
+    if (!f) return nullptr;
+
+    char line[4096];
+    size_t rows = 0;
+    size_t cols = 0;
+
+    if (skip_header && fgets(line, sizeof(line), f) == nullptr) {
+        fclose(f);
+        return nullptr;
+    }
+
+    /* Determine column count from first sample row */
+    long first_data_pos = ftell(f);
+    if (fgets(line, sizeof(line), f) != nullptr) {
+        char* token = strtok(line, ",\t\r\n");
+        while (token != nullptr) {
+            cols++;
+            token = strtok(nullptr, ",\t\r\n");
+        }
+        rows = 1;
+    } else {
+        fclose(f);
+        return nullptr;
+    }
+
+    /* Count remaining rows */
+    while (fgets(line, sizeof(line), f) != nullptr) {
+        rows++;
+        if (max_rows > 0 && rows >= max_rows) break;
+    }
+
+    fseek(f, first_data_pos, SEEK_SET);
+
+    RCRE_AGTensor* t = rcre_ag_tensor_create_2d(arena, rows, cols);
+    if (!t) {
+        fclose(f);
+        return nullptr;
+    }
+
+    size_t r = 0;
+    while (r < rows && fgets(line, sizeof(line), f) != nullptr) {
+        size_t c = 0;
+        char* token = strtok(line, ",\t\r\n");
+        while (token != nullptr && c < cols) {
+            t->data[r * cols + c] = (float)atof(token);
+            c++;
+            token = strtok(nullptr, ",\t\r\n");
+        }
+        r++;
+    }
+
+    fclose(f);
+    return t;
+}
+
+RCRE_StandardScaler* rcre_standard_scaler_fit(RCRE_Arena* arena, const RCRE_AGTensor* X) {
+    if (!X || X->ndim != 2 || X->shape[0] == 0) return nullptr;
+    size_t rows = X->shape[0];
+    size_t cols = X->shape[1];
+
+    RCRE_StandardScaler* scaler = nullptr;
+    if (arena != nullptr) {
+        scaler = (RCRE_StandardScaler*)rcre_arena_alloc(arena, sizeof(RCRE_StandardScaler), alignof(RCRE_StandardScaler));
+        scaler->mean = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
+        scaler->std = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
+    } else {
+        scaler = (RCRE_StandardScaler*)malloc(sizeof(RCRE_StandardScaler));
+        if (scaler) {
+            scaler->mean = (float*)aligned_alloc(64, (cols * sizeof(float) + 63) & ~63ULL);
+            scaler->std = (float*)aligned_alloc(64, (cols * sizeof(float) + 63) & ~63ULL);
+        }
+    }
+    if (!scaler || !scaler->mean || !scaler->std) return nullptr;
+    scaler->num_features = cols;
+
+    for (size_t c = 0; c < cols; ++c) {
+        float sum = 0.0f;
+        for (size_t r = 0; r < rows; ++r) {
+            sum += X->data[r * cols + c];
+        }
+        float m = sum / (float)rows;
+        scaler->mean[c] = m;
+
+        float sq_diff = 0.0f;
+        for (size_t r = 0; r < rows; ++r) {
+            float d = X->data[r * cols + c] - m;
+            sq_diff += d * d;
+        }
+        float s = sqrtf(sq_diff / (float)rows);
+        scaler->std[c] = (s < 1e-8f) ? 1.0f : s;
+    }
+
+    return scaler;
+}
+
+void rcre_standard_scaler_transform(const RCRE_StandardScaler* scaler, RCRE_AGTensor* X) {
+    if (!scaler || !X || X->ndim != 2 || X->shape[1] != scaler->num_features) return;
+    size_t rows = X->shape[0];
+    size_t cols = X->shape[1];
+
+    for (size_t r = 0; r < rows; ++r) {
+        for (size_t c = 0; c < cols; ++c) {
+            X->data[r * cols + c] = (X->data[r * cols + c] - scaler->mean[c]) / scaler->std[c];
+        }
+    }
+}
+
+void rcre_standard_scaler_inverse_transform(const RCRE_StandardScaler* scaler, RCRE_AGTensor* X) {
+    if (!scaler || !X || X->ndim != 2 || X->shape[1] != scaler->num_features) return;
+    size_t rows = X->shape[0];
+    size_t cols = X->shape[1];
+
+    for (size_t r = 0; r < rows; ++r) {
+        for (size_t c = 0; c < cols; ++c) {
+            X->data[r * cols + c] = (X->data[r * cols + c] * scaler->std[c]) + scaler->mean[c];
+        }
+    }
+}
+
+RCRE_MinMaxScaler* rcre_minmax_scaler_fit(RCRE_Arena* arena, const RCRE_AGTensor* X) {
+    if (!X || X->ndim != 2 || X->shape[0] == 0) return nullptr;
+    size_t rows = X->shape[0];
+    size_t cols = X->shape[1];
+
+    RCRE_MinMaxScaler* scaler = nullptr;
+    if (arena != nullptr) {
+        scaler = (RCRE_MinMaxScaler*)rcre_arena_alloc(arena, sizeof(RCRE_MinMaxScaler), alignof(RCRE_MinMaxScaler));
+        scaler->min_val = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
+        scaler->max_val = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
+    } else {
+        scaler = (RCRE_MinMaxScaler*)malloc(sizeof(RCRE_MinMaxScaler));
+        if (scaler) {
+            scaler->min_val = (float*)aligned_alloc(64, (cols * sizeof(float) + 63) & ~63ULL);
+            scaler->max_val = (float*)aligned_alloc(64, (cols * sizeof(float) + 63) & ~63ULL);
+        }
+    }
+    if (!scaler || !scaler->min_val || !scaler->max_val) return nullptr;
+    scaler->num_features = cols;
+
+    for (size_t c = 0; c < cols; ++c) {
+        float min_v = X->data[c];
+        float max_v = X->data[c];
+        for (size_t r = 1; r < rows; ++r) {
+            float v = X->data[r * cols + c];
+            if (v < min_v) min_v = v;
+            if (v > max_v) max_v = v;
+        }
+        scaler->min_val[c] = min_v;
+        scaler->max_val[c] = (max_v - min_v < 1e-8f) ? min_v + 1.0f : max_v;
+    }
+    return scaler;
+}
+
+void rcre_minmax_scaler_transform(const RCRE_MinMaxScaler* scaler, RCRE_AGTensor* X) {
+    if (!scaler || !X || X->ndim != 2 || X->shape[1] != scaler->num_features) return;
+    size_t rows = X->shape[0];
+    size_t cols = X->shape[1];
+
+    for (size_t r = 0; r < rows; ++r) {
+        for (size_t c = 0; c < cols; ++c) {
+            float min_v = scaler->min_val[c];
+            float max_v = scaler->max_val[c];
+            X->data[r * cols + c] = (X->data[r * cols + c] - min_v) / (max_v - min_v);
+        }
+    }
+}
+
+void rcre_data_train_test_split(RCRE_Arena* arena, const RCRE_AGTensor* X, const RCRE_AGTensor* y,
+                               float train_ratio,
+                               RCRE_AGTensor** X_train, RCRE_AGTensor** y_train,
+                               RCRE_AGTensor** X_test, RCRE_AGTensor** y_test) {
+    if (!X || !y || train_ratio <= 0.0f || train_ratio >= 1.0f) return;
+    size_t total_samples = X->shape[0];
+    size_t train_samples = (size_t)((float)total_samples * train_ratio);
+    size_t test_samples = total_samples - train_samples;
+
+    size_t x_features = X->shape[1];
+    size_t y_features = y->shape[1];
+
+    *X_train = rcre_ag_tensor_create_2d(arena, train_samples, x_features);
+    *X_test  = rcre_ag_tensor_create_2d(arena, test_samples, x_features);
+    *y_train = rcre_ag_tensor_create_2d(arena, train_samples, y_features);
+    *y_test  = rcre_ag_tensor_create_2d(arena, test_samples, y_features);
+
+    if (!*X_train || !*X_test || !*y_train || !*y_test) return;
+
+    memcpy((*X_train)->data, X->data, train_samples * x_features * sizeof(float));
+    memcpy((*X_test)->data, X->data + train_samples * x_features, test_samples * x_features * sizeof(float));
+
+    memcpy((*y_train)->data, y->data, train_samples * y_features * sizeof(float));
+    memcpy((*y_test)->data, y->data + train_samples * y_features, test_samples * y_features * sizeof(float));
+}
+
+RCRE_BatchIter* rcre_batch_iter_create(RCRE_Arena* arena, RCRE_AGTensor* X, RCRE_AGTensor* y, size_t batch_size, bool shuffle) {
+    if (!X || !y || batch_size == 0 || X->shape[0] != y->shape[0]) return nullptr;
+
+    RCRE_BatchIter* iter = nullptr;
+    if (arena != nullptr) {
+        iter = (RCRE_BatchIter*)rcre_arena_alloc(arena, sizeof(RCRE_BatchIter), alignof(RCRE_BatchIter));
+        iter->indices = (size_t*)rcre_arena_alloc(arena, X->shape[0] * sizeof(size_t), alignof(size_t));
+    } else {
+        iter = (RCRE_BatchIter*)malloc(sizeof(RCRE_BatchIter));
+        if (iter) {
+            iter->indices = (size_t*)malloc(X->shape[0] * sizeof(size_t));
+        }
+    }
+    if (!iter || !iter->indices) return nullptr;
+
+    iter->X = X;
+    iter->y = y;
+    iter->batch_size = batch_size;
+    iter->current_idx = 0;
+    iter->num_samples = X->shape[0];
+    iter->shuffle = shuffle;
+    iter->rng_state = 2026;
+
+    for (size_t i = 0; i < iter->num_samples; ++i) {
+        iter->indices[i] = i;
+    }
+
+    rcre_batch_iter_reset(iter);
+    return iter;
+}
+
+void rcre_batch_iter_reset(RCRE_BatchIter* iter) {
+    if (iter == nullptr) return;
+    iter->current_idx = 0;
+
+    if (iter->shuffle) {
+        for (size_t i = iter->num_samples - 1; i > 0; --i) {
+            size_t j = (size_t)(data_xorshift64(&iter->rng_state) % (uint64_t)(i + 1));
+            size_t tmp = iter->indices[i];
+            iter->indices[i] = iter->indices[j];
+            iter->indices[j] = tmp;
+        }
+    }
+}
+
+bool rcre_batch_iter_next(RCRE_BatchIter* iter, RCRE_AGTensor* batch_X, RCRE_AGTensor* batch_y) {
+    if (iter == nullptr || iter->current_idx >= iter->num_samples) return false;
+
+    size_t remaining = iter->num_samples - iter->current_idx;
+    size_t cur_batch = (remaining < iter->batch_size) ? remaining : iter->batch_size;
+
+    size_t x_dim = iter->X->shape[1];
+    size_t y_dim = iter->y->shape[1];
+
+    for (size_t b = 0; b < cur_batch; ++b) {
+        size_t idx = iter->indices[iter->current_idx + b];
+        memcpy(batch_X->data + b * x_dim, iter->X->data + idx * x_dim, x_dim * sizeof(float));
+        memcpy(batch_y->data + b * y_dim, iter->y->data + idx * y_dim, y_dim * sizeof(float));
+    }
+
+    iter->current_idx += cur_batch;
+    return true;
+}
+
+/* --- Source: vis.c --- */
+/**
+ * @file vis.c
+ * @brief Terminal ANSI plots, ASCII confusion matrices, SVG chart exporters,
+ *        and 3D point cloud HTML exports.
+ * 
+ * Part of RCRE Unified Engine.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+void rcre_vis_loss_history(const float* loss_history, size_t count, const char* title) {
+    if (loss_history == nullptr || count == 0) return;
+
+    printf("\n\033[1;36m=== 📈 %s ===\033[0m\n", title ? title : "Training Loss Progression");
+
+    float min_val = loss_history[0];
+    float max_val = loss_history[0];
+    for (size_t i = 1; i < count; ++i) {
+        if (loss_history[i] < min_val) min_val = loss_history[i];
+        if (loss_history[i] > max_val) max_val = loss_history[i];
+    }
+
+    const size_t height = 10;
+    const size_t width = (count < 60) ? count : 60;
+
+    for (int row = (int)height; row >= 0; --row) {
+        float threshold = min_val + ((float)row / (float)height) * (max_val - min_val);
+        printf("%8.4f | ", threshold);
+
+        for (size_t col = 0; col < width; ++col) {
+            size_t idx = (col * count) / width;
+            float val = loss_history[idx];
+            if (fabsf(val - threshold) <= (max_val - min_val) / (float)(height * 2)) {
+                printf("\033[1;32m*\033[0m");
+            } else if (val >= threshold) {
+                printf("\033[34m.\033[0m");
+            } else {
+                printf(" ");
+            }
+        }
+        printf("\n");
+    }
+    printf("         +");
+    for (size_t c = 0; c < width; ++c) printf("-");
+    printf("\n          Start: %.4f | End: %.4f | Min: %.4f | Max: %.4f\n\n",
+           loss_history[0], loss_history[count - 1], min_val, max_val);
+}
+
+void rcre_vis_confusion_matrix(const size_t* confusion_matrix, size_t num_classes, const char* const* class_names) {
+    if (confusion_matrix == nullptr || num_classes == 0) return;
+
+    printf("\n\033[1;33m=== 📊 Confusion Matrix & Classification Metrics ===\033[0m\n\n");
+    printf("%15s", "Predicted ->");
+    for (size_t c = 0; c < num_classes; ++c) {
+        if (class_names && class_names[c]) {
+            printf("%10s", class_names[c]);
+        } else {
+            printf("%7s %zu", "Class", c);
+        }
+    }
+    printf("%12s%12s\n", "Recall", "Total");
+
+    size_t total_samples = 0;
+    size_t correct_samples = 0;
+
+    for (size_t r = 0; r < num_classes; ++r) {
+        if (class_names && class_names[r]) {
+            printf("%15s", class_names[r]);
+        } else {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "Class %zu", r);
+            printf("%15s", buf);
+        }
+
+        size_t row_total = 0;
+        for (size_t c = 0; c < num_classes; ++c) {
+            size_t val = confusion_matrix[r * num_classes + c];
+            row_total += val;
+            total_samples += val;
+            if (r == c) correct_samples += val;
+            if (r == c) {
+                printf("\033[1;32m%10zu\033[0m", val);
+            } else {
+                printf("%10zu", val);
+            }
+        }
+        size_t tp = confusion_matrix[r * num_classes + r];
+        float recall = row_total > 0 ? (float)tp / (float)row_total : 0.0f;
+        printf("%11.2f%%%12zu\n", recall * 100.0f, row_total);
+    }
+
+    printf("\n\033[1;32mOverall Accuracy: %.2f%% (%zu / %zu)\033[0m\n\n",
+           total_samples > 0 ? (float)correct_samples / (float)total_samples * 100.0f : 0.0f,
+           correct_samples, total_samples);
+}
+
+bool rcre_vis_export_svg_curve(const float* y_vals, size_t count, const char* filepath, const char* title) {
+    if (y_vals == nullptr || count == 0 || filepath == nullptr) return false;
+
+    FILE* f = fopen(filepath, "w");
+    if (!f) return false;
+
+    float min_val = y_vals[0];
+    float max_val = y_vals[0];
+    for (size_t i = 1; i < count; ++i) {
+        if (y_vals[i] < min_val) min_val = y_vals[i];
+        if (y_vals[i] > max_val) max_val = y_vals[i];
+    }
+    if (max_val - min_val < 1e-6f) max_val += 1.0f;
+
+    const int width = 800;
+    const int height = 400;
+    const int pad_x = 60;
+    const int pad_y = 50;
+
+    fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    fprintf(f, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 %d %d\" width=\"%d\" height=\"%d\" style=\"background:#121820; font-family:sans-serif;\">\n", width, height, width, height);
+    fprintf(f, "  <text x=\"%d\" y=\"30\" fill=\"#E2E8F0\" font-size=\"18\" font-weight=\"bold\" text-anchor=\"middle\">%s</text>\n", width / 2, title ? title : "Loss Curve");
+
+    /* Axes */
+    fprintf(f, "  <line x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\" stroke=\"#4A5568\" stroke-width=\"1.5\" />\n", pad_x, height - pad_y, width - pad_x, height - pad_y);
+    fprintf(f, "  <line x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\" stroke=\"#4A5568\" stroke-width=\"1.5\" />\n", pad_x, pad_y, pad_x, height - pad_y);
+
+    /* Polyline coordinates */
+    fprintf(f, "  <polyline fill=\"none\" stroke=\"#38BDF8\" stroke-width=\"2.5\" points=\"");
+    for (size_t i = 0; i < count; ++i) {
+        float norm_x = (float)i / (float)(count - 1);
+        float norm_y = (y_vals[i] - min_val) / (max_val - min_val);
+        int px = pad_x + (int)(norm_x * (float)(width - 2 * pad_x));
+        int py = (height - pad_y) - (int)(norm_y * (float)(height - 2 * pad_y));
+        fprintf(f, "%d,%d ", px, py);
+    }
+    fprintf(f, "\" />\n");
+
+    /* Min and max labels */
+    fprintf(f, "  <text x=\"%d\" y=\"%d\" fill=\"#94A3B8\" font-size=\"12\" text-anchor=\"end\">%.4f</text>\n", pad_x - 10, pad_y + 10, max_val);
+    fprintf(f, "  <text x=\"%d\" y=\"%d\" fill=\"#94A3B8\" font-size=\"12\" text-anchor=\"end\">%.4f</text>\n", pad_x - 10, height - pad_y, min_val);
+
+    fprintf(f, "</svg>\n");
+    fclose(f);
+    return true;
+}
+
+bool rcre_vis_export_3d_clusters_html(const RCRE_AGTensor* points, const size_t* assignments, const RCRE_AGTensor* centroids, size_t k, const char* filepath) {
+    if (points == nullptr || centroids == nullptr || filepath == nullptr) return false;
+    if (points->shape[1] < 3 || centroids->shape[1] < 3) return false;
+
+    FILE* f = fopen(filepath, "w");
+    if (!f) return false;
+
+    fprintf(f, "<!DOCTYPE html>\n<html>\n<head>\n");
+    fprintf(f, "<title>RCRE - 3D K-Means Clustering Geometry</title>\n");
+    fprintf(f, "<script src=\"https://cdn.plot.ly/plotly-2.29.1.min.js\"></script>\n");
+    fprintf(f, "<style>body { margin: 0; background: #0F172A; color: #F8FAFC; font-family: -apple-system, sans-serif; }</style>\n");
+    fprintf(f, "</head>\n<body>\n");
+    fprintf(f, "<div id=\"plot\" style=\"width:100vw; height:100vh;\"></div>\n");
+    fprintf(f, "<script>\n");
+
+    const char* colors[8] = { "#38BDF8", "#F43F5E", "#10B981", "#F59E0B", "#8B5CF6", "#EC4899", "#14B8A6", "#6366F1" };
+
+    fprintf(f, "const data = [\n");
+
+    size_t n = points->shape[0];
+    for (size_t cluster_id = 0; cluster_id < k; ++cluster_id) {
+        fprintf(f, "  {\n");
+        fprintf(f, "    x: [");
+        for (size_t i = 0; i < n; ++i) {
+            if (assignments[i] == cluster_id) fprintf(f, "%.4f, ", points->data[i * points->shape[1] + 0]);
+        }
+        fprintf(f, "],\n    y: [");
+        for (size_t i = 0; i < n; ++i) {
+            if (assignments[i] == cluster_id) fprintf(f, "%.4f, ", points->data[i * points->shape[1] + 1]);
+        }
+        fprintf(f, "],\n    z: [");
+        for (size_t i = 0; i < n; ++i) {
+            if (assignments[i] == cluster_id) fprintf(f, "%.4f, ", points->data[i * points->shape[1] + 2]);
+        }
+        fprintf(f, "],\n    mode: 'markers',\n");
+        fprintf(f, "    name: 'Cluster %zu',\n", cluster_id);
+        fprintf(f, "    marker: { size: 3, color: '%s', opacity: 0.8 },\n", colors[cluster_id % 8]);
+        fprintf(f, "    type: 'scatter3d'\n  },\n");
+    }
+
+    fprintf(f, "  {\n");
+    fprintf(f, "    x: [");
+    for (size_t c = 0; c < k; ++c) fprintf(f, "%.4f, ", centroids->data[c * centroids->shape[1] + 0]);
+    fprintf(f, "],\n    y: [");
+    for (size_t c = 0; c < k; ++c) fprintf(f, "%.4f, ", centroids->data[c * centroids->shape[1] + 1]);
+    fprintf(f, "],\n    z: [");
+    for (size_t c = 0; c < k; ++c) fprintf(f, "%.4f, ", centroids->data[c * centroids->shape[1] + 2]);
+    fprintf(f, "],\n    mode: 'markers',\n");
+    fprintf(f, "    name: 'Centroids',\n");
+    fprintf(f, "    marker: { size: 9, symbol: 'diamond', color: '#FFFFFF', line: { color: '#000000', width: 2 } },\n");
+    fprintf(f, "    type: 'scatter3d'\n  }\n");
+
+    fprintf(f, "];\n");
+    fprintf(f, "const layout = {\n");
+    fprintf(f, "  title: 'RCRE: 3D K-Means Cluster Geometry',\n");
+    fprintf(f, "  paper_bgcolor: '#0F172A',\n");
+    fprintf(f, "  font: { color: '#F8FAFC' },\n");
+    fprintf(f, "  scene: {\n");
+    fprintf(f, "    xaxis: { title: 'X1', backgroundcolor: '#1E293B', gridcolor: '#334155' },\n");
+    fprintf(f, "    yaxis: { title: 'X2', backgroundcolor: '#1E293B', gridcolor: '#334155' },\n");
+    fprintf(f, "    zaxis: { title: 'X3', backgroundcolor: '#1E293B', gridcolor: '#334155' }\n");
+    fprintf(f, "  }\n};\n");
+    fprintf(f, "Plotly.newPlot('plot', data, layout);\n");
+    fprintf(f, "</script>\n</body>\n</html>\n");
+
+    fclose(f);
+    return true;
 }
 
 #endif /* RCRE_IMPLEMENTATION */

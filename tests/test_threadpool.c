@@ -55,8 +55,8 @@ static void test_parallel_for_1d(void) {
         ASSERT_INT_EQ((int)(i * 3 + 7), data[i]);
     }
 
-    free(data);
     rcre_threadpool_destroy(pool);
+    free(data);
 }
 
 static void test_parallel_for_2d_tiling(void) {
@@ -88,8 +88,8 @@ static void test_parallel_for_2d_tiling(void) {
         }
     }
 
-    free(grid);
     rcre_threadpool_destroy(pool);
+    free(grid);
 }
 
 static void test_single_threaded_fallback(void) {
