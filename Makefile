@@ -1,7 +1,7 @@
 CC ?= clang
 AR ?= ar
-CFLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O3 -Iinclude -Isrc/hal -fPIC
-SANITIZER_FLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address,undefined -Iinclude -Isrc/hal
+CFLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O3 -Iinclude -Isrc/hal -Isrc/core -fPIC
+SANITIZER_FLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address,undefined -Iinclude -Isrc/hal -Isrc/core
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -63,7 +63,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -224,6 +224,7 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@bin/test_autograd_scalar
 	@bin/test_autograd_tensor
 	@bin/test_nn_train
+	@bin/test_merger_report
 	@echo "🎉 All RCRE Unit Tests Passed!"
 
 test-sanitizers: $(AMALGAMATED_HEADER)
@@ -267,6 +268,8 @@ endif
 	@bin/test_autograd_tensor_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_nn_train.c -lm -lpthread -o bin/test_nn_train_asan
 	@bin/test_nn_train_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_merger_report.c -lm -lpthread -o bin/test_merger_report_asan
+	@bin/test_merger_report_asan
 	@echo "🎉 Zero Memory Leaks & Zero Undefined Behavior Detected!"
 
 test-parity: $(DYLIB)

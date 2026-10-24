@@ -90,12 +90,19 @@ typedef struct RCRE_AGTensor {
 typedef RCRE_AGTensor RCRE_TensorAG;
 
 /* Allocation & Tensor Creation */
+/*
+ * Arena-first API: every allocation is served from the caller-provided arena
+ * (NULL is rejected). Objects are freed collectively by rcre_arena_reset() /
+ * rcre_arena_destroy(), or by rewinding with rcre_arena_temp_begin/end().
+ */
 RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_create(RCRE_Arena* arena, const size_t* shape, size_t ndim);
 RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_create_1d(RCRE_Arena* arena, size_t d0);
 RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_create_2d(RCRE_Arena* arena, size_t rows, size_t cols);
 RCRE_NODISCARD RCRE_AGTensor* rcre_ag_tensor_create_4d(RCRE_Arena* arena, size_t n, size_t c, size_t h, size_t w);
 
 /* Interoperability with core RCRE_Tensor */
+/* rcre_ag_from_tensor accepts F32 tensors only; for any other dtype it
+ * returns a zeroed, empty struct (ag.data == NULL) — check before use. */
 RCRE_NODISCARD RCRE_Tensor   rcre_ag_to_tensor(const RCRE_AGTensor* ag);
 RCRE_NODISCARD RCRE_AGTensor rcre_ag_from_tensor(const RCRE_Tensor* t, float* grad, const char* label);
 
@@ -138,9 +145,22 @@ typedef struct {
 
 RCRE_NODISCARD RCRE_TensorTape* rcre_tensor_tape_create(RCRE_Arena* arena, size_t initial_cap);
 void rcre_tensor_tape_reset(RCRE_TensorTape* tape);
+/* Frees the tape's heap-owned node array. The tape struct itself lives in the
+ * arena and is released by the arena. Always call after create. */
+void rcre_tensor_tape_destroy(RCRE_TensorTape* tape);
 void rcre_tensor_tape_backward(RCRE_TensorTape* tape);
 
+/*
+ * Tape + arena rewinding contract: the tape's node storage is heap-owned, so
+ * the documented pattern is safe —
+ *   1. create the tape (before taking any temp checkpoint),
+ *   2. per batch: temp_begin -> ops -> tape_reset -> temp_end,
+ * even when the node array grows mid-batch.
+ */
+
 /* Differentiable Tape Operators */
+/* Validation: matmul requires 2-D inputs with matching inner dims;
+ * add requires equal numel; add_bias requires x: (R, C), bias: (C). */
 RCRE_NODISCARD RCRE_AGTensor* rcre_autograd_matmul(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCRE_AGTensor* b);
 RCRE_NODISCARD RCRE_AGTensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCRE_AGTensor* b);
 RCRE_NODISCARD RCRE_AGTensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_AGTensor* x, RCRE_AGTensor* bias);
@@ -158,6 +178,11 @@ float rcre_loss_cross_entropy_logits(const RCRE_AGTensor* logits, const size_t* 
 float rcre_loss_kl_divergence(const RCRE_AGTensor* mu, const RCRE_AGTensor* logvar, RCRE_AGTensor* grad_mu, RCRE_AGTensor* grad_logvar);
 
 /* Scalar-based Loss Functions */
+/*
+ * Note: the scalar DAG engine keeps a process-global visited-epoch counter;
+ * concurrent backward() calls from multiple threads are NOT supported.
+ * Use the tensor-tape engine in multi-threaded contexts.
+ */
 RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_loss_mse(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count);
 RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_loss_bce(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count);
 
@@ -192,6 +217,9 @@ typedef struct {
 
 RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float momentum, float weight_decay);
 RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float beta1, float beta2, float eps, float weight_decay);
+/* Both create() calls validate hyperparameters and return NULL on invalid
+ * input: lr > 0, eps > 0, 0 <= momentum < 1, 0 <= beta1 < 1, 0 <= beta2 < 1
+ * (beta == 1 would divide by zero in the bias correction). */
 void rcre_tensor_optim_step(RCRE_TensorOptim* opt);
 void rcre_tensor_optim_zero_grad(RCRE_TensorOptim* opt);
 
@@ -235,6 +263,7 @@ typedef struct {
 typedef struct {
     RCRE_AGTensor* X;
     RCRE_AGTensor* y;
+    size_t         y_cols; /* 1 for 1-D y, y->shape[1] for 2-D y */
     size_t         batch_size;
     size_t         current_idx;
     size_t         num_samples;
@@ -243,6 +272,12 @@ typedef struct {
     size_t*        indices;
 } RCRE_BatchIter;
 
+/*
+ * Streaming line-based CSV parser (comma/tab separated). Rows longer than any
+ * fixed buffer are read intact (dynamic line growth). Every row must contain
+ * exactly the column count of the first data row; ragged input is rejected
+ * (returns NULL) rather than silently zero-filled.
+ */
 RCRE_NODISCARD RCRE_AGTensor* rcre_data_load_csv(RCRE_Arena* arena, const char* filepath, bool skip_header, size_t max_rows);
 
 RCRE_NODISCARD RCRE_StandardScaler* rcre_standard_scaler_fit(RCRE_Arena* arena, const RCRE_AGTensor* X);
@@ -252,12 +287,17 @@ void rcre_standard_scaler_inverse_transform(const RCRE_StandardScaler* scaler, R
 RCRE_NODISCARD RCRE_MinMaxScaler* rcre_minmax_scaler_fit(RCRE_Arena* arena, const RCRE_AGTensor* X);
 void rcre_minmax_scaler_transform(const RCRE_MinMaxScaler* scaler, RCRE_AGTensor* X);
 
+/* X must be 2-D; y may be 1-D (n,) or 2-D (n, k). A 1-D y is treated as
+ * (n, 1); all outputs are 2-D. Returns silently no-op on invalid input. */
 void rcre_data_train_test_split(RCRE_Arena* arena, const RCRE_AGTensor* X, const RCRE_AGTensor* y,
                                float train_ratio,
                                RCRE_AGTensor** X_train, RCRE_AGTensor** y_train,
                                RCRE_AGTensor** X_test, RCRE_AGTensor** y_test);
 
+/* X must be 2-D; y may be 1-D (n,) or 2-D (n, k). */
 RCRE_NODISCARD RCRE_BatchIter* rcre_batch_iter_create(RCRE_Arena* arena, RCRE_AGTensor* X, RCRE_AGTensor* y, size_t batch_size, bool shuffle);
+/* Copies one batch into caller-provided tensors. Returns false (and copies
+ * nothing) at epoch end OR when batch_X/batch_y are too small. */
 bool rcre_batch_iter_next(RCRE_BatchIter* iter, RCRE_AGTensor* batch_X, RCRE_AGTensor* batch_y);
 void rcre_batch_iter_reset(RCRE_BatchIter* iter);
 

@@ -6,6 +6,7 @@
  */
 
 #include "rcre_autograd.h"
+#include "rcre_rng.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -86,15 +87,14 @@ static void rcre_ag_compute_contiguous_strides(RCRE_AGTensor* t) {
 }
 
 RCRE_AGTensor* rcre_ag_tensor_create(RCRE_Arena* arena, const size_t* shape, size_t ndim) {
-    if (ndim > RCRE_AG_MAX_DIMS || ndim == 0) return nullptr;
+    if (arena == nullptr || ndim > RCRE_AG_MAX_DIMS || ndim == 0) return nullptr;
 
-    RCRE_AGTensor* t = nullptr;
-    if (arena != nullptr) {
-        t = (RCRE_AGTensor*)rcre_arena_alloc(arena, sizeof(RCRE_AGTensor), alignof(RCRE_AGTensor));
-    } else {
-        t = (RCRE_AGTensor*)malloc(sizeof(RCRE_AGTensor));
-    }
+    RCRE_AGTensor* t = (RCRE_AGTensor*)rcre_arena_alloc(arena, sizeof(RCRE_AGTensor), alignof(RCRE_AGTensor));
     if (!t) return nullptr;
+
+    /* Zero shape/strides first: fields beyond `ndim` must never read back
+     * uninitialized memory (e.g. `y->shape[1]` on a 1-D tensor). */
+    memset(t, 0, sizeof(RCRE_AGTensor));
 
     t->ndim = ndim;
     t->numel = 1;
@@ -107,16 +107,10 @@ RCRE_AGTensor* rcre_ag_tensor_create(RCRE_Arena* arena, const size_t* shape, siz
     t->label = nullptr;
 
     size_t byte_size = t->numel * sizeof(float);
-    if (arena != nullptr) {
-        t->data = (float*)rcre_arena_alloc(arena, byte_size, 64);
-        t->grad = (float*)rcre_arena_alloc(arena, byte_size, 64);
-    } else {
-        t->data = (float*)aligned_alloc(64, (byte_size + 63) & ~63ULL);
-        t->grad = (float*)aligned_alloc(64, (byte_size + 63) & ~63ULL);
-    }
-
+    t->data = (float*)rcre_arena_alloc(arena, byte_size, 64);
+    t->grad = (float*)rcre_arena_alloc(arena, byte_size, 64);
     if (!t->data || !t->grad) {
-        return nullptr;
+        return nullptr; /* arena space already consumed; rewind via temp checkpoint */
     }
 
     memset(t->data, 0, byte_size);
@@ -154,14 +148,18 @@ RCRE_Tensor rcre_ag_to_tensor(const RCRE_AGTensor* ag) {
 }
 
 RCRE_AGTensor rcre_ag_from_tensor(const RCRE_Tensor* t, float* grad, const char* label) {
-    RCRE_AGTensor ag = {
-        .data = (float*)t->data,
-        .grad = grad,
-        .ndim = t->ndim,
-        .numel = 1,
-        .is_view = true,
-        .label = label
-    };
+    RCRE_AGTensor ag;
+    memset(&ag, 0, sizeof(ag));
+    /* F32 only: reinterpreting a U8/I32 buffer as float would be silently wrong. */
+    if (!t || !t->data || t->dtype != RCRE_DTYPE_F32 || t->ndim == 0 || t->ndim > RCRE_AG_MAX_DIMS) {
+        return ag;
+    }
+    ag.data = (float*)t->data;
+    ag.grad = grad;
+    ag.ndim = t->ndim;
+    ag.numel = 1;
+    ag.is_view = true;
+    ag.label = label;
     for (size_t i = 0; i < t->ndim; ++i) {
         ag.shape[i] = t->shape[i];
         ag.strides[i] = (size_t)t->strides[i];
@@ -191,49 +189,25 @@ void rcre_ag_tensor_zero_grad(RCRE_AGTensor* t) {
     }
 }
 
-/* XorShift64 PRNG */
-static uint64_t xorshift64(uint64_t* state) {
-    uint64_t x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    return *state = x;
-}
-
-static float rand_uniform(uint64_t* rng, float min_val, float max_val) {
-    uint64_t r = xorshift64(rng);
-    double u = (double)(r >> 11) * (1.0 / 9007199254740992.0);
-    return min_val + (float)(u * (max_val - min_val));
-}
-
 void rcre_ag_tensor_init_xavier(RCRE_AGTensor* t, size_t fan_in, size_t fan_out, uint64_t* rng) {
-    if (!t || !t->data) return;
+    if (!t || !t->data || !rng || (fan_in + fan_out) == 0) return;
     float limit = sqrtf(6.0f / (float)(fan_in + fan_out));
     for (size_t i = 0; i < t->numel; ++i) {
-        t->data[i] = rand_uniform(rng, -limit, limit);
+        t->data[i] = rcre_rng_uniform_f32(rng, -limit, limit);
     }
 }
 
 void rcre_ag_tensor_init_he(RCRE_AGTensor* t, size_t fan_in, uint64_t* rng) {
-    if (!t || !t->data) return;
+    if (!t || !t->data || !rng || fan_in == 0) return;
     float std = sqrtf(2.0f / (float)fan_in);
     for (size_t i = 0; i < t->numel; ++i) {
-        /* Box-Muller normal distribution */
-        float u1 = rand_uniform(rng, 1e-7f, 1.0f);
-        float u2 = rand_uniform(rng, 0.0f, 1.0f);
-        float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.1415926535f * u2);
-        t->data[i] = z * std;
+        t->data[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
     }
 }
 
 RCRE_AGTensor* rcre_ag_tensor_view(RCRE_Arena* arena, const RCRE_AGTensor* src) {
-    if (!src) return nullptr;
-    RCRE_AGTensor* v = nullptr;
-    if (arena != nullptr) {
-        v = (RCRE_AGTensor*)rcre_arena_alloc(arena, sizeof(RCRE_AGTensor), alignof(RCRE_AGTensor));
-    } else {
-        v = (RCRE_AGTensor*)malloc(sizeof(RCRE_AGTensor));
-    }
+    if (!src || arena == nullptr) return nullptr;
+    RCRE_AGTensor* v = (RCRE_AGTensor*)rcre_arena_alloc(arena, sizeof(RCRE_AGTensor), alignof(RCRE_AGTensor));
     if (!v) return nullptr;
     memcpy(v, src, sizeof(RCRE_AGTensor));
     v->is_view = true;
@@ -305,19 +279,33 @@ void rcre_ag_tensor_add_inplace(RCRE_AGTensor* a, const RCRE_AGTensor* b) {
 /* ========================================================================= */
 
 RCRE_TensorTape* rcre_tensor_tape_create(RCRE_Arena* arena, size_t initial_cap) {
-    RCRE_TensorTape* tape = nullptr;
-    if (arena != nullptr) {
-        tape = (RCRE_TensorTape*)rcre_arena_alloc(arena, sizeof(RCRE_TensorTape), alignof(RCRE_TensorTape));
-        tape->nodes = (RCRE_TensorNode*)rcre_arena_alloc(arena, initial_cap * sizeof(RCRE_TensorNode), alignof(RCRE_TensorNode));
-    } else {
-        tape = (RCRE_TensorTape*)malloc(sizeof(RCRE_TensorTape));
-        tape->nodes = (RCRE_TensorNode*)malloc(initial_cap * sizeof(RCRE_TensorNode));
+    if (arena == nullptr) return nullptr;
+    if (initial_cap < 8) initial_cap = 8;
+
+    RCRE_TensorTape* tape = (RCRE_TensorTape*)rcre_arena_alloc(arena, sizeof(RCRE_TensorTape), alignof(RCRE_TensorTape));
+    /* The node array is deliberately heap-owned (malloc/realloc), NOT arena
+     * owned: callers may rewind the tape arena with rcre_arena_temp_end()
+     * between batches, which would invalidate (and later clobber) any node
+     * storage placed inside it. The tape struct itself lives in the arena.
+     * NOTE: create the tape BEFORE taking your first temp checkpoint. */
+    tape->nodes = (RCRE_TensorNode*)malloc(initial_cap * sizeof(RCRE_TensorNode));
+    if (!tape || !tape->nodes) {
+        if (tape->nodes) free(tape->nodes);
+        return nullptr;
     }
-    if (!tape || !tape->nodes) return nullptr;
     tape->count = 0;
     tape->capacity = initial_cap;
     tape->arena = arena;
     return tape;
+}
+
+void rcre_tensor_tape_destroy(RCRE_TensorTape* tape) {
+    if (tape != nullptr && tape->nodes != nullptr) {
+        free(tape->nodes);
+        tape->nodes = nullptr;
+        tape->capacity = 0;
+        tape->count = 0;
+    }
 }
 
 void rcre_tensor_tape_reset(RCRE_TensorTape* tape) {
@@ -329,14 +317,10 @@ void rcre_tensor_tape_reset(RCRE_TensorTape* tape) {
 static RCRE_TensorNode* tape_push_node(RCRE_TensorTape* tape) {
     if (tape->count >= tape->capacity) {
         size_t new_cap = tape->capacity * 2;
-        if (tape->arena != nullptr) {
-            RCRE_TensorNode* new_nodes = (RCRE_TensorNode*)rcre_arena_alloc(tape->arena, new_cap * sizeof(RCRE_TensorNode), alignof(RCRE_TensorNode));
-            memcpy(new_nodes, tape->nodes, tape->count * sizeof(RCRE_TensorNode));
-            tape->nodes = new_nodes;
-        } else {
-            tape->nodes = (RCRE_TensorNode*)realloc(tape->nodes, new_cap * sizeof(RCRE_TensorNode));
-        }
-        if (!tape->nodes) return nullptr;
+        /* Realloc via temporary pointer: on failure the old array is intact. */
+        RCRE_TensorNode* new_nodes = (RCRE_TensorNode*)realloc(tape->nodes, new_cap * sizeof(RCRE_TensorNode));
+        if (!new_nodes) return nullptr; /* OOM: node array unchanged, caller must handle NULL */
+        tape->nodes = new_nodes;
         tape->capacity = new_cap;
     }
     return &tape->nodes[tape->count++];
@@ -431,6 +415,7 @@ RCRE_AGTensor* rcre_autograd_matmul(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCR
     if (!out) return nullptr;
 
     RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out; /* OOM: forward result valid, but graph is incomplete */
     node->out = out;
     node->inputs[0] = a;
     node->inputs[1] = b;
@@ -440,6 +425,7 @@ RCRE_AGTensor* rcre_autograd_matmul(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCR
 }
 
 RCRE_AGTensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCRE_AGTensor* b) {
+    if (!a || !b || a->numel != b->numel) return nullptr;
     RCRE_AGTensor* out = rcre_ag_tensor_create(tape->arena, a->shape, a->ndim);
     if (!out) return nullptr;
     for (size_t i = 0; i < out->numel; ++i) {
@@ -447,6 +433,7 @@ RCRE_AGTensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCRE_A
     }
 
     RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
     node->out = out;
     node->inputs[0] = a;
     node->inputs[1] = b;
@@ -456,6 +443,7 @@ RCRE_AGTensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_AGTensor* a, RCRE_A
 }
 
 RCRE_AGTensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_AGTensor* x, RCRE_AGTensor* bias) {
+    if (!x || !bias || x->ndim != 2 || bias->ndim != 1 || bias->shape[0] != x->shape[1]) return nullptr;
     size_t rows = x->shape[0];
     size_t cols = x->shape[1];
 
@@ -470,6 +458,7 @@ RCRE_AGTensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_AGTensor* x, R
     }
 
     RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
     node->out = out;
     node->inputs[0] = x;
     node->inputs[1] = bias;
@@ -479,6 +468,7 @@ RCRE_AGTensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_AGTensor* x, R
 }
 
 RCRE_AGTensor* rcre_autograd_relu(RCRE_TensorTape* tape, RCRE_AGTensor* x) {
+    if (!x) return nullptr;
     RCRE_AGTensor* out = rcre_ag_tensor_create(tape->arena, x->shape, x->ndim);
     if (!out) return nullptr;
     for (size_t i = 0; i < out->numel; ++i) {
@@ -486,6 +476,7 @@ RCRE_AGTensor* rcre_autograd_relu(RCRE_TensorTape* tape, RCRE_AGTensor* x) {
     }
 
     RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
     node->out = out;
     node->inputs[0] = x;
     node->num_inputs = 1;
@@ -494,6 +485,7 @@ RCRE_AGTensor* rcre_autograd_relu(RCRE_TensorTape* tape, RCRE_AGTensor* x) {
 }
 
 RCRE_AGTensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_AGTensor* x) {
+    if (!x) return nullptr;
     RCRE_AGTensor* out = rcre_ag_tensor_create(tape->arena, x->shape, x->ndim);
     if (!out) return nullptr;
     for (size_t i = 0; i < out->numel; ++i) {
@@ -501,6 +493,7 @@ RCRE_AGTensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_AGTensor* x) {
     }
 
     RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
     node->out = out;
     node->inputs[0] = x;
     node->num_inputs = 1;

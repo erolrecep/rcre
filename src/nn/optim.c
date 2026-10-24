@@ -11,14 +11,13 @@
 #include <string.h>
 
 RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float momentum, float weight_decay) {
-    if (!params || num_params == 0) return nullptr;
-
-    RCRE_TensorOptim* opt = nullptr;
-    if (arena != nullptr) {
-        opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
-    } else {
-        opt = (RCRE_TensorOptim*)malloc(sizeof(RCRE_TensorOptim));
+    if (arena == nullptr || params == nullptr || num_params == 0) return nullptr;
+    if (!(lr > 0.0f) || !(momentum >= 0.0f && momentum < 1.0f) || !(weight_decay >= 0.0f)) return nullptr;
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!params[i] || !params[i]->data) return nullptr;
     }
+
+    RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
     if (!opt) return nullptr;
 
     opt->type = RCRE_OPTIM_SGD;
@@ -28,36 +27,29 @@ RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_AGTensor*
     opt->weight_decay = weight_decay;
     opt->momentum = momentum;
 
-    if (arena != nullptr) {
-        opt->v_momentum = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
-    } else {
-        opt->v_momentum = (float**)malloc(num_params * sizeof(float*));
-    }
+    opt->v_momentum = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
     if (!opt->v_momentum) return nullptr;
 
     for (size_t p = 0; p < num_params; ++p) {
         size_t bytes = params[p]->numel * sizeof(float);
-        if (arena != nullptr) {
-            opt->v_momentum[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
-        } else {
-            opt->v_momentum[p] = (float*)aligned_alloc(64, (bytes + 63) & ~63ULL);
-        }
-        if (opt->v_momentum[p]) {
-            memset(opt->v_momentum[p], 0, bytes);
-        }
+        opt->v_momentum[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
+        if (!opt->v_momentum[p]) return nullptr;
+        memset(opt->v_momentum[p], 0, bytes);
     }
     return opt;
 }
 
 RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float beta1, float beta2, float eps, float weight_decay) {
-    if (!params || num_params == 0) return nullptr;
-
-    RCRE_TensorOptim* opt = nullptr;
-    if (arena != nullptr) {
-        opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
-    } else {
-        opt = (RCRE_TensorOptim*)malloc(sizeof(RCRE_TensorOptim));
+    if (arena == nullptr || params == nullptr || num_params == 0) return nullptr;
+    /* beta == 1.0 makes the bias correction 1 - beta^t == 0 -> divide by zero.
+     * Reject it up front instead of emitting NaN/Inf after the first step. */
+    if (!(lr > 0.0f) || !(beta1 >= 0.0f && beta1 < 1.0f) || !(beta2 >= 0.0f && beta2 < 1.0f)
+        || !(eps > 0.0f) || !(weight_decay >= 0.0f)) return nullptr;
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!params[i] || !params[i]->data) return nullptr;
     }
+
+    RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
     if (!opt) return nullptr;
 
     opt->type = RCRE_OPTIM_ADAMW;
@@ -70,26 +62,17 @@ RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_AGTenso
     opt->weight_decay = weight_decay;
     opt->step_count = 0;
 
-    if (arena != nullptr) {
-        opt->m = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
-        opt->v = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
-    } else {
-        opt->m = (float**)malloc(num_params * sizeof(float*));
-        opt->v = (float**)malloc(num_params * sizeof(float*));
-    }
+    opt->m = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+    opt->v = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
     if (!opt->m || !opt->v) return nullptr;
 
     for (size_t p = 0; p < num_params; ++p) {
         size_t bytes = params[p]->numel * sizeof(float);
-        if (arena != nullptr) {
-            opt->m[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
-            opt->v[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
-        } else {
-            opt->m[p] = (float*)aligned_alloc(64, (bytes + 63) & ~63ULL);
-            opt->v[p] = (float*)aligned_alloc(64, (bytes + 63) & ~63ULL);
-        }
-        if (opt->m[p]) memset(opt->m[p], 0, bytes);
-        if (opt->v[p]) memset(opt->v[p], 0, bytes);
+        opt->m[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
+        opt->v[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
+        if (!opt->m[p] || !opt->v[p]) return nullptr;
+        memset(opt->m[p], 0, bytes);
+        memset(opt->v[p], 0, bytes);
     }
     return opt;
 }
@@ -149,14 +132,14 @@ void rcre_tensor_optim_zero_grad(RCRE_TensorOptim* opt) {
 
 /* Scalar Autograd Optimizer */
 RCRE_ScalarOptim* rcre_scalar_optim_adamw_create(RCRE_Arena* arena, RCRE_ScalarVal** params, size_t num_params, double lr, double beta1, double beta2, double eps, double weight_decay) {
-    if (!params || num_params == 0) return nullptr;
-
-    RCRE_ScalarOptim* opt = nullptr;
-    if (arena != nullptr) {
-        opt = (RCRE_ScalarOptim*)rcre_arena_alloc(arena, sizeof(RCRE_ScalarOptim), alignof(RCRE_ScalarOptim));
-    } else {
-        opt = (RCRE_ScalarOptim*)malloc(sizeof(RCRE_ScalarOptim));
+    if (arena == nullptr || params == nullptr || num_params == 0) return nullptr;
+    if (!(lr > 0.0) || !(beta1 >= 0.0 && beta1 < 1.0) || !(beta2 >= 0.0 && beta2 < 1.0)
+        || !(eps > 0.0) || !(weight_decay >= 0.0)) return nullptr;
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!params[i]) return nullptr;
     }
+
+    RCRE_ScalarOptim* opt = (RCRE_ScalarOptim*)rcre_arena_alloc(arena, sizeof(RCRE_ScalarOptim), alignof(RCRE_ScalarOptim));
     if (!opt) return nullptr;
 
     opt->type = RCRE_OPTIM_ADAMW;
@@ -169,13 +152,8 @@ RCRE_ScalarOptim* rcre_scalar_optim_adamw_create(RCRE_Arena* arena, RCRE_ScalarV
     opt->weight_decay = weight_decay;
     opt->step_count = 0;
 
-    if (arena != nullptr) {
-        opt->m = (double*)rcre_arena_alloc(arena, num_params * sizeof(double), 64);
-        opt->v = (double*)rcre_arena_alloc(arena, num_params * sizeof(double), 64);
-    } else {
-        opt->m = (double*)aligned_alloc(64, (num_params * sizeof(double) + 63) & ~63ULL);
-        opt->v = (double*)aligned_alloc(64, (num_params * sizeof(double) + 63) & ~63ULL);
-    }
+    opt->m = (double*)rcre_arena_alloc(arena, num_params * sizeof(double), 64);
+    opt->v = (double*)rcre_arena_alloc(arena, num_params * sizeof(double), 64);
     if (!opt->m || !opt->v) return nullptr;
 
     memset(opt->m, 0, num_params * sizeof(double));

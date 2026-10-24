@@ -86,6 +86,7 @@ static void test_tensor_tape_matmul_and_backward(void) {
     ASSERT_FLOAT_NEAR(9.0f, B->grad[4], EPSILON);
     ASSERT_FLOAT_NEAR(9.0f, B->grad[5], EPSILON);
 
+    rcre_tensor_tape_destroy(tape);
     rcre_arena_destroy(arena);
 }
 
@@ -140,6 +141,90 @@ static void test_tensor_tape_add_bias_and_activations(void) {
     ASSERT_FLOAT_NEAR(1.0f, bias->grad[0], EPSILON);
     ASSERT_FLOAT_NEAR(1.0f, bias->grad[1], EPSILON);
 
+    rcre_tensor_tape_destroy(tape);
+    rcre_arena_destroy(arena);
+}
+
+static void test_tape_grow_then_rewind(void) {
+    /* P0 regression: the tape node array must survive rcre_arena_temp_end()
+     * rewinds even when it grows mid-batch. Node storage is heap-owned; only
+     * activations live in the rewound arena. */
+    RCRE_Arena* tape_arena = rcre_arena_create(1 << 20);
+    RCRE_Arena* perma = rcre_arena_create(1 << 20);
+    ASSERT_NOT_NULL(tape_arena);
+    ASSERT_NOT_NULL(perma);
+
+    RCRE_TensorTape* tape = rcre_tensor_tape_create(tape_arena, 4); /* tiny cap -> forces growth */
+    ASSERT_NOT_NULL(tape);
+
+    RCRE_AGTensor* X = rcre_ag_tensor_create_2d(perma, 4, 8);
+    RCRE_AGTensor* W = rcre_ag_tensor_create_2d(perma, 8, 8);
+    ASSERT_NOT_NULL(X);
+    ASSERT_NOT_NULL(W);
+    for (int i = 0; i < 32; ++i) X->data[i] = 0.25f;
+    for (int i = 0; i < 64; ++i) W->data[i] = 0.1f;
+
+    float run_grads[2];
+    for (int batch = 0; batch < 2; ++batch) {
+        RCRE_ArenaTemp temp = rcre_arena_temp_begin(tape_arena);
+        rcre_tensor_tape_reset(tape);
+        rcre_ag_tensor_zero_grad(X); /* backward accumulates: start clean */
+
+        RCRE_AGTensor* cur = X;
+        for (int i = 0; i < 8; ++i) {
+            RCRE_AGTensor* nxt = rcre_autograd_matmul(tape, cur, W);
+            ASSERT_NOT_NULL(nxt);
+            rcre_ag_tensor_zero_grad(nxt);
+            nxt->grad[0] = 1.0f;
+            cur = nxt;
+        }
+        rcre_tensor_tape_backward(tape);
+        run_grads[batch] = X->grad[0];
+
+        rcre_arena_temp_end(temp);
+    }
+
+    /* Both batches are identical workloads: gradients must match exactly. */
+    ASSERT_FLOAT_NEAR(run_grads[0], run_grads[1], 0.0f);
+    ASSERT_TRUE(run_grads[0] != 0.0f);
+
+    rcre_tensor_tape_destroy(tape);
+    rcre_arena_destroy(tape_arena);
+    rcre_arena_destroy(perma);
+}
+
+static void test_autograd_shape_validation(void) {
+    RCRE_Arena* arena = rcre_arena_create(1 << 20);
+    ASSERT_NOT_NULL(arena);
+    RCRE_TensorTape* tape = rcre_tensor_tape_create(arena, 8);
+    ASSERT_NOT_NULL(tape);
+
+    /* add with mismatched numel must be rejected */
+    RCRE_AGTensor* A = rcre_ag_tensor_create_2d(arena, 2, 2); /* numel 4 */
+    RCRE_AGTensor* B = rcre_ag_tensor_create_2d(arena, 3, 1); /* numel 3 */
+    ASSERT_NOT_NULL(A);
+    ASSERT_NOT_NULL(B);
+    ASSERT_NULL(rcre_autograd_add(tape, A, B));
+
+    /* add_bias with wrong bias width must be rejected */
+    RCRE_AGTensor* bias2 = rcre_ag_tensor_create_1d(arena, 2);
+    RCRE_AGTensor* bias3 = rcre_ag_tensor_create_1d(arena, 3);
+    ASSERT_NOT_NULL(bias2);
+    ASSERT_NOT_NULL(bias3);
+    ASSERT_NOT_NULL(rcre_autograd_add_bias(tape, A, bias2)); /* valid: 2 cols */
+    ASSERT_NULL(rcre_autograd_add_bias(tape, A, bias3));     /* invalid: 3 cols */
+
+    /* from_tensor must refuse non-F32 buffers */
+    uint8_t px[4] = { 200, 100, 50, 250 };
+    RCRE_Tensor img = {
+        .data = px, .ndim = 1, .dtype = RCRE_DTYPE_U8, .layout = RCRE_LAYOUT_TABULAR,
+        .shape = { 4, 1, 1, 1 }, .strides = { 1, 0, 0, 0 }
+    };
+    RCRE_AGTensor empty = rcre_ag_from_tensor(&img, nullptr, "px");
+    ASSERT_NULL(empty.data);
+    ASSERT_UINT_EQ(0, empty.numel);
+
+    rcre_tensor_tape_destroy(tape);
     rcre_arena_destroy(arena);
 }
 
@@ -147,5 +232,7 @@ int main(void) {
     test_suite_begin("RCRE Dynamic Tensor Tape Autograd (AUTOGRAD-TENSOR-01)");
     TEST_RUN(test_tensor_tape_matmul_and_backward);
     TEST_RUN(test_tensor_tape_add_bias_and_activations);
+    TEST_RUN(test_tape_grow_then_rewind);
+    TEST_RUN(test_autograd_shape_validation);
     return test_suite_report();
 }

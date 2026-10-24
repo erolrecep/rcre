@@ -7,94 +7,153 @@
  */
 
 #include "rcre_autograd.h"
+#include "rcre_rng.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-static uint64_t data_xorshift64(uint64_t* state) {
-    uint64_t x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    return *state = x;
+/* ========================================================================= */
+/* Dynamic line reader (lines may exceed any fixed stack buffer)             */
+/* ========================================================================= */
+
+typedef struct {
+    char*  buf;
+    size_t cap;
+    int    done; /* 1 when a line was fully read */
+} csv_line_t;
+
+static void csv_line_free(csv_line_t* ln) {
+    if (ln->buf) { free(ln->buf); ln->buf = nullptr; ln->cap = 0; }
+}
+
+/* Reads one full line (without the trailing newline). Returns 1 on success,
+ * 0 at EOF. Grows the buffer as needed so arbitrarily long rows parse intact. */
+static int csv_line_read(FILE* f, csv_line_t* ln) {
+    size_t len = 0;
+    int c;
+    ln->done = 1;
+
+    if (ln->cap == 0) {
+        ln->cap = 4096;
+        ln->buf = (char*)malloc(ln->cap);
+        if (!ln->buf) return 0;
+    }
+
+    while ((c = fgetc(f)) != EOF) {
+        if (c == '\n') break;
+        if (c == '\r') continue;
+        if (len + 1 >= ln->cap) {
+            size_t new_cap = ln->cap * 2;
+            char* nb = (char*)realloc(ln->buf, new_cap);
+            if (!nb) { ln->buf = nullptr; ln->cap = 0; ln->done = 0; return 0; }
+            ln->buf = nb;
+            ln->cap = new_cap;
+        }
+        ln->buf[len++] = (char)c;
+    }
+    if (c == EOF && len == 0) {
+        ln->done = 0; /* EOF before any content of this line */
+        return 0;
+    }
+    ln->buf[len] = '\0';
+    return 1;
 }
 
 RCRE_AGTensor* rcre_data_load_csv(RCRE_Arena* arena, const char* filepath, bool skip_header, size_t max_rows) {
-    if (!filepath) return nullptr;
+    if (arena == nullptr || filepath == nullptr) return nullptr;
     FILE* f = fopen(filepath, "r");
     if (!f) return nullptr;
 
-    char line[4096];
-    size_t rows = 0;
-    size_t cols = 0;
+    csv_line_t line = { nullptr, 0, 0 };
 
-    if (skip_header && fgets(line, sizeof(line), f) == nullptr) {
+    if (skip_header && !csv_line_read(f, &line)) {
+        csv_line_free(&line);
         fclose(f);
         return nullptr;
     }
 
-    /* Determine column count from first sample row */
+    /* Column count comes from the first data row. The rewind position must
+     * be captured BEFORE reading it, so the parse pass sees the same start. */
     long first_data_pos = ftell(f);
-    if (fgets(line, sizeof(line), f) != nullptr) {
-        char* token = strtok(line, ",\t\r\n");
-        while (token != nullptr) {
-            cols++;
-            token = strtok(nullptr, ",\t\r\n");
-        }
-        rows = 1;
-    } else {
+    int have_first = csv_line_read(f, &line);
+    if (!have_first) {
+        csv_line_free(&line);
         fclose(f);
         return nullptr;
     }
+    int c0 = 0;
+    char* save = nullptr;
+    char* tok = strtok_r(line.buf, ",\t", &save);
+    while (tok != nullptr) { c0++; tok = strtok_r(nullptr, ",\t", &save); }
+    if (c0 == 0) {
+        csv_line_free(&line);
+        fclose(f);
+        return nullptr;
+    }
+    size_t cols = (size_t)c0;
 
-    /* Count remaining rows */
-    while (fgets(line, sizeof(line), f) != nullptr) {
-        rows++;
-        if (max_rows > 0 && rows >= max_rows) break;
+    size_t rows = 1;
+    if (max_rows == 0 || rows < max_rows) {
+        int rc;
+        while ((rc = csv_line_read(f, &line)) != 0) {
+            rows++;
+            if (max_rows > 0 && rows >= max_rows) break;
+        }
+        (void)rc;
+    }
+    if (rows == 0) {
+        csv_line_free(&line);
+        fclose(f);
+        return nullptr;
     }
 
     fseek(f, first_data_pos, SEEK_SET);
 
     RCRE_AGTensor* t = rcre_ag_tensor_create_2d(arena, rows, cols);
     if (!t) {
+        csv_line_free(&line);
         fclose(f);
         return nullptr;
     }
 
+    /* Parse pass: every row must carry exactly `cols` fields. Ragged or
+     * truncated rows are a data error -> reject the whole file (fail fast
+     * instead of silently zero-filling missing values). */
     size_t r = 0;
-    while (r < rows && fgets(line, sizeof(line), f) != nullptr) {
+    csv_line_read(f, &line);
+    for (;;) {
         size_t c = 0;
-        char* token = strtok(line, ",\t\r\n");
-        while (token != nullptr && c < cols) {
-            t->data[r * cols + c] = (float)atof(token);
+        save = nullptr;
+        tok = strtok_r(line.buf, ",\t", &save);
+        while (tok != nullptr) {
+            if (c >= cols) break;
+            t->data[r * cols + c] = (float)atof(tok);
             c++;
-            token = strtok(nullptr, ",\t\r\n");
+            tok = strtok_r(nullptr, ",\t", &save);
         }
-        r++;
+        if (c != cols) {
+            csv_line_free(&line);
+            fclose(f);
+            return nullptr;
+        }
+        if (++r >= rows) break;
+        if (!csv_line_read(f, &line)) break;
     }
 
+    csv_line_free(&line);
     fclose(f);
     return t;
 }
 
 RCRE_StandardScaler* rcre_standard_scaler_fit(RCRE_Arena* arena, const RCRE_AGTensor* X) {
-    if (!X || X->ndim != 2 || X->shape[0] == 0) return nullptr;
+    if (arena == nullptr || !X || X->ndim != 2 || X->shape[0] == 0) return nullptr;
     size_t rows = X->shape[0];
     size_t cols = X->shape[1];
 
-    RCRE_StandardScaler* scaler = nullptr;
-    if (arena != nullptr) {
-        scaler = (RCRE_StandardScaler*)rcre_arena_alloc(arena, sizeof(RCRE_StandardScaler), alignof(RCRE_StandardScaler));
-        scaler->mean = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
-        scaler->std = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
-    } else {
-        scaler = (RCRE_StandardScaler*)malloc(sizeof(RCRE_StandardScaler));
-        if (scaler) {
-            scaler->mean = (float*)aligned_alloc(64, (cols * sizeof(float) + 63) & ~63ULL);
-            scaler->std = (float*)aligned_alloc(64, (cols * sizeof(float) + 63) & ~63ULL);
-        }
-    }
+    RCRE_StandardScaler* scaler = (RCRE_StandardScaler*)rcre_arena_alloc(arena, sizeof(RCRE_StandardScaler), alignof(RCRE_StandardScaler));
+    scaler->mean = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
+    scaler->std = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
     if (!scaler || !scaler->mean || !scaler->std) return nullptr;
     scaler->num_features = cols;
 
@@ -143,22 +202,13 @@ void rcre_standard_scaler_inverse_transform(const RCRE_StandardScaler* scaler, R
 }
 
 RCRE_MinMaxScaler* rcre_minmax_scaler_fit(RCRE_Arena* arena, const RCRE_AGTensor* X) {
-    if (!X || X->ndim != 2 || X->shape[0] == 0) return nullptr;
+    if (arena == nullptr || !X || X->ndim != 2 || X->shape[0] == 0) return nullptr;
     size_t rows = X->shape[0];
     size_t cols = X->shape[1];
 
-    RCRE_MinMaxScaler* scaler = nullptr;
-    if (arena != nullptr) {
-        scaler = (RCRE_MinMaxScaler*)rcre_arena_alloc(arena, sizeof(RCRE_MinMaxScaler), alignof(RCRE_MinMaxScaler));
-        scaler->min_val = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
-        scaler->max_val = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
-    } else {
-        scaler = (RCRE_MinMaxScaler*)malloc(sizeof(RCRE_MinMaxScaler));
-        if (scaler) {
-            scaler->min_val = (float*)aligned_alloc(64, (cols * sizeof(float) + 63) & ~63ULL);
-            scaler->max_val = (float*)aligned_alloc(64, (cols * sizeof(float) + 63) & ~63ULL);
-        }
-    }
+    RCRE_MinMaxScaler* scaler = (RCRE_MinMaxScaler*)rcre_arena_alloc(arena, sizeof(RCRE_MinMaxScaler), alignof(RCRE_MinMaxScaler));
+    scaler->min_val = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
+    scaler->max_val = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
     if (!scaler || !scaler->min_val || !scaler->max_val) return nullptr;
     scaler->num_features = cols;
 
@@ -194,13 +244,21 @@ void rcre_data_train_test_split(RCRE_Arena* arena, const RCRE_AGTensor* X, const
                                float train_ratio,
                                RCRE_AGTensor** X_train, RCRE_AGTensor** y_train,
                                RCRE_AGTensor** X_test, RCRE_AGTensor** y_test) {
-    if (!X || !y || train_ratio <= 0.0f || train_ratio >= 1.0f) return;
+    if (arena == nullptr || !X || !y || X->ndim != 2) return;
+    /* y may be 1-D (n,) regression targets or 2-D (n, k). A 1-D y is treated
+     * as (n, 1); outputs are always 2-D. */
+    if (y->ndim != 1 && y->ndim != 2) return;
+    if (y->shape[0] != X->shape[0]) return;
+    if (!(train_ratio > 0.0f && train_ratio < 1.0f)) return;
+    if (!X_train || !y_train || !X_test || !y_test) return;
+
     size_t total_samples = X->shape[0];
     size_t train_samples = (size_t)((float)total_samples * train_ratio);
     size_t test_samples = total_samples - train_samples;
+    if (train_samples == 0 || test_samples == 0) return;
 
     size_t x_features = X->shape[1];
-    size_t y_features = y->shape[1];
+    size_t y_features = (y->ndim == 2) ? y->shape[1] : 1;
 
     *X_train = rcre_ag_tensor_create_2d(arena, train_samples, x_features);
     *X_test  = rcre_ag_tensor_create_2d(arena, test_samples, x_features);
@@ -217,22 +275,18 @@ void rcre_data_train_test_split(RCRE_Arena* arena, const RCRE_AGTensor* X, const
 }
 
 RCRE_BatchIter* rcre_batch_iter_create(RCRE_Arena* arena, RCRE_AGTensor* X, RCRE_AGTensor* y, size_t batch_size, bool shuffle) {
-    if (!X || !y || batch_size == 0 || X->shape[0] != y->shape[0]) return nullptr;
+    if (arena == nullptr || !X || !y || batch_size == 0) return nullptr;
+    if (X->ndim != 2) return nullptr;
+    if (y->ndim != 1 && y->ndim != 2) return nullptr;
+    if (X->shape[0] != y->shape[0]) return nullptr;
 
-    RCRE_BatchIter* iter = nullptr;
-    if (arena != nullptr) {
-        iter = (RCRE_BatchIter*)rcre_arena_alloc(arena, sizeof(RCRE_BatchIter), alignof(RCRE_BatchIter));
-        iter->indices = (size_t*)rcre_arena_alloc(arena, X->shape[0] * sizeof(size_t), alignof(size_t));
-    } else {
-        iter = (RCRE_BatchIter*)malloc(sizeof(RCRE_BatchIter));
-        if (iter) {
-            iter->indices = (size_t*)malloc(X->shape[0] * sizeof(size_t));
-        }
-    }
+    RCRE_BatchIter* iter = (RCRE_BatchIter*)rcre_arena_alloc(arena, sizeof(RCRE_BatchIter), alignof(RCRE_BatchIter));
+    iter->indices = (size_t*)rcre_arena_alloc(arena, X->shape[0] * sizeof(size_t), alignof(size_t));
     if (!iter || !iter->indices) return nullptr;
 
     iter->X = X;
     iter->y = y;
+    iter->y_cols = (y->ndim == 2) ? y->shape[1] : 1;
     iter->batch_size = batch_size;
     iter->current_idx = 0;
     iter->num_samples = X->shape[0];
@@ -253,7 +307,7 @@ void rcre_batch_iter_reset(RCRE_BatchIter* iter) {
 
     if (iter->shuffle) {
         for (size_t i = iter->num_samples - 1; i > 0; --i) {
-            size_t j = (size_t)(data_xorshift64(&iter->rng_state) % (uint64_t)(i + 1));
+            size_t j = (size_t)(rcre_rng_next(&iter->rng_state) % (uint64_t)(i + 1));
             size_t tmp = iter->indices[i];
             iter->indices[i] = iter->indices[j];
             iter->indices[j] = tmp;
@@ -262,13 +316,19 @@ void rcre_batch_iter_reset(RCRE_BatchIter* iter) {
 }
 
 bool rcre_batch_iter_next(RCRE_BatchIter* iter, RCRE_AGTensor* batch_X, RCRE_AGTensor* batch_y) {
-    if (iter == nullptr || iter->current_idx >= iter->num_samples) return false;
+    if (iter == nullptr || batch_X == nullptr || batch_y == nullptr) return false;
+    if (iter->current_idx >= iter->num_samples) return false;
 
     size_t remaining = iter->num_samples - iter->current_idx;
     size_t cur_batch = (remaining < iter->batch_size) ? remaining : iter->batch_size;
 
     size_t x_dim = iter->X->shape[1];
-    size_t y_dim = iter->y->shape[1];
+    size_t y_dim = iter->y_cols;
+
+    /* Output buffers are caller-allocated: verify capacity so an undersized
+     * batch tensor fails cleanly instead of corrupting neighbouring arena
+     * allocations (which ASan cannot see inside a single arena buffer). */
+    if (batch_X->numel < cur_batch * x_dim || batch_y->numel < cur_batch * y_dim) return false;
 
     for (size_t b = 0; b < cur_batch; ++b) {
         size_t idx = iter->indices[iter->current_idx + b];

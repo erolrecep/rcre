@@ -13,17 +13,16 @@
 
 static uint32_t g_visited_epoch = 1;
 
-static RCRE_ScalarVal* rcre_scalar_alloc_internal(RCRE_GraphCtx* ctx, bool is_param) {
-    RCRE_Arena* target_arena = (ctx != nullptr)
-        ? (is_param ? ctx->persistent_arena : ctx->tape_arena)
-        : nullptr;
+/* NOTE: g_visited_epoch is process-global and not thread-safe: concurrent
+ * scalar backward() calls from multiple threads can interleave epochs.
+ * The tensor-tape engine (heap-owned, per-tape) has no such constraint. */
 
-    RCRE_ScalarVal* v = nullptr;
-    if (target_arena != nullptr) {
-        v = (RCRE_ScalarVal*)rcre_arena_alloc(target_arena, sizeof(RCRE_ScalarVal), alignof(RCRE_ScalarVal));
-    } else {
-        v = (RCRE_ScalarVal*)malloc(sizeof(RCRE_ScalarVal));
-    }
+static RCRE_ScalarVal* rcre_scalar_alloc_internal(RCRE_GraphCtx* ctx, bool is_param) {
+    if (ctx == nullptr) return nullptr;
+    RCRE_Arena* target_arena = (is_param ? ctx->persistent_arena : ctx->tape_arena);
+    if (target_arena == nullptr) return nullptr;
+
+    RCRE_ScalarVal* v = (RCRE_ScalarVal*)rcre_arena_alloc(target_arena, sizeof(RCRE_ScalarVal), alignof(RCRE_ScalarVal));
     if (!v) return nullptr;
 
     v->data = 0.0;
@@ -258,12 +257,15 @@ typedef struct {
 
 static void scalar_vec_push(RCRE_ValVec* vec, RCRE_ScalarVal* v) {
     if (vec->count >= vec->capacity) {
-        vec->capacity = vec->capacity == 0 ? 128 : vec->capacity * 2;
-        vec->items = (RCRE_ScalarVal**)realloc(vec->items, vec->capacity * sizeof(RCRE_ScalarVal*));
+        size_t new_cap = (vec->capacity == 0) ? 128 : vec->capacity * 2;
+        /* Realloc via temporary pointer: on failure the old buffer stays
+         * intact and is returned; callers treat a missing node as OOM. */
+        RCRE_ScalarVal** new_items = (RCRE_ScalarVal**)realloc(vec->items, new_cap * sizeof(RCRE_ScalarVal*));
+        if (!new_items) return;
+        vec->items = new_items;
+        vec->capacity = new_cap;
     }
-    if (vec->items) {
-        vec->items[vec->count++] = v;
-    }
+    vec->items[vec->count++] = v;
 }
 
 static void build_topo(RCRE_ScalarVal* v, uint32_t epoch, RCRE_ValVec* topo) {

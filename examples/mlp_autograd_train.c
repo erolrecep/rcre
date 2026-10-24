@@ -140,6 +140,7 @@ int main(void) {
     printf("   Initial Loss: %.5f  -->  Final Loss: %.5f\n\n", loss_history[0], loss_history[EPOCHS - 1]);
 
     /* Clean teardown */
+    rcre_tensor_tape_destroy(tape);
     rcre_graph_ctx_destroy(ctx);
     return 0;
 }

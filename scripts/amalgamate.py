@@ -49,7 +49,7 @@ def clean_file_content(content: str) -> str:
     """Removes local includes that are redundant in amalgamated file."""
     lines = []
     for line in content.splitlines():
-        if re.match(r'^\s*#include\s*["<](rcre\.h|rcre_autograd\.h|hal_internal\.h|ml_internal\.h)[">]', line):
+        if re.match(r'^\s*#include\s*["<](rcre\.h|rcre_autograd\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h)[">]', line):
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -81,6 +81,7 @@ def main():
 
     hal_internal = (SRC_DIR / "hal" / "hal_internal.h").read_text(encoding="utf-8")
     ml_internal = (SRC_DIR / "ml" / "ml_internal.h").read_text(encoding="utf-8")
+    rng_internal = (SRC_DIR / "core" / "rcre_rng.h").read_text(encoding="utf-8")
 
     out_lines = []
     out_lines.append("/* ========================================================================= */")
@@ -97,6 +98,9 @@ def main():
     out_lines.append("")
     out_lines.append("/* --- Internal Machine Learning Mathematical Primitives --- */")
     out_lines.append(clean_file_content(ml_internal))
+    out_lines.append("")
+    out_lines.append("/* --- Internal Random Number Generation --- */")
+    out_lines.append(clean_file_content(rng_internal))
     out_lines.append("")
 
     for c_file in C_FILES:
