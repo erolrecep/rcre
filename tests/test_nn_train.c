@@ -14,22 +14,27 @@ static void test_loss_mse_and_grad(void) {
     RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
     ASSERT_NOT_NULL(arena);
 
-    RCRE_AGTensor* preds = rcre_ag_tensor_create_1d(arena, 4);
-    RCRE_AGTensor* targets = rcre_ag_tensor_create_1d(arena, 4);
-    RCRE_AGTensor* grad = rcre_ag_tensor_create_1d(arena, 4);
+    RCRE_Tensor* preds = rcre_tensor_alloc_1d(arena, 4);
+    RCRE_Tensor* targets = rcre_tensor_alloc_1d(arena, 4);
+    RCRE_Tensor* grad = rcre_tensor_alloc_1d(arena, 4);
 
-    preds->data[0] = 1.0f; preds->data[1] = 2.0f; preds->data[2] = 3.0f; preds->data[3] = 4.0f;
-    targets->data[0] = 2.0f; targets->data[1] = 2.0f; targets->data[2] = 4.0f; targets->data[3] = 4.0f;
+    rcre_tensor_f32_data(preds)[0] = 1.0f; rcre_tensor_f32_data(preds)[1] = 2.0f; rcre_tensor_f32_data(preds)[2] = 3.0f; rcre_tensor_f32_data(preds)[3] = 4.0f;
+    rcre_tensor_f32_data(targets)[0] = 2.0f; rcre_tensor_f32_data(targets)[1] = 2.0f; rcre_tensor_f32_data(targets)[2] = 4.0f; rcre_tensor_f32_data(targets)[3] = 4.0f;
 
     /* diff = [-1, 0, -1, 0], sum_sq = 2.0, mse = 2.0 / 4 = 0.5 */
     float loss = rcre_loss_mse(preds, targets, grad);
     ASSERT_FLOAT_NEAR(0.5f, loss, EPSILON);
 
-    /* grad = 2 * diff / 4 = diff / 2 = [-0.5, 0.0, -0.5, 0.0] */
-    ASSERT_FLOAT_NEAR(-0.5f, grad->data[0], EPSILON);
-    ASSERT_FLOAT_NEAR(0.0f,  grad->data[1], EPSILON);
-    ASSERT_FLOAT_NEAR(-0.5f, grad->data[2], EPSILON);
-    ASSERT_FLOAT_NEAR(0.0f,  grad->data[3], EPSILON);
+    /* v0.2.2 gradient contract: the gradient lands in grad->grad ONLY.
+     * (grad = 2 * diff / 4 = diff / 2 = [-0.5, 0.0, -0.5, 0.0]) */
+    ASSERT_FLOAT_NEAR(-0.5f, grad->grad[0], EPSILON);
+    ASSERT_FLOAT_NEAR(0.0f,  grad->grad[1], EPSILON);
+    ASSERT_FLOAT_NEAR(-0.5f, grad->grad[2], EPSILON);
+    ASSERT_FLOAT_NEAR(0.0f,  grad->grad[3], EPSILON);
+
+    /* The retired .data mirror: grad->data (forward buffer) is untouched. */
+    ASSERT_FLOAT_NEAR(0.0f, rcre_tensor_f32_data(grad)[0], 0.0f);
+    ASSERT_FLOAT_NEAR(0.0f, rcre_tensor_f32_data(grad)[3], 0.0f);
 
     rcre_arena_destroy(arena);
 }
@@ -39,17 +44,17 @@ static void test_standard_scaler_and_batch_iter(void) {
     ASSERT_NOT_NULL(arena);
 
     /* 4 samples, 2 features */
-    RCRE_AGTensor* X = rcre_ag_tensor_create_2d(arena, 4, 2);
-    RCRE_AGTensor* y = rcre_ag_tensor_create_2d(arena, 4, 1);
+    RCRE_Tensor* X = rcre_tensor_alloc_2d(arena, 4, 2);
+    RCRE_Tensor* y = rcre_tensor_alloc_2d(arena, 4, 1);
 
     /* Feature 0: [2, 4, 6, 8] -> mean=5, var=5 */
     /* Feature 1: [10, 20, 30, 40] -> mean=25 */
-    X->data[0] = 2.0f;  X->data[1] = 10.0f;
-    X->data[2] = 4.0f;  X->data[3] = 20.0f;
-    X->data[4] = 6.0f;  X->data[5] = 30.0f;
-    X->data[6] = 8.0f;  X->data[7] = 40.0f;
+    rcre_tensor_f32_data(X)[0] = 2.0f;  rcre_tensor_f32_data(X)[1] = 10.0f;
+    rcre_tensor_f32_data(X)[2] = 4.0f;  rcre_tensor_f32_data(X)[3] = 20.0f;
+    rcre_tensor_f32_data(X)[4] = 6.0f;  rcre_tensor_f32_data(X)[5] = 30.0f;
+    rcre_tensor_f32_data(X)[6] = 8.0f;  rcre_tensor_f32_data(X)[7] = 40.0f;
 
-    y->data[0] = 1.0f; y->data[1] = 2.0f; y->data[2] = 3.0f; y->data[3] = 4.0f;
+    rcre_tensor_f32_data(y)[0] = 1.0f; rcre_tensor_f32_data(y)[1] = 2.0f; rcre_tensor_f32_data(y)[2] = 3.0f; rcre_tensor_f32_data(y)[3] = 4.0f;
 
     RCRE_StandardScaler* scaler = rcre_standard_scaler_fit(arena, X);
     ASSERT_NOT_NULL(scaler);
@@ -58,25 +63,25 @@ static void test_standard_scaler_and_batch_iter(void) {
 
     rcre_standard_scaler_transform(scaler, X);
     /* Mean of transformed data must be 0 */
-    float mean_0 = (X->data[0] + X->data[2] + X->data[4] + X->data[6]) / 4.0f;
+    float mean_0 = (rcre_tensor_f32_data(X)[0] + rcre_tensor_f32_data(X)[2] + rcre_tensor_f32_data(X)[4] + rcre_tensor_f32_data(X)[6]) / 4.0f;
     ASSERT_FLOAT_NEAR(0.0f, mean_0, EPSILON);
 
     /* Mini-batch iterator */
     RCRE_BatchIter* iter = rcre_batch_iter_create(arena, X, y, 2, false);
     ASSERT_NOT_NULL(iter);
 
-    RCRE_AGTensor* batch_X = rcre_ag_tensor_create_2d(arena, 2, 2);
-    RCRE_AGTensor* batch_y = rcre_ag_tensor_create_2d(arena, 2, 1);
+    RCRE_Tensor* batch_X = rcre_tensor_alloc_2d(arena, 2, 2);
+    RCRE_Tensor* batch_y = rcre_tensor_alloc_2d(arena, 2, 1);
 
     bool has_b1 = rcre_batch_iter_next(iter, batch_X, batch_y);
     ASSERT_TRUE(has_b1);
-    ASSERT_FLOAT_NEAR(1.0f, batch_y->data[0], EPSILON);
-    ASSERT_FLOAT_NEAR(2.0f, batch_y->data[1], EPSILON);
+    ASSERT_FLOAT_NEAR(1.0f, rcre_tensor_f32_data(batch_y)[0], EPSILON);
+    ASSERT_FLOAT_NEAR(2.0f, rcre_tensor_f32_data(batch_y)[1], EPSILON);
 
     bool has_b2 = rcre_batch_iter_next(iter, batch_X, batch_y);
     ASSERT_TRUE(has_b2);
-    ASSERT_FLOAT_NEAR(3.0f, batch_y->data[0], EPSILON);
-    ASSERT_FLOAT_NEAR(4.0f, batch_y->data[1], EPSILON);
+    ASSERT_FLOAT_NEAR(3.0f, rcre_tensor_f32_data(batch_y)[0], EPSILON);
+    ASSERT_FLOAT_NEAR(4.0f, rcre_tensor_f32_data(batch_y)[1], EPSILON);
 
     bool has_b3 = rcre_batch_iter_next(iter, batch_X, batch_y);
     ASSERT_FALSE(has_b3);
@@ -90,23 +95,23 @@ static void test_adamw_convergence_loop(void) {
 
     /* Target function: y = 3.0 * x1 + 2.0 * x2 */
     const size_t N = 50;
-    RCRE_AGTensor* X = rcre_ag_tensor_create_2d(arena, N, 2);
-    RCRE_AGTensor* y = rcre_ag_tensor_create_2d(arena, N, 1);
+    RCRE_Tensor* X = rcre_tensor_alloc_2d(arena, N, 2);
+    RCRE_Tensor* y = rcre_tensor_alloc_2d(arena, N, 1);
 
     for (size_t i = 0; i < N; ++i) {
         float x1 = (float)(i % 7) * 0.5f + 0.1f;
         float x2 = (float)(i % 5) * 0.3f - 0.2f;
-        X->data[i * 2 + 0] = x1;
-        X->data[i * 2 + 1] = x2;
-        y->data[i] = 3.0f * x1 + 2.0f * x2;
+        rcre_tensor_f32_data(X)[i * 2 + 0] = x1;
+        rcre_tensor_f32_data(X)[i * 2 + 1] = x2;
+        rcre_tensor_f32_data(y)[i] = 3.0f * x1 + 2.0f * x2;
     }
 
     /* Model: W: [2, 1] initialized to 0 */
-    RCRE_AGTensor* W = rcre_ag_tensor_create_2d(arena, 2, 1);
-    W->data[0] = 0.0f;
-    W->data[1] = 0.0f;
+    RCRE_Tensor* W = rcre_tensor_alloc_2d(arena, 2, 1);
+    rcre_tensor_f32_data(W)[0] = 0.0f;
+    rcre_tensor_f32_data(W)[1] = 0.0f;
 
-    RCRE_AGTensor* params[1] = { W };
+    RCRE_Tensor* params[1] = { W };
     RCRE_TensorOptim* opt = rcre_tensor_optim_adamw_create(arena, params, 1, 0.1f, 0.9f, 0.999f, 1e-8f, 0.0f);
     ASSERT_NOT_NULL(opt);
 
@@ -121,7 +126,7 @@ static void test_adamw_convergence_loop(void) {
         rcre_tensor_optim_zero_grad(opt);
 
         /* Forward: preds = X * W */
-        RCRE_AGTensor* preds = rcre_autograd_matmul(tape, X, W);
+        RCRE_Tensor* preds = rcre_autograd_matmul(tape, X, W);
 
         /* Compute loss */
         float loss = rcre_loss_mse(preds, y, preds);
@@ -138,8 +143,8 @@ static void test_adamw_convergence_loop(void) {
     /* Assert substantial loss reduction */
     ASSERT_TRUE(final_loss < initial_loss * 0.01f);
     /* Learned weights should be near [3.0, 2.0] */
-    ASSERT_FLOAT_NEAR(3.0f, W->data[0], 0.2f);
-    ASSERT_FLOAT_NEAR(2.0f, W->data[1], 0.2f);
+    ASSERT_FLOAT_NEAR(3.0f, rcre_tensor_f32_data(W)[0], 0.2f);
+    ASSERT_FLOAT_NEAR(2.0f, rcre_tensor_f32_data(W)[1], 0.2f);
 
     rcre_tensor_tape_destroy(tape);
     rcre_arena_destroy(arena);
@@ -151,14 +156,14 @@ static void test_split_1d_y(void) {
     RCRE_Arena* arena = rcre_arena_create(1 << 20);
     ASSERT_NOT_NULL(arena);
 
-    RCRE_AGTensor* X = rcre_ag_tensor_create_2d(arena, 10, 3);
-    RCRE_AGTensor* y = rcre_ag_tensor_create_1d(arena, 10);
+    RCRE_Tensor* X = rcre_tensor_alloc_2d(arena, 10, 3);
+    RCRE_Tensor* y = rcre_tensor_alloc_1d(arena, 10);
     ASSERT_NOT_NULL(X);
     ASSERT_NOT_NULL(y);
-    for (int i = 0; i < 30; ++i) X->data[i] = (float)i;
-    for (int i = 0; i < 10; ++i) y->data[i] = (float)(10 - i);
+    for (int i = 0; i < 30; ++i) rcre_tensor_f32_data(X)[i] = (float)i;
+    for (int i = 0; i < 10; ++i) rcre_tensor_f32_data(y)[i] = (float)(10 - i);
 
-    RCRE_AGTensor *Xtr, *Xte, *ytr, *yte;
+    RCRE_Tensor *Xtr, *Xte, *ytr, *yte;
     rcre_data_train_test_split(arena, X, y, 0.7f, &Xtr, &ytr, &Xte, &yte);
     ASSERT_NOT_NULL(Xtr);
     ASSERT_NOT_NULL(ytr);
@@ -173,10 +178,10 @@ static void test_split_1d_y(void) {
 
     /* Content: first 7 rows train, last 3 test, values preserved
        (y = [10, 9, 8, ..., 1]) */
-    ASSERT_FLOAT_NEAR(10.0f, ytr->data[0], EPSILON);
-    ASSERT_FLOAT_NEAR(4.0f, ytr->data[6], EPSILON);
-    ASSERT_FLOAT_NEAR(3.0f, yte->data[0], EPSILON);
-    ASSERT_FLOAT_NEAR(1.0f, yte->data[2], EPSILON);
+    ASSERT_FLOAT_NEAR(10.0f, rcre_tensor_f32_data(ytr)[0], EPSILON);
+    ASSERT_FLOAT_NEAR(4.0f, rcre_tensor_f32_data(ytr)[6], EPSILON);
+    ASSERT_FLOAT_NEAR(3.0f, rcre_tensor_f32_data(yte)[0], EPSILON);
+    ASSERT_FLOAT_NEAR(1.0f, rcre_tensor_f32_data(yte)[2], EPSILON);
 
     rcre_arena_destroy(arena);
 }
@@ -185,9 +190,9 @@ static void test_optimizer_hyperparam_validation(void) {
     RCRE_Arena* arena = rcre_arena_create(1 << 20);
     ASSERT_NOT_NULL(arena);
 
-    RCRE_AGTensor* w = rcre_ag_tensor_create_2d(arena, 2, 2);
+    RCRE_Tensor* w = rcre_tensor_alloc_2d(arena, 2, 2);
     ASSERT_NOT_NULL(w);
-    RCRE_AGTensor* params[1] = { w };
+    RCRE_Tensor* params[1] = { w };
 
     /* beta1 == 1.0 would divide by zero in the bias correction: reject. */
     ASSERT_NULL(rcre_tensor_optim_adamw_create(arena, params, 1, 0.1f, 1.0f, 0.999f, 1e-8f, 0.0f));
@@ -209,19 +214,19 @@ static void test_batch_iter_undersized_output(void) {
     RCRE_Arena* arena = rcre_arena_create(1 << 20);
     ASSERT_NOT_NULL(arena);
 
-    RCRE_AGTensor* X = rcre_ag_tensor_create_2d(arena, 10, 4);
-    RCRE_AGTensor* y = rcre_ag_tensor_create_2d(arena, 10, 2);
+    RCRE_Tensor* X = rcre_tensor_alloc_2d(arena, 10, 4);
+    RCRE_Tensor* y = rcre_tensor_alloc_2d(arena, 10, 2);
     RCRE_BatchIter* iter = rcre_batch_iter_create(arena, X, y, 8, true);
     ASSERT_NOT_NULL(iter);
 
-    RCRE_AGTensor* bx = rcre_ag_tensor_create_2d(arena, 4, 4); /* need 8x4 */
-    RCRE_AGTensor* by = rcre_ag_tensor_create_2d(arena, 4, 2);
+    RCRE_Tensor* bx = rcre_tensor_alloc_2d(arena, 4, 4); /* need 8x4 */
+    RCRE_Tensor* by = rcre_tensor_alloc_2d(arena, 4, 2);
     ASSERT_FALSE(rcre_batch_iter_next(iter, bx, by));
     ASSERT_UINT_EQ(0, iter->current_idx); /* nothing consumed */
 
     /* Correctly sized buffers work. */
-    RCRE_AGTensor* bx2 = rcre_ag_tensor_create_2d(arena, 8, 4);
-    RCRE_AGTensor* by2 = rcre_ag_tensor_create_2d(arena, 8, 2);
+    RCRE_Tensor* bx2 = rcre_tensor_alloc_2d(arena, 8, 4);
+    RCRE_Tensor* by2 = rcre_tensor_alloc_2d(arena, 8, 2);
     ASSERT_TRUE(rcre_batch_iter_next(iter, bx2, by2));
     ASSERT_UINT_EQ(8, iter->current_idx);
 
@@ -244,15 +249,15 @@ static void test_csv_long_line_and_ragged_reject(void) {
     RCRE_Arena* arena = rcre_arena_create(4 << 20);
     ASSERT_NOT_NULL(arena);
 
-    RCRE_AGTensor* t = rcre_data_load_csv(arena, path, true, 0);
+    RCRE_Tensor* t = rcre_data_load_csv(arena, path, true, 0);
     ASSERT_NOT_NULL(t);
     ASSERT_UINT_EQ(3, t->shape[0]);
     ASSERT_UINT_EQ(1000, t->shape[1]);
-    ASSERT_FLOAT_NEAR(999.0f, t->data[999], EPSILON);         /* row 0, col 999 */
-    ASSERT_FLOAT_NEAR(2 * 1000 + 999, t->data[2000 + 999], EPSILON); /* row 2, col 999 */
+    ASSERT_FLOAT_NEAR(999.0f, rcre_tensor_f32_data(t)[999], EPSILON);         /* row 0, col 999 */
+    ASSERT_FLOAT_NEAR(2 * 1000 + 999, rcre_tensor_f32_data(t)[2000 + 999], EPSILON); /* row 2, col 999 */
 
     /* max_rows still honoured on long-line files */
-    RCRE_AGTensor* t2 = rcre_data_load_csv(arena, path, true, 2);
+    RCRE_Tensor* t2 = rcre_data_load_csv(arena, path, true, 2);
     ASSERT_NOT_NULL(t2);
     ASSERT_UINT_EQ(2, t2->shape[0]);
 

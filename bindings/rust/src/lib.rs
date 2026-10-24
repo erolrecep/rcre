@@ -16,11 +16,15 @@ pub struct RCRE_Arena {
 #[derive(Debug, Clone, Copy)]
 pub struct RCRE_Tensor {
     pub data: *mut std::ffi::c_void,
+    pub grad: *mut f32,
     pub shape: [usize; 4],
     pub strides: [isize; 4],
+    pub numel: usize,
     pub ndim: u8,
-    pub dtype: u8,
-    pub layout: u8,
+    pub dtype: u32,
+    pub layout: u32,
+    pub is_view: bool,
+    pub label: *const std::ffi::c_char,
 }
 
 extern "C" {

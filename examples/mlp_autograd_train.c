@@ -40,30 +40,30 @@ int main(void) {
     uint64_t rng = 20261024;
 
     /* 3. Generate non-linear synthetic regression dataset: y = sin(x1) + cos(x2) */
-    RCRE_AGTensor* X = rcre_ag_tensor_create_2d(ctx->persistent_arena, N_SAMPLES, 2);
-    RCRE_AGTensor* y = rcre_ag_tensor_create_2d(ctx->persistent_arena, N_SAMPLES, 1);
+    RCRE_Tensor* X = rcre_tensor_alloc_2d(ctx->persistent_arena, N_SAMPLES, 2);
+    RCRE_Tensor* y = rcre_tensor_alloc_2d(ctx->persistent_arena, N_SAMPLES, 1);
 
     for (size_t i = 0; i < N_SAMPLES; ++i) {
         float x1 = ((float)(i % 20) / 10.0f) - 1.0f;
         float x2 = ((float)(i / 20) / 5.0f) - 1.0f;
-        X->data[i * 2 + 0] = x1;
-        X->data[i * 2 + 1] = x2;
-        y->data[i] = sinf(x1 * 3.14159f) + 0.5f * cosf(x2 * 3.14159f);
+        rcre_tensor_f32_data(X)[i * 2 + 0] = x1;
+        rcre_tensor_f32_data(X)[i * 2 + 1] = x2;
+        rcre_tensor_f32_data(y)[i] = sinf(x1 * 3.14159f) + 0.5f * cosf(x2 * 3.14159f);
     }
 
     /* 4. Architecture: Layer 1: [2 -> 16], Layer 2: [16 -> 1] */
-    RCRE_AGTensor* W1 = rcre_ag_tensor_create_2d(ctx->persistent_arena, 2, 16);
-    RCRE_AGTensor* b1 = rcre_ag_tensor_create_1d(ctx->persistent_arena, 16);
-    RCRE_AGTensor* W2 = rcre_ag_tensor_create_2d(ctx->persistent_arena, 16, 1);
-    RCRE_AGTensor* b2 = rcre_ag_tensor_create_1d(ctx->persistent_arena, 1);
+    RCRE_Tensor* W1 = rcre_tensor_alloc_2d(ctx->persistent_arena, 2, 16);
+    RCRE_Tensor* b1 = rcre_tensor_alloc_1d(ctx->persistent_arena, 16);
+    RCRE_Tensor* W2 = rcre_tensor_alloc_2d(ctx->persistent_arena, 16, 1);
+    RCRE_Tensor* b2 = rcre_tensor_alloc_1d(ctx->persistent_arena, 1);
 
-    rcre_ag_tensor_init_xavier(W1, 2, 16, &rng);
-    rcre_ag_tensor_init_xavier(W2, 16, 1, &rng);
-    rcre_ag_tensor_zeros(b1);
-    rcre_ag_tensor_zeros(b2);
+    rcre_tensor_init_xavier(W1, 2, 16, &rng);
+    rcre_tensor_init_xavier(W2, 16, 1, &rng);
+    rcre_tensor_zeros(b1);
+    rcre_tensor_zeros(b2);
 
     /* 5. Initialize AdamW optimizer */
-    RCRE_AGTensor* model_params[4] = { W1, b1, W2, b2 };
+    RCRE_Tensor* model_params[4] = { W1, b1, W2, b2 };
     RCRE_TensorOptim* opt = rcre_tensor_optim_adamw_create(ctx->persistent_arena, model_params, 4,
                                                            0.02f, 0.9f, 0.999f, 1e-8f, 1e-4f);
 
@@ -84,33 +84,40 @@ int main(void) {
             /* Scoped scratchpad checkpoint */
             RCRE_ArenaTemp temp = rcre_arena_temp_begin(ctx->tape_arena);
 
-            /* View slice for mini-batch */
-            RCRE_AGTensor batch_x = {
-                .data = X->data + start * 2,
+            /* View slice for mini-batch (stack struct, borrows X/y buffers;
+             * must carry dtype F32 for the autograd ops' dtype guard) */
+            RCRE_Tensor batch_x = {
+                .data = rcre_tensor_f32_data(X) + start * 2,
                 .shape = { cur_b, 2 },
                 .strides = { 2, 1 },
                 .ndim = 2,
-                .numel = cur_b * 2
+                .numel = cur_b * 2,
+                .dtype = RCRE_DTYPE_F32,
+                .layout = RCRE_LAYOUT_TABULAR,
+                .is_view = true
             };
-            RCRE_AGTensor batch_y = {
-                .data = y->data + start * 1,
+            RCRE_Tensor batch_y = {
+                .data = rcre_tensor_f32_data(y) + start * 1,
                 .shape = { cur_b, 1 },
                 .strides = { 1, 1 },
                 .ndim = 2,
-                .numel = cur_b * 1
+                .numel = cur_b * 1,
+                .dtype = RCRE_DTYPE_F32,
+                .layout = RCRE_LAYOUT_TABULAR,
+                .is_view = true
             };
 
             rcre_tensor_tape_reset(tape);
             rcre_tensor_optim_zero_grad(opt);
 
             /* Forward Pass: H = ReLU(X * W1 + b1) */
-            RCRE_AGTensor* z1 = rcre_autograd_matmul(tape, &batch_x, W1);
-            RCRE_AGTensor* a1 = rcre_autograd_add_bias(tape, z1, b1);
-            RCRE_AGTensor* h = rcre_autograd_relu(tape, a1);
+            RCRE_Tensor* z1 = rcre_autograd_matmul(tape, &batch_x, W1);
+            RCRE_Tensor* a1 = rcre_autograd_add_bias(tape, z1, b1);
+            RCRE_Tensor* h = rcre_autograd_relu(tape, a1);
 
             /* Output: preds = H * W2 + b2 */
-            RCRE_AGTensor* z2 = rcre_autograd_matmul(tape, h, W2);
-            RCRE_AGTensor* preds = rcre_autograd_add_bias(tape, z2, b2);
+            RCRE_Tensor* z2 = rcre_autograd_matmul(tape, h, W2);
+            RCRE_Tensor* preds = rcre_autograd_add_bias(tape, z2, b2);
 
             /* Compute MSE Loss and seed preds->grad */
             float loss = rcre_loss_mse(preds, &batch_y, preds);

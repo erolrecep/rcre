@@ -144,9 +144,13 @@ bool rcre_vis_export_svg_curve(const float* y_vals, size_t count, const char* fi
     return true;
 }
 
-bool rcre_vis_export_3d_clusters_html(const RCRE_AGTensor* points, const size_t* assignments, const RCRE_AGTensor* centroids, size_t k, const char* filepath) {
+bool rcre_vis_export_3d_clusters_html(const RCRE_Tensor* points, const size_t* assignments, const RCRE_Tensor* centroids, size_t k, const char* filepath) {
     if (points == nullptr || centroids == nullptr || filepath == nullptr) return false;
-    if (points->shape[1] < 3 || centroids->shape[1] < 3) return false;
+    if (points->ndim != 2 || centroids->ndim != 2 || points->shape[1] < 3 || centroids->shape[1] < 3) return false;
+    const float* pd = rcre_tensor_f32_data(points);
+    const float* cd = rcre_tensor_f32_data(centroids);
+    size_t pcols = points->shape[1];
+    size_t ccols = centroids->shape[1];
 
     FILE* f = fopen(filepath, "w");
     if (!f) return false;
@@ -168,15 +172,15 @@ bool rcre_vis_export_3d_clusters_html(const RCRE_AGTensor* points, const size_t*
         fprintf(f, "  {\n");
         fprintf(f, "    x: [");
         for (size_t i = 0; i < n; ++i) {
-            if (assignments[i] == cluster_id) fprintf(f, "%.4f, ", points->data[i * points->shape[1] + 0]);
+            if (assignments[i] == cluster_id) fprintf(f, "%.4f, ", pd[i * pcols + 0]);
         }
         fprintf(f, "],\n    y: [");
         for (size_t i = 0; i < n; ++i) {
-            if (assignments[i] == cluster_id) fprintf(f, "%.4f, ", points->data[i * points->shape[1] + 1]);
+            if (assignments[i] == cluster_id) fprintf(f, "%.4f, ", pd[i * pcols + 1]);
         }
         fprintf(f, "],\n    z: [");
         for (size_t i = 0; i < n; ++i) {
-            if (assignments[i] == cluster_id) fprintf(f, "%.4f, ", points->data[i * points->shape[1] + 2]);
+            if (assignments[i] == cluster_id) fprintf(f, "%.4f, ", pd[i * pcols + 2]);
         }
         fprintf(f, "],\n    mode: 'markers',\n");
         fprintf(f, "    name: 'Cluster %zu',\n", cluster_id);
@@ -186,11 +190,11 @@ bool rcre_vis_export_3d_clusters_html(const RCRE_AGTensor* points, const size_t*
 
     fprintf(f, "  {\n");
     fprintf(f, "    x: [");
-    for (size_t c = 0; c < k; ++c) fprintf(f, "%.4f, ", centroids->data[c * centroids->shape[1] + 0]);
+    for (size_t c = 0; c < k; ++c) fprintf(f, "%.4f, ", cd[c * ccols + 0]);
     fprintf(f, "],\n    y: [");
-    for (size_t c = 0; c < k; ++c) fprintf(f, "%.4f, ", centroids->data[c * centroids->shape[1] + 1]);
+    for (size_t c = 0; c < k; ++c) fprintf(f, "%.4f, ", cd[c * ccols + 1]);
     fprintf(f, "],\n    z: [");
-    for (size_t c = 0; c < k; ++c) fprintf(f, "%.4f, ", centroids->data[c * centroids->shape[1] + 2]);
+    for (size_t c = 0; c < k; ++c) fprintf(f, "%.4f, ", cd[c * ccols + 2]);
     fprintf(f, "],\n    mode: 'markers',\n");
     fprintf(f, "    name: 'Centroids',\n");
     fprintf(f, "    marker: { size: 9, symbol: 'diamond', color: '#FFFFFF', line: { color: '#000000', width: 2 } },\n");

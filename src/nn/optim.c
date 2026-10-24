@@ -10,11 +10,15 @@
 #include <math.h>
 #include <string.h>
 
-RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float momentum, float weight_decay) {
+static bool optim_is_f32(const RCRE_Tensor* t) {
+    return t != nullptr && t->data != nullptr && t->dtype == RCRE_DTYPE_F32;
+}
+
+RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float momentum, float weight_decay) {
     if (arena == nullptr || params == nullptr || num_params == 0) return nullptr;
     if (!(lr > 0.0f) || !(momentum >= 0.0f && momentum < 1.0f) || !(weight_decay >= 0.0f)) return nullptr;
     for (size_t i = 0; i < num_params; ++i) {
-        if (!params[i] || !params[i]->data) return nullptr;
+        if (!optim_is_f32(params[i])) return nullptr;
     }
 
     RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
@@ -39,14 +43,14 @@ RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_AGTensor*
     return opt;
 }
 
-RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_AGTensor** params, size_t num_params, float lr, float beta1, float beta2, float eps, float weight_decay) {
+RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float beta1, float beta2, float eps, float weight_decay) {
     if (arena == nullptr || params == nullptr || num_params == 0) return nullptr;
     /* beta == 1.0 makes the bias correction 1 - beta^t == 0 -> divide by zero.
      * Reject it up front instead of emitting NaN/Inf after the first step. */
     if (!(lr > 0.0f) || !(beta1 >= 0.0f && beta1 < 1.0f) || !(beta2 >= 0.0f && beta2 < 1.0f)
         || !(eps > 0.0f) || !(weight_decay >= 0.0f)) return nullptr;
     for (size_t i = 0; i < num_params; ++i) {
-        if (!params[i] || !params[i]->data) return nullptr;
+        if (!optim_is_f32(params[i])) return nullptr;
     }
 
     RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
@@ -82,12 +86,14 @@ void rcre_tensor_optim_step(RCRE_TensorOptim* opt) {
 
     if (opt->type == RCRE_OPTIM_SGD) {
         for (size_t p = 0; p < opt->num_params; ++p) {
-            RCRE_AGTensor* t = opt->params[p];
+            RCRE_Tensor* t = opt->params[p];
+            if (t->grad == nullptr) continue; /* borrowed param without grad buffer */
+            float* td = rcre_tensor_f32_data(t);
             float* v_mom = opt->v_momentum[p];
             for (size_t i = 0; i < t->numel; ++i) {
-                float g = t->grad[i] + opt->weight_decay * t->data[i];
+                float g = t->grad[i] + opt->weight_decay * td[i];
                 v_mom[i] = opt->momentum * v_mom[i] + g;
-                t->data[i] -= opt->lr * v_mom[i];
+                td[i] -= opt->lr * v_mom[i];
             }
         }
     } else if (opt->type == RCRE_OPTIM_ADAMW) {
@@ -102,14 +108,16 @@ void rcre_tensor_optim_step(RCRE_TensorOptim* opt) {
         float bias_corr2 = 1.0f - powf(b2, (float)opt->step_count);
 
         for (size_t p = 0; p < opt->num_params; ++p) {
-            RCRE_AGTensor* t = opt->params[p];
+            RCRE_Tensor* t = opt->params[p];
+            if (t->grad == nullptr) continue; /* borrowed param without grad buffer */
+            float* td = rcre_tensor_f32_data(t);
             float* m_arr = opt->m[p];
             float* v_arr = opt->v[p];
 
             for (size_t i = 0; i < t->numel; ++i) {
                 float g = t->grad[i];
                 /* Decoupled weight decay */
-                t->data[i] -= lr * wd * t->data[i];
+                td[i] -= lr * wd * td[i];
 
                 m_arr[i] = b1 * m_arr[i] + (1.0f - b1) * g;
                 v_arr[i] = b2 * v_arr[i] + (1.0f - b2) * (g * g);
@@ -117,7 +125,7 @@ void rcre_tensor_optim_step(RCRE_TensorOptim* opt) {
                 float m_hat = m_arr[i] / bias_corr1;
                 float v_hat = v_arr[i] / bias_corr2;
 
-                t->data[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+                td[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
             }
         }
     }
@@ -126,7 +134,7 @@ void rcre_tensor_optim_step(RCRE_TensorOptim* opt) {
 void rcre_tensor_optim_zero_grad(RCRE_TensorOptim* opt) {
     if (opt == nullptr) return;
     for (size_t p = 0; p < opt->num_params; ++p) {
-        rcre_ag_tensor_zero_grad(opt->params[p]);
+        rcre_tensor_zero_grad(opt->params[p]);
     }
 }
 

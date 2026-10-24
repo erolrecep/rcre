@@ -11,11 +11,14 @@
 #include <stdio.h>
 #include <string.h>
 
-static uint32_t g_visited_epoch = 1;
-
-/* NOTE: g_visited_epoch is process-global and not thread-safe: concurrent
- * scalar backward() calls from multiple threads can interleave epochs.
- * The tensor-tape engine (heap-owned, per-tape) has no such constraint. */
+/* Per-thread visited-epoch counter (C11 thread_local). Marking is done by
+ * epoch comparison instead of clearing `visited_id` after every traversal,
+ * and each thread owns its own counter, so concurrent scalar backward()
+ * calls on DISJOINT graphs from different threads are safe. Traversing the
+ * same graph from two threads simultaneously is still not supported (grad
+ * accumulation is not atomic). Wraparound needs 2^32 traversals per thread.
+ */
+static thread_local uint32_t g_visited_epoch = 1;
 
 static RCRE_ScalarVal* rcre_scalar_alloc_internal(RCRE_GraphCtx* ctx, bool is_param) {
     if (ctx == nullptr) return nullptr;
@@ -268,14 +271,74 @@ static void scalar_vec_push(RCRE_ValVec* vec, RCRE_ScalarVal* v) {
     vec->items[vec->count++] = v;
 }
 
-static void build_topo(RCRE_ScalarVal* v, uint32_t epoch, RCRE_ValVec* topo) {
-    if (v == nullptr || v->visited_id == epoch) {
-        return;
+/* Iterative postorder topological sort (explicit stack).
+ *
+ * The previous recursive DFS consumed ~100 bytes of C stack per node, so a
+ * chain of ~50k nodes (plausible for unrolled RNNs or JIT-generated DAGs)
+ * overflowed an 8 MB stack. The explicit frame stack lives on the heap and
+ * supports arbitrarily deep chains. Cycles are not detected: as before, a
+ * back-edge is simply treated as an already-visited node.
+ */
+typedef struct {
+    RCRE_ScalarVal* node;
+    uint8_t         stage; /* 0 = entering, 1 = children done, emit node */
+} topo_frame_t;
+
+typedef struct {
+    topo_frame_t* frames;
+    size_t        count;
+    size_t        capacity;
+} RCRE_FrameStack;
+
+static bool frame_push(RCRE_FrameStack* fs, RCRE_ScalarVal* node, uint8_t stage) {
+    if (fs->count >= fs->capacity) {
+        size_t new_cap = (fs->capacity == 0) ? 256 : fs->capacity * 2;
+        topo_frame_t* nf = (topo_frame_t*)realloc(fs->frames, new_cap * sizeof(topo_frame_t));
+        if (!nf) return false; /* OOM: old stack intact; traversal stops early */
+        fs->frames = nf;
+        fs->capacity = new_cap;
     }
-    v->visited_id = epoch;
-    if (v->prev[0] != nullptr) build_topo(v->prev[0], epoch, topo);
-    if (v->prev[1] != nullptr) build_topo(v->prev[1], epoch, topo);
-    scalar_vec_push(topo, v);
+    fs->frames[fs->count].node = node;
+    fs->frames[fs->count].stage = stage;
+    fs->count++;
+    return true;
+}
+
+static bool build_topo(RCRE_ScalarVal* root, uint32_t epoch, RCRE_ValVec* topo) {
+    if (root == nullptr) return true;
+
+    RCRE_FrameStack fs = { .frames = nullptr, .count = 0, .capacity = 0 };
+    if (!frame_push(&fs, root, 0)) return false;
+
+    while (fs.count > 0) {
+        topo_frame_t* top = &fs.frames[fs.count - 1];
+        RCRE_ScalarVal* v = top->node;
+
+        if (top->stage == 0) {
+            if (v->visited_id == epoch) {
+                fs.count--; /* fully processed already (DAG sharing) */
+                continue;
+            }
+            v->visited_id = epoch;
+            top->stage = 1;
+            /* Push prev[1] first so prev[0]'s subtree is emitted first,
+             * matching the old recursive child order exactly. A failed
+             * push aborts the traversal (caller bails: partial topo would
+             * produce silently wrong gradients). */
+            if (v->prev[1] != nullptr && v->prev[1]->visited_id != epoch) {
+                if (!frame_push(&fs, v->prev[1], 0)) { free(fs.frames); return false; }
+            }
+            if (v->prev[0] != nullptr && v->prev[0]->visited_id != epoch) {
+                if (!frame_push(&fs, v->prev[0], 0)) { free(fs.frames); return false; }
+            }
+        } else {
+            fs.count--;
+            scalar_vec_push(topo, v);
+        }
+    }
+
+    free(fs.frames);
+    return true;
 }
 
 void rcre_scalar_backward(RCRE_ScalarVal* root) {
@@ -283,7 +346,10 @@ void rcre_scalar_backward(RCRE_ScalarVal* root) {
 
     uint32_t epoch = ++g_visited_epoch;
     RCRE_ValVec topo = { .items = nullptr, .count = 0, .capacity = 0 };
-    build_topo(root, epoch, &topo);
+    if (!build_topo(root, epoch, &topo)) {
+        free(topo.items); /* OOM: no gradient update rather than a wrong one */
+        return;
+    }
 
     root->grad = 1.0;
 
@@ -303,7 +369,10 @@ void rcre_scalar_zero_grad(RCRE_ScalarVal* root) {
     if (root == nullptr) return;
     uint32_t epoch = ++g_visited_epoch;
     RCRE_ValVec topo = { .items = nullptr, .count = 0, .capacity = 0 };
-    build_topo(root, epoch, &topo);
+    if (!build_topo(root, epoch, &topo)) {
+        free(topo.items);
+        return;
+    }
     for (size_t i = 0; i < topo.count; ++i) {
         topo.items[i]->grad = 0.0;
     }
@@ -324,7 +393,11 @@ bool rcre_scalar_export_dot(RCRE_ScalarVal* root, const char* filename) {
 
     uint32_t epoch = ++g_visited_epoch;
     RCRE_ValVec topo = { .items = nullptr, .count = 0, .capacity = 0 };
-    build_topo(root, epoch, &topo);
+    if (!build_topo(root, epoch, &topo)) {
+        fclose(f);
+        remove(filename); /* leave no partial artifact behind */
+        return false;
+    }
 
     for (size_t i = 0; i < topo.count; ++i) {
         RCRE_ScalarVal* n = topo.items[i];

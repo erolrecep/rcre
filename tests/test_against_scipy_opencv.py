@@ -21,11 +21,15 @@ from sklearn.decomposition import PCA
 class RCRE_Tensor(ctypes.Structure):
     _fields_ = [
         ("data", ctypes.c_void_p),
+        ("grad", ctypes.POINTER(ctypes.c_float)),
         ("shape", ctypes.c_size_t * 4),
         ("strides", ctypes.c_ssize_t * 4),
+        ("numel", ctypes.c_size_t),
         ("ndim", ctypes.c_uint8),
         ("dtype", ctypes.c_int),
         ("layout", ctypes.c_int),
+        ("is_view", ctypes.c_bool),
+        ("label", ctypes.c_char_p),
     ]
 
 # DType enum

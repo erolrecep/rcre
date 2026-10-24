@@ -41,6 +41,19 @@ extern "C" {
 #endif
 
 /* ========================================================================= */
+/* Debug Hooks                                                               */
+/* ========================================================================= */
+
+/* Define RCRE_DEBUG before including rcre.h (or compile with -DDEBUG) to
+ * enable loud diagnostics: out-of-range label indices in loss functions are
+ * reported to stderr (and still clamped) instead of failing silently. */
+#ifndef RCRE_DEBUG
+  #if defined(DEBUG) || defined(_DEBUG)
+    #define RCRE_DEBUG 1
+  #endif
+#endif
+
+/* ========================================================================= */
 /* Status & Error Codes                                                      */
 /* ========================================================================= */
 
@@ -104,6 +117,10 @@ RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity);
  * @param size Number of bytes requested.
  * @param align Alignment boundary (must be power of two, defaults to 64).
  * @return Aligned memory pointer, or NULL if arena capacity exceeded.
+ *
+ * Note: the returned pointer is aligned UP to `align`, so the allocation
+ * consumes `size + padding` (padding < align). Requesting exactly the free
+ * remainder can therefore fail even though `size <= free_capacity`.
  */
 RCRE_NODISCARD void* rcre_arena_alloc(RCRE_Arena* arena, size_t size, size_t align);
 
@@ -148,12 +165,25 @@ void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx);
 
 typedef struct RCRE_Tensor {
     void*         data;            /* Pointer to element (0, 0, ...)               */
+    float*        grad;            /* Backprop buffer (training); NULL otherwise   */
     size_t        shape[4];        /* Dimensions (rank 1 to 4)                     */
     ptrdiff_t     strides[4];      /* Step in elements per dimension               */
+    size_t        numel;           /* Cached element count (set at construction;   */
+                                   /* shape/strides are immutable afterwards)      */
     uint8_t       ndim;            /* Rank (1 to 4)                                */
     RCRE_DType    dtype;
     RCRE_Layout   layout;
+    bool          is_view;         /* true: data owned elsewhere (slice/permute/…) */
+    const char*   label;           /* Optional name (visualization/debug); NULL ok */
 } RCRE_Tensor;
+
+/**
+ * @brief Typed accessor for F32 tensor data (single source of the float cast
+ *        used by the autograd/nn training layer and user training code).
+ */
+RCRE_NODISCARD static inline float* rcre_tensor_f32_data(const RCRE_Tensor* t) {
+    return (float*)t->data;
+}
 
 /**
  * @brief Allocates a new contiguous tensor inside caller-supplied arena.

@@ -67,6 +67,8 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_create(const size_t* shape, uint8_t ndim,
     t.layout = layout;
     memcpy(t.shape, shape, ndim * sizeof(size_t));
     compute_contiguous_strides(shape, ndim, t.strides);
+    t.numel = rcre_tensor_numel(&t);
+    t.is_view = false; /* owns its arena allocation */
 
     size_t total_bytes = rcre_tensor_nbytes(&t);
     t.data = rcre_arena_alloc(arena, total_bytes, 64);
@@ -92,6 +94,8 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_from_buffer(void* data, const size_t* sha
     t.layout = layout;
     memcpy(t.shape, shape, ndim * sizeof(size_t));
     compute_contiguous_strides(shape, ndim, t.strides);
+    t.numel = rcre_tensor_numel(&t);
+    t.is_view = true;  /* borrows caller-owned memory */
 
     return t;
 }
@@ -118,6 +122,9 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_slice(const RCRE_Tensor* src,
     }
 
     dst.data = (uint8_t*)src->data + (offset_elements * elem_size);
+    dst.numel = rcre_tensor_numel(&dst);
+    dst.grad = nullptr; /* parent grad buffer is indexed in parent coordinates */
+    dst.is_view = true;
     return dst;
 }
 
@@ -148,6 +155,8 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_reshape(const RCRE_Tensor* src,
     dst.ndim = new_ndim;
     memcpy(dst.shape, new_shape, new_ndim * sizeof(size_t));
     compute_contiguous_strides(new_shape, new_ndim, dst.strides);
+    dst.grad = nullptr; /* layout changed: parent grad is not addressable */
+    dst.is_view = true;
 
     return dst;
 }
@@ -173,6 +182,8 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_permute(const RCRE_Tensor* src,
         dst.shape[i] = src->shape[order[i]];
         dst.strides[i] = src->strides[order[i]];
     }
+    dst.grad = nullptr; /* strides changed: parent grad is not addressable */
+    dst.is_view = true;
 
     return dst;
 }
@@ -192,6 +203,8 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_transpose(const RCRE_Tensor* src,
     ptrdiff_t temp_stride = dst.strides[dim0];
     dst.strides[dim0] = dst.strides[dim1];
     dst.strides[dim1] = temp_stride;
+    dst.grad = nullptr; /* strides changed: parent grad is not addressable */
+    dst.is_view = true;
 
     return dst;
 }

@@ -122,12 +122,12 @@ tests/
   * *Purpose*: Tests scalar reverse-mode automatic differentiation on `RCRE_ScalarVal`.
   * *Key Invariants*: Validates forward evaluation and backward chain-rule gradient accumulation across multi-branch DAGs ($+$, $-$, $*$, $/$, $\text{pow}$), transcendental operations ($\tanh, \text{exp}, \text{log}, \text{ReLU}, \text{Sigmoid}$), and Graphviz `.dot` visual export.
 * **[`test_autograd_tensor.c`](test_autograd_tensor.c)**:
-  * *Purpose*: Tests high-performance dynamic tensor tape autograd on `RCRE_AGTensor`.
+  * *Purpose*: Tests high-performance dynamic tensor tape autograd on the unified `RCRE_Tensor` (v0.2.2: the separate `RCRE_AGTensor` type and bridge were removed).
   * *Key Invariants*:
     - **`test_tensor_tape_matmul_and_backward`**: Validates matrix multiplication Vector-Jacobian Products ($dA = dY \cdot B^T$ and $dB = A^T \cdot dY$) against analytical calculus.
     - **`test_tensor_tape_add_bias_and_activations`**: Validates row-broadcast bias addition and column-wise gradient reduction ($db = \sum_i dY_i$).
     - **`test_tape_grow_then_rewind`**: Critical regression test ensuring the tape's heap-owned node array survives dynamic doubling across `rcre_arena_temp_end()` activation scratchpad rewinds.
-    - **`test_autograd_shape_validation`**: Validates dimension mismatch rejection for elementwise and broadcast operations.
+    - **`test_autograd_shape_validation`**: Validates dimension mismatch rejection, non-F32 dtype rejection, and that plain core F32 tensors (value type) feed autograd operators directly.
 * **[`test_nn_train.c`](test_nn_train.c)**:
   * *Purpose*: Tests loss functions, data ingestion, and optimization loops.
   * *Key Invariants*:
@@ -140,27 +140,27 @@ tests/
 
 ---
 
-### 5. Merger Hardening & Gap-Pinning ([`test_merger_report.c`](test_merger_report.c))
+### 5. Merger Review Findings — Regressions & v0.2.2 Contracts ([`test_merger_report.c`](test_merger_report.c))
 
 This dedicated test suite maps directly to the architectural merger review findings, split into two distinct parts:
 
 #### Part 1: Granular Regressions & Bug Fixes
-* **`test_agtensor_shape_zeroed_beyond_ndim`**: Verifies that `RCRE_AGTensor` is zero-initialized on creation so dimensions $\ge \text{ndim}$ always read 0, preventing stack/arena garbage reads.
+* **`test_tensor_alloc_shape_zeroed_beyond_ndim`**: Verifies that `rcre_tensor_alloc()` zero-initializes the struct so dimensions $\ge \text{ndim}$ always read 0, preventing stack/arena garbage reads.
 * **`test_csv_old_boundary_and_dynamic_growth`**: Stresses the CSV loader past the previous 4,096-byte limit:
   - Line length of 4,102 chars (just past old cap).
   - A 20,000-column, ~120 KB line proving unbounded dynamic line growth.
   - Final lines without a trailing newline.
-* **`test_from_tensor_dtype_matrix`**: Enforces the type contract of `rcre_ag_from_tensor()`. Strictly rejects `U8` and `I32` tensors, while accepting `F32` with full shape, stride, and view preservation.
+* **`test_autograd_ops_reject_non_f32`**: Pins the v0.2.2 dtype gate: every autograd/optimizer entry point rejects `U8`/`I32` tensors with `NULL` (the gate formerly in `rcre_ag_from_tensor()` now lives in the ops), while core F32 tensors are accepted.
 * **`test_tape_arena_exhaustion_graceful_null`**: Guarantees that when an arena runs out of memory, autograd operations fail gracefully with `nullptr` rather than crashing or causing undefined behavior, and the arena recovers normally after a reset.
 * **`test_batch_iter_y_only_undersized`**: Independently isolates and tests destination buffer bounds checking on regression targets.
 * **`test_unified_rng_determinism`**: Verifies that the unified XorShift64* PRNG ([`src/core/rcre_rng.h`](../src/core/rcre_rng.h)) produces bit-identical sequences across seeds and guarantees reproducible Xavier/He weight initialization.
 
-#### Part 2: Architectural Gap Pinning & "CONTINUE HERE" Roadmaps
-* **`test_tensor_bridge_roundtrip`**: Pins the exact zero-copy roundtrip between `RCRE_AGTensor` and `RCRE_Tensor` (`AGTensor` $\to$ `RCRE_Tensor` $\to$ `AGTensor` $\to$ `RCRE_Tensor`), proving pointer identity, shape fidelity, and write-propagation.
-* **`test_scalar_deep_chain_recursion_ceiling`**: Pins the stack recursion ceiling of the scalar reverse-mode DFS. Differentiates a 20,000-deep arithmetic chain (40,001 DAG nodes) on a standard 8 MB stack without overflow. Outlines the roadmap to convert `build_topo()` into an iterative, arena-backed traversal for WebAssembly (64 KB stack) targets.
-* **`test_loss_dual_write_contract`**: Explicitly pins the dual-write contract for loss gradients: when a separate `grad_out` tensor is provided, gradient values are written to both `.grad` and `.data`; when `grad_out == preds`, only `.grad` is updated, preserving forward predictions in `.data`.
-* **`test_cross_entropy_out_of_range_clamp`**: Pins the behavior of categorical cross-entropy when class indices exceed $C - 1$, guaranteeing deterministic clamping to the boundary class.
-* **`test_scalar_epoch_reuse_single_thread`**: Verifies that the global visited-epoch re-initializes cleanly across multiple backward passes on the same computational graph.
+#### Part 2: v0.2.2 Unified-Engine Contracts (previously "CONTINUE HERE" items)
+* **`test_unified_core_view_feeds_autograd`**: Pins the type-unification payoff — core value-style F32 tensors feed autograd operators directly (no bridge), backward silently skips inputs without a `grad` buffer, and core view ops on training tensors (`rcre_tensor_slice` / `rcre_tensor_reshape_view`) never share the parent's grad buffer.
+* **`test_scalar_deep_chain_iterative_topo`**: Pins the iterative (explicit heap frame stack) topological sort: a 100,000-deep differentiable chain differentiates correctly, so scalar AD is no longer bounded by the C call stack (safe for WASM 64 KB stacks / embedded).
+* **`test_loss_grad_only_contract`**: Pins the retired dual-write contract: loss gradients land in `grad_out->grad` ONLY; the forward `.data` buffer is never modified (sentinel-pinned), whether `grad_out` is separate or `grad_out == preds`; borrowed views receive the loss value without a gradient.
+* **`test_cross_entropy_clamp_and_label_validation`**: Pins the cross-entropy failure policy — out-of-range class indices clamp to the boundary class (behaviour-identical), and the new `rcre_data_validate_labels()` reports the first invalid index (or −1) for dataset hygiene.
+* **`test_scalar_epoch_reuse_single_thread`**: Verifies that the now-`thread_local` visited-epoch re-initializes cleanly across multiple backward passes on the same computational graph.
 
 ---
 

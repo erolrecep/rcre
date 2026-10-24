@@ -18,22 +18,22 @@ static void test_tensor_tape_matmul_and_backward(void) {
     ASSERT_NOT_NULL(tape);
 
     /* A: [2, 3], B: [3, 2] */
-    RCRE_AGTensor* A = rcre_ag_tensor_create_2d(arena, 2, 3);
-    RCRE_AGTensor* B = rcre_ag_tensor_create_2d(arena, 3, 2);
+    RCRE_Tensor* A = rcre_tensor_alloc_2d(arena, 2, 3);
+    RCRE_Tensor* B = rcre_tensor_alloc_2d(arena, 3, 2);
     ASSERT_NOT_NULL(A);
     ASSERT_NOT_NULL(B);
 
     /* Populate A */
-    A->data[0] = 1.0f; A->data[1] = 2.0f; A->data[2] = 3.0f;
-    A->data[3] = 4.0f; A->data[4] = 5.0f; A->data[5] = 6.0f;
+    rcre_tensor_f32_data(A)[0] = 1.0f; rcre_tensor_f32_data(A)[1] = 2.0f; rcre_tensor_f32_data(A)[2] = 3.0f;
+    rcre_tensor_f32_data(A)[3] = 4.0f; rcre_tensor_f32_data(A)[4] = 5.0f; rcre_tensor_f32_data(A)[5] = 6.0f;
 
     /* Populate B */
-    B->data[0] = 7.0f;  B->data[1] = 8.0f;
-    B->data[2] = 9.0f;  B->data[3] = 1.0f;
-    B->data[4] = 2.0f;  B->data[5] = 3.0f;
+    rcre_tensor_f32_data(B)[0] = 7.0f;  rcre_tensor_f32_data(B)[1] = 8.0f;
+    rcre_tensor_f32_data(B)[2] = 9.0f;  rcre_tensor_f32_data(B)[3] = 1.0f;
+    rcre_tensor_f32_data(B)[4] = 2.0f;  rcre_tensor_f32_data(B)[5] = 3.0f;
 
     /* Forward: C = A * B */
-    RCRE_AGTensor* C = rcre_autograd_matmul(tape, A, B);
+    RCRE_Tensor* C = rcre_autograd_matmul(tape, A, B);
     ASSERT_NOT_NULL(C);
     ASSERT_UINT_EQ(2, C->shape[0]);
     ASSERT_UINT_EQ(2, C->shape[1]);
@@ -44,10 +44,10 @@ static void test_tensor_tape_matmul_and_backward(void) {
        C[1,0] = 4*7 + 5*9 + 6*2 = 28 + 45 + 12 = 85
        C[1,1] = 4*8 + 5*1 + 6*3 = 32 + 5 + 18 = 55
     */
-    ASSERT_FLOAT_NEAR(31.0f, C->data[0], EPSILON);
-    ASSERT_FLOAT_NEAR(19.0f, C->data[1], EPSILON);
-    ASSERT_FLOAT_NEAR(85.0f, C->data[2], EPSILON);
-    ASSERT_FLOAT_NEAR(55.0f, C->data[3], EPSILON);
+    ASSERT_FLOAT_NEAR(31.0f, rcre_tensor_f32_data(C)[0], EPSILON);
+    ASSERT_FLOAT_NEAR(19.0f, rcre_tensor_f32_data(C)[1], EPSILON);
+    ASSERT_FLOAT_NEAR(85.0f, rcre_tensor_f32_data(C)[2], EPSILON);
+    ASSERT_FLOAT_NEAR(55.0f, rcre_tensor_f32_data(C)[3], EPSILON);
 
     /* Seed output gradients dC = 1 */
     C->grad[0] = 1.0f; C->grad[1] = 1.0f;
@@ -98,30 +98,30 @@ static void test_tensor_tape_add_bias_and_activations(void) {
     ASSERT_NOT_NULL(tape);
 
     /* X: [2, 2], bias: [2] */
-    RCRE_AGTensor* X = rcre_ag_tensor_create_2d(arena, 2, 2);
-    RCRE_AGTensor* bias = rcre_ag_tensor_create_1d(arena, 2);
+    RCRE_Tensor* X = rcre_tensor_alloc_2d(arena, 2, 2);
+    RCRE_Tensor* bias = rcre_tensor_alloc_1d(arena, 2);
 
-    X->data[0] = -2.0f; X->data[1] = 1.0f;
-    X->data[2] = 3.0f;  X->data[3] = -4.0f;
+    rcre_tensor_f32_data(X)[0] = -2.0f; rcre_tensor_f32_data(X)[1] = 1.0f;
+    rcre_tensor_f32_data(X)[2] = 3.0f;  rcre_tensor_f32_data(X)[3] = -4.0f;
 
-    bias->data[0] = 0.5f;
-    bias->data[1] = -0.5f;
+    rcre_tensor_f32_data(bias)[0] = 0.5f;
+    rcre_tensor_f32_data(bias)[1] = -0.5f;
 
     /* Add bias */
-    RCRE_AGTensor* Z = rcre_autograd_add_bias(tape, X, bias);
+    RCRE_Tensor* Z = rcre_autograd_add_bias(tape, X, bias);
     /* Z: [-1.5, 0.5; 3.5, -4.5] */
-    ASSERT_FLOAT_NEAR(-1.5f, Z->data[0], EPSILON);
-    ASSERT_FLOAT_NEAR(0.5f,  Z->data[1], EPSILON);
-    ASSERT_FLOAT_NEAR(3.5f,  Z->data[2], EPSILON);
-    ASSERT_FLOAT_NEAR(-4.5f, Z->data[3], EPSILON);
+    ASSERT_FLOAT_NEAR(-1.5f, rcre_tensor_f32_data(Z)[0], EPSILON);
+    ASSERT_FLOAT_NEAR(0.5f,  rcre_tensor_f32_data(Z)[1], EPSILON);
+    ASSERT_FLOAT_NEAR(3.5f,  rcre_tensor_f32_data(Z)[2], EPSILON);
+    ASSERT_FLOAT_NEAR(-4.5f, rcre_tensor_f32_data(Z)[3], EPSILON);
 
     /* ReLU */
-    RCRE_AGTensor* A = rcre_autograd_relu(tape, Z);
+    RCRE_Tensor* A = rcre_autograd_relu(tape, Z);
     /* A: [0.0, 0.5; 3.5, 0.0] */
-    ASSERT_FLOAT_NEAR(0.0f, A->data[0], EPSILON);
-    ASSERT_FLOAT_NEAR(0.5f, A->data[1], EPSILON);
-    ASSERT_FLOAT_NEAR(3.5f, A->data[2], EPSILON);
-    ASSERT_FLOAT_NEAR(0.0f, A->data[3], EPSILON);
+    ASSERT_FLOAT_NEAR(0.0f, rcre_tensor_f32_data(A)[0], EPSILON);
+    ASSERT_FLOAT_NEAR(0.5f, rcre_tensor_f32_data(A)[1], EPSILON);
+    ASSERT_FLOAT_NEAR(3.5f, rcre_tensor_f32_data(A)[2], EPSILON);
+    ASSERT_FLOAT_NEAR(0.0f, rcre_tensor_f32_data(A)[3], EPSILON);
 
     /* Seed dA = 1 */
     A->grad[0] = 1.0f; A->grad[1] = 1.0f;
@@ -157,24 +157,24 @@ static void test_tape_grow_then_rewind(void) {
     RCRE_TensorTape* tape = rcre_tensor_tape_create(tape_arena, 4); /* tiny cap -> forces growth */
     ASSERT_NOT_NULL(tape);
 
-    RCRE_AGTensor* X = rcre_ag_tensor_create_2d(perma, 4, 8);
-    RCRE_AGTensor* W = rcre_ag_tensor_create_2d(perma, 8, 8);
+    RCRE_Tensor* X = rcre_tensor_alloc_2d(perma, 4, 8);
+    RCRE_Tensor* W = rcre_tensor_alloc_2d(perma, 8, 8);
     ASSERT_NOT_NULL(X);
     ASSERT_NOT_NULL(W);
-    for (int i = 0; i < 32; ++i) X->data[i] = 0.25f;
-    for (int i = 0; i < 64; ++i) W->data[i] = 0.1f;
+    for (int i = 0; i < 32; ++i) rcre_tensor_f32_data(X)[i] = 0.25f;
+    for (int i = 0; i < 64; ++i) rcre_tensor_f32_data(W)[i] = 0.1f;
 
     float run_grads[2];
     for (int batch = 0; batch < 2; ++batch) {
         RCRE_ArenaTemp temp = rcre_arena_temp_begin(tape_arena);
         rcre_tensor_tape_reset(tape);
-        rcre_ag_tensor_zero_grad(X); /* backward accumulates: start clean */
+        rcre_tensor_zero_grad(X); /* backward accumulates: start clean */
 
-        RCRE_AGTensor* cur = X;
+        RCRE_Tensor* cur = X;
         for (int i = 0; i < 8; ++i) {
-            RCRE_AGTensor* nxt = rcre_autograd_matmul(tape, cur, W);
+            RCRE_Tensor* nxt = rcre_autograd_matmul(tape, cur, W);
             ASSERT_NOT_NULL(nxt);
-            rcre_ag_tensor_zero_grad(nxt);
+            rcre_tensor_zero_grad(nxt);
             nxt->grad[0] = 1.0f;
             cur = nxt;
         }
@@ -200,29 +200,39 @@ static void test_autograd_shape_validation(void) {
     ASSERT_NOT_NULL(tape);
 
     /* add with mismatched numel must be rejected */
-    RCRE_AGTensor* A = rcre_ag_tensor_create_2d(arena, 2, 2); /* numel 4 */
-    RCRE_AGTensor* B = rcre_ag_tensor_create_2d(arena, 3, 1); /* numel 3 */
+    RCRE_Tensor* A = rcre_tensor_alloc_2d(arena, 2, 2); /* numel 4 */
+    RCRE_Tensor* B = rcre_tensor_alloc_2d(arena, 3, 1); /* numel 3 */
     ASSERT_NOT_NULL(A);
     ASSERT_NOT_NULL(B);
     ASSERT_NULL(rcre_autograd_add(tape, A, B));
 
     /* add_bias with wrong bias width must be rejected */
-    RCRE_AGTensor* bias2 = rcre_ag_tensor_create_1d(arena, 2);
-    RCRE_AGTensor* bias3 = rcre_ag_tensor_create_1d(arena, 3);
+    RCRE_Tensor* bias2 = rcre_tensor_alloc_1d(arena, 2);
+    RCRE_Tensor* bias3 = rcre_tensor_alloc_1d(arena, 3);
     ASSERT_NOT_NULL(bias2);
     ASSERT_NOT_NULL(bias3);
     ASSERT_NOT_NULL(rcre_autograd_add_bias(tape, A, bias2)); /* valid: 2 cols */
     ASSERT_NULL(rcre_autograd_add_bias(tape, A, bias3));     /* invalid: 3 cols */
 
-    /* from_tensor must refuse non-F32 buffers */
+    /* Autograd ops must refuse non-F32 tensors (the dtype gate that used to
+     * live in rcre_ag_from_tensor now lives in every op, via is_f32()). */
     uint8_t px[4] = { 200, 100, 50, 250 };
     RCRE_Tensor img = {
         .data = px, .ndim = 1, .dtype = RCRE_DTYPE_U8, .layout = RCRE_LAYOUT_TABULAR,
-        .shape = { 4, 1, 1, 1 }, .strides = { 1, 0, 0, 0 }
+        .shape = { 4, 1, 1, 1 }, .strides = { 1, 0, 0, 0 }, .numel = 4
     };
-    RCRE_AGTensor empty = rcre_ag_from_tensor(&img, nullptr, "px");
-    ASSERT_NULL(empty.data);
-    ASSERT_UINT_EQ(0, empty.numel);
+    ASSERT_NULL(rcre_autograd_relu(tape, &img));
+    ASSERT_NULL(rcre_autograd_add(tape, A, &img)); /* mixed numel too, but dtype fails first */
+
+    /* A plain core F32 tensor (value type, from_buffer) feeds autograd ops
+     * directly — the payoff of the v0.2.2 type unification. */
+    float fx[4] = { -1.0f, 2.0f, -3.0f, 4.0f };
+    size_t cshape[2] = { 2, 2 };
+    RCRE_Tensor core = rcre_tensor_from_buffer(fx, cshape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR);
+    RCRE_Tensor* ok = rcre_autograd_relu(tape, &core);
+    ASSERT_NOT_NULL(ok);
+    ASSERT_FLOAT_NEAR(0.0f, rcre_tensor_f32_data(ok)[0], 1e-6f);
+    ASSERT_FLOAT_NEAR(2.0f, rcre_tensor_f32_data(ok)[1], 1e-6f);
 
     rcre_tensor_tape_destroy(tape);
     rcre_arena_destroy(arena);

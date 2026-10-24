@@ -38,11 +38,15 @@ class RCRE_Arena(Structure):
 class RCRE_Tensor(Structure):
     _fields_ = [
         ("data", c_void_p),
+        ("grad", POINTER(c_float)),
         ("shape", c_size_t * 4),
         ("strides", ctypes.c_ssize_t * 4),
+        ("numel", c_size_t),
         ("ndim", c_uint8),
-        ("dtype", c_uint8),
-        ("layout", c_uint8)
+        ("dtype", c_int),
+        ("layout", c_int),
+        ("is_view", ctypes.c_bool),
+        ("label", c_char_p)
     ]
 
 # Setup C Function Signatures if library is loaded
