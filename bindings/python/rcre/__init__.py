@@ -37,7 +37,6 @@ class RCRE_Arena(Structure):
 
 class RCRE_Tensor(Structure):
     _fields_ = [
-        ("storage", c_void_p),
         ("data", c_void_p),
         ("shape", c_size_t * 4),
         ("strides", ctypes.c_ssize_t * 4),

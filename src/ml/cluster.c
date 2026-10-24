@@ -10,27 +10,8 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* Compute squared Euclidean distance between two D-dimensional vectors */
-static inline float squared_l2_distance(const float* a, const float* b, size_t d) {
-    float sum = 0.0f;
-    for (size_t i = 0; i < d; ++i) {
-        float diff = a[i] - b[i];
-        sum += diff * diff;
-    }
-    return sum;
-}
-
-/* SplitMix64 pseudo-random number generator for reproducible sampling */
-static inline uint64_t rcre_splitmix64(uint64_t* state) {
-    uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-    return z ^ (z >> 31);
-}
-
-static inline float rcre_rand_f32(uint64_t* state) {
-    return (float)((rcre_splitmix64(state) >> 40) * (1.0 / 16777216.0));
-}
+#include "ml_internal.h"
+#define squared_l2_distance rcre_squared_l2_distance
 
 RCRE_NODISCARD int rcre_ml_kmeans_fit_ex(const RCRE_Tensor* X, size_t k,
                                          const RCRE_KMeansParams* params,

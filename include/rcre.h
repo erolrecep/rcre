@@ -45,10 +45,9 @@ typedef enum {
     RCRE_ERR_INVALID_ARG     = -1,
     RCRE_ERR_OUT_OF_MEMORY   = -2,
     RCRE_ERR_SHAPE_MISMATCH  = -3,
-    RCRE_ERR_NOT_CONTIGUOUS  = -4,
-    RCRE_ERR_UNSUPPORTED_OP  = -5,
-    RCRE_ERR_TIMEOUT         = -6,
-    RCRE_ERR_IO              = -7
+    RCRE_ERR_UNSUPPORTED_OP  = -4,
+    RCRE_ERR_TIMEOUT         = -5,
+    RCRE_ERR_IO              = -6
 } RCRE_Status;
 
 /* ========================================================================= */
@@ -58,7 +57,6 @@ typedef enum {
 typedef enum {
     RCRE_DTYPE_U8  = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
     RCRE_DTYPE_I32 = 1, /* 32-bit signed integer (class labels, indices)          */
-    RCRE_DTYPE_F16 = 2, /* 16-bit half precision float                             */
     RCRE_DTYPE_F32 = 3  /* 32-bit single precision float                           */
 } RCRE_DType;
 
@@ -106,19 +104,11 @@ void rcre_arena_reset(RCRE_Arena* arena);
 void rcre_arena_destroy(RCRE_Arena* arena);
 
 /* ========================================================================= */
-/* Storage & Tensor Abstractions (TNS-REQ-01 to TNS-REQ-05)                  */
+/* Tensor Abstraction & Zero-Copy Views (TNS-REQ-01 to TNS-REQ-05)           */
 /* ========================================================================= */
 
-typedef struct RCRE_Storage {
-    void*         raw_data;
-    size_t        size_bytes;
-    atomic_size_t ref_count;
-    bool          is_arena_allocated;
-} RCRE_Storage;
-
 typedef struct RCRE_Tensor {
-    RCRE_Storage* storage;
-    void*         data;            /* Pointer to element (0, 0, ...) inside storage */
+    void*         data;            /* Pointer to element (0, 0, ...)               */
     size_t        shape[4];        /* Dimensions (rank 1 to 4)                     */
     ptrdiff_t     strides[4];      /* Step in elements per dimension               */
     uint8_t       ndim;            /* Rank (1 to 4)                                */
@@ -193,7 +183,7 @@ RCRE_NODISCARD size_t rcre_dtype_size(RCRE_DType dtype);
 typedef struct RCRE_PreprocessSpec {
     size_t      target_shape[4]; /* e.g., [1, 3, 224, 224]                          */
     RCRE_Layout target_layout;   /* HWC or CHW                                      */
-    RCRE_DType  target_dtype;    /* U8, F32, F16                                    */
+    RCRE_DType  target_dtype;    /* U8, F32                                         */
     float       mean[4];         /* Channel-wise normalization: (x - mean) / std    */
     float       std[4];
     bool        preserve_aspect; /* If true, applies letterboxing                   */
@@ -210,6 +200,12 @@ RCRE_NODISCARD int rcre_tensor_adapt(const RCRE_Tensor* src,
 
 /* ========================================================================= */
 /* Concurrency & Threadpool Engine (THR-REQ-01 to THR-REQ-03)                */
+/* Architectural Design: Unix Philosophy (Keep Kernel Primitives Pure &      */
+/* Single-Threaded). RCRE kernel operators (CV filters, FFT, CNN, ML) are    */
+/* strictly deterministic, re-entrant, and single-threaded for universal    */
+/* portability across bare-metal, embedded microcontrollers, and WASM.       */
+/* The threadpool is an opt-in pipeline concurrency engine for orchestrating */
+/* outer batch loops, multi-stream camera feeds, or tile partitioning.       */
 /* ========================================================================= */
 
 typedef struct RCRE_ThreadPool RCRE_ThreadPool;

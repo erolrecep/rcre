@@ -7,6 +7,7 @@
  */
 
 #include "rcre.h"
+#include "ml_internal.h"
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
@@ -43,12 +44,7 @@ struct RCRE_HNSWIndex {
 
 static float compute_distance(const float* a, const float* b, size_t dim, RCRE_MetricType metric) {
     if (metric == RCRE_METRIC_L2) {
-        float sum = 0.0f;
-        for (size_t i = 0; i < dim; ++i) {
-            float diff = a[i] - b[i];
-            sum += diff * diff;
-        }
-        return sum;
+        return rcre_squared_l2_distance(a, b, dim);
     } else {
         /* Cosine distance: 1.0 - (a . b) / (|a| * |b|) */
         float dot = rcre_hal.dot_f32(a, b, dim);

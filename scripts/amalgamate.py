@@ -43,10 +43,22 @@ def clean_file_content(content: str) -> str:
     """Removes local includes that are redundant in amalgamated file."""
     lines = []
     for line in content.splitlines():
-        if re.match(r'^\s*#include\s*["<](rcre\.h|hal_internal\.h)[">]', line):
+        if re.match(r'^\s*#include\s*["<](rcre\.h|hal_internal\.h|ml_internal\.h)[">]', line):
             continue
         lines.append(line)
     return "\n".join(lines)
+
+def verify_symbol_uniqueness(c_files):
+    """Ensures no un-namespaced colliding static function symbols exist."""
+    seen_funcs = {}
+    for c_file in c_files:
+        text = c_file.read_text(encoding="utf-8")
+        for m in re.finditer(r"^(?:static\s+(?:inline\s+)?[\w\s\*]+?)\s+([a-zA-Z0-9_]+)\s*\(", text, re.MULTILINE):
+            name = m.group(1)
+            seen_funcs.setdefault(name, []).append(c_file.name)
+    duplicates = {k: v for k, v in seen_funcs.items() if len(v) > 1}
+    if duplicates:
+        raise ValueError(f"Duplicate static symbols detected during amalgamation: {duplicates}")
 
 def main():
     DIST_DIR.mkdir(parents=True, exist_ok=True)
@@ -54,8 +66,11 @@ def main():
 
     print(f"📦 Amalgamating RCRE into {out_file}...")
 
+    verify_symbol_uniqueness(C_FILES)
+
     header_content = (INCLUDE_DIR / "rcre.h").read_text(encoding="utf-8")
     hal_internal = (SRC_DIR / "hal" / "hal_internal.h").read_text(encoding="utf-8")
+    ml_internal = (SRC_DIR / "ml" / "ml_internal.h").read_text(encoding="utf-8")
 
     out_lines = []
     out_lines.append("/* ========================================================================= */")
@@ -69,6 +84,9 @@ def main():
     out_lines.append("")
     out_lines.append("/* --- Internal Hardware Abstraction Layer Declarations --- */")
     out_lines.append(clean_file_content(hal_internal))
+    out_lines.append("")
+    out_lines.append("/* --- Internal Machine Learning Mathematical Primitives --- */")
+    out_lines.append(clean_file_content(ml_internal))
     out_lines.append("")
 
     for c_file in C_FILES:
@@ -85,7 +103,7 @@ def main():
     out_file.write_text(full_amalgamated, encoding="utf-8")
 
     file_size_kb = len(full_amalgamated.encode('utf-8')) / 1024
-    line_count = len(out_lines)
+    line_count = len(full_amalgamated.splitlines())
     print(f"✅ Generated single-header release: {out_file} ({file_size_kb:.1f} KB, {line_count} lines)")
 
 if __name__ == "__main__":

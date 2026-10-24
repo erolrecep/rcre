@@ -22,6 +22,39 @@ static void ensure_hal_init(void) {
     }
 }
 
+static inline int nn_parse_spatial(const RCRE_Tensor* input, size_t* batch_size,
+                                   size_t* channels, size_t* h, size_t* w) {
+    if (input->ndim == 3) {
+        *batch_size = 1;
+        *channels = input->shape[0];
+        *h = input->shape[1];
+        *w = input->shape[2];
+        return RCRE_OK;
+    } else if (input->ndim == 4) {
+        *batch_size = input->shape[0];
+        *channels = input->shape[1];
+        *h = input->shape[2];
+        *w = input->shape[3];
+        return RCRE_OK;
+    }
+    return RCRE_ERR_SHAPE_MISMATCH;
+}
+
+static inline int nn_ensure_output(RCRE_Tensor* output, const size_t* out_shape, uint8_t out_ndim,
+                                   RCRE_Layout layout, RCRE_Arena* arena) {
+    if (!output->data) {
+        if (!arena) return RCRE_ERR_INVALID_ARG;
+        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, layout, arena);
+        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
+    } else {
+        if (output->ndim != out_ndim) return RCRE_ERR_SHAPE_MISMATCH;
+        for (uint8_t i = 0; i < out_ndim; ++i) {
+            if (output->shape[i] != out_shape[i]) return RCRE_ERR_SHAPE_MISMATCH;
+        }
+    }
+    return RCRE_OK;
+}
+
 /* ========================================================================= */
 /* 2D Spatial Convolution                                                    */
 /* ========================================================================= */
@@ -37,21 +70,9 @@ RCRE_NODISCARD int rcre_nn_conv2d(const RCRE_Tensor* input,
     }
     ensure_hal_init();
 
-    size_t batch_size = 1;
-    size_t in_c = 0, in_h = 0, in_w = 0;
-
-    if (input->ndim == 3) {
-        in_c = input->shape[0];
-        in_h = input->shape[1];
-        in_w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        in_c = input->shape[1];
-        in_h = input->shape[2];
-        in_w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, in_c = 0, in_h = 0, in_w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &in_c, &in_h, &in_w);
+    if (err != RCRE_OK) return err;
 
     if (weights->ndim != 4) {
         return RCRE_ERR_SHAPE_MISMATCH;
@@ -89,16 +110,8 @@ RCRE_NODISCARD int rcre_nn_conv2d(const RCRE_Tensor* input,
         out_shape[3] = out_w;
     }
 
-    if (!output->data) {
-        if (!arena) return RCRE_ERR_INVALID_ARG;
-        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
-        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
-    } else {
-        if (output->ndim != out_ndim) return RCRE_ERR_SHAPE_MISMATCH;
-        for (uint8_t i = 0; i < out_ndim; ++i) {
-            if (output->shape[i] != out_shape[i]) return RCRE_ERR_SHAPE_MISMATCH;
-        }
-    }
+    err = nn_ensure_output(output, out_shape, out_ndim, RCRE_LAYOUT_CHW, arena);
+    if (err != RCRE_OK) return err;
 
     const float* in_ptr = (const float*)input->data;
     const float* w_ptr = (const float*)weights->data;
@@ -169,21 +182,9 @@ RCRE_NODISCARD int rcre_nn_depthwise_conv2d(const RCRE_Tensor* input,
     }
     ensure_hal_init();
 
-    size_t batch_size = 1;
-    size_t in_c = 0, in_h = 0, in_w = 0;
-
-    if (input->ndim == 3) {
-        in_c = input->shape[0];
-        in_h = input->shape[1];
-        in_w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        in_c = input->shape[1];
-        in_h = input->shape[2];
-        in_w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, in_c = 0, in_h = 0, in_w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &in_c, &in_h, &in_w);
+    if (err != RCRE_OK) return err;
 
     size_t k_h = 0, k_w = 0;
     if (weights->ndim == 4) {
@@ -227,16 +228,8 @@ RCRE_NODISCARD int rcre_nn_depthwise_conv2d(const RCRE_Tensor* input,
         out_shape[3] = out_w;
     }
 
-    if (!output->data) {
-        if (!arena) return RCRE_ERR_INVALID_ARG;
-        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
-        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
-    } else {
-        if (output->ndim != out_ndim) return RCRE_ERR_SHAPE_MISMATCH;
-        for (uint8_t i = 0; i < out_ndim; ++i) {
-            if (output->shape[i] != out_shape[i]) return RCRE_ERR_SHAPE_MISMATCH;
-        }
-    }
+    err = nn_ensure_output(output, out_shape, out_ndim, RCRE_LAYOUT_CHW, arena);
+    if (err != RCRE_OK) return err;
 
     const float* in_ptr = (const float*)input->data;
     const float* w_ptr = (const float*)weights->data;
@@ -301,21 +294,9 @@ RCRE_NODISCARD int rcre_nn_pointwise_conv2d(const RCRE_Tensor* input,
     }
     ensure_hal_init();
 
-    size_t batch_size = 1;
-    size_t in_c = 0, h = 0, w = 0;
-
-    if (input->ndim == 3) {
-        in_c = input->shape[0];
-        h = input->shape[1];
-        w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        in_c = input->shape[1];
-        h = input->shape[2];
-        w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, in_c = 0, h = 0, w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &in_c, &h, &w);
+    if (err != RCRE_OK) return err;
 
     size_t out_c = weights->shape[0];
     if (weights->ndim == 2) {
@@ -341,16 +322,8 @@ RCRE_NODISCARD int rcre_nn_pointwise_conv2d(const RCRE_Tensor* input,
         out_shape[3] = w;
     }
 
-    if (!output->data) {
-        if (!arena) return RCRE_ERR_INVALID_ARG;
-        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
-        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
-    } else {
-        if (output->ndim != out_ndim) return RCRE_ERR_SHAPE_MISMATCH;
-        for (uint8_t i = 0; i < out_ndim; ++i) {
-            if (output->shape[i] != out_shape[i]) return RCRE_ERR_SHAPE_MISMATCH;
-        }
-    }
+    err = nn_ensure_output(output, out_shape, out_ndim, RCRE_LAYOUT_CHW, arena);
+    if (err != RCRE_OK) return err;
 
     const float* in_ptr = (const float*)input->data;
     const float* w_ptr = (const float*)weights->data;
@@ -404,21 +377,9 @@ RCRE_NODISCARD int rcre_nn_batchnorm2d(const RCRE_Tensor* input,
     }
     if (eps < 0.0f) eps = 1e-5f;
 
-    size_t batch_size = 1;
-    size_t num_channels = 0, h = 0, w = 0;
-
-    if (input->ndim == 3) {
-        num_channels = input->shape[0];
-        h = input->shape[1];
-        w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        num_channels = input->shape[1];
-        h = input->shape[2];
-        w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, num_channels = 0, h = 0, w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &num_channels, &h, &w);
+    if (err != RCRE_OK) return err;
 
     if (gamma->shape[0] != num_channels || beta->shape[0] != num_channels ||
         mean->shape[0] != num_channels || var->shape[0] != num_channels) {
@@ -543,21 +504,9 @@ RCRE_NODISCARD int rcre_nn_global_avgpool(const RCRE_Tensor* input, RCRE_Tensor*
         return RCRE_ERR_INVALID_ARG;
     }
 
-    size_t batch_size = 1;
-    size_t channels = 0, h = 0, w = 0;
-
-    if (input->ndim == 3) {
-        channels = input->shape[0];
-        h = input->shape[1];
-        w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        channels = input->shape[1];
-        h = input->shape[2];
-        w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, channels = 0, h = 0, w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &channels, &h, &w);
+    if (err != RCRE_OK) return err;
 
     size_t spatial_size = h * w;
     if (spatial_size == 0) return RCRE_ERR_INVALID_ARG;
@@ -634,11 +583,8 @@ RCRE_NODISCARD int rcre_nn_linear(const RCRE_Tensor* input,
         out_shape[1] = out_features;
     }
 
-    if (!output->data) {
-        if (!arena) return RCRE_ERR_INVALID_ARG;
-        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
-        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
-    }
+    int err = nn_ensure_output(output, out_shape, out_ndim, RCRE_LAYOUT_TABULAR, arena);
+    if (err != RCRE_OK) return err;
 
     const float* in_ptr = (const float*)input->data;
     const float* w_ptr = (const float*)weights->data;

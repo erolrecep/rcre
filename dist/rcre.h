@@ -50,10 +50,9 @@ typedef enum {
     RCRE_ERR_INVALID_ARG     = -1,
     RCRE_ERR_OUT_OF_MEMORY   = -2,
     RCRE_ERR_SHAPE_MISMATCH  = -3,
-    RCRE_ERR_NOT_CONTIGUOUS  = -4,
-    RCRE_ERR_UNSUPPORTED_OP  = -5,
-    RCRE_ERR_TIMEOUT         = -6,
-    RCRE_ERR_IO              = -7
+    RCRE_ERR_UNSUPPORTED_OP  = -4,
+    RCRE_ERR_TIMEOUT         = -5,
+    RCRE_ERR_IO              = -6
 } RCRE_Status;
 
 /* ========================================================================= */
@@ -63,7 +62,6 @@ typedef enum {
 typedef enum {
     RCRE_DTYPE_U8  = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
     RCRE_DTYPE_I32 = 1, /* 32-bit signed integer (class labels, indices)          */
-    RCRE_DTYPE_F16 = 2, /* 16-bit half precision float                             */
     RCRE_DTYPE_F32 = 3  /* 32-bit single precision float                           */
 } RCRE_DType;
 
@@ -111,19 +109,11 @@ void rcre_arena_reset(RCRE_Arena* arena);
 void rcre_arena_destroy(RCRE_Arena* arena);
 
 /* ========================================================================= */
-/* Storage & Tensor Abstractions (TNS-REQ-01 to TNS-REQ-05)                  */
+/* Tensor Abstraction & Zero-Copy Views (TNS-REQ-01 to TNS-REQ-05)           */
 /* ========================================================================= */
 
-typedef struct RCRE_Storage {
-    void*         raw_data;
-    size_t        size_bytes;
-    atomic_size_t ref_count;
-    bool          is_arena_allocated;
-} RCRE_Storage;
-
 typedef struct RCRE_Tensor {
-    RCRE_Storage* storage;
-    void*         data;            /* Pointer to element (0, 0, ...) inside storage */
+    void*         data;            /* Pointer to element (0, 0, ...)               */
     size_t        shape[4];        /* Dimensions (rank 1 to 4)                     */
     ptrdiff_t     strides[4];      /* Step in elements per dimension               */
     uint8_t       ndim;            /* Rank (1 to 4)                                */
@@ -198,7 +188,7 @@ RCRE_NODISCARD size_t rcre_dtype_size(RCRE_DType dtype);
 typedef struct RCRE_PreprocessSpec {
     size_t      target_shape[4]; /* e.g., [1, 3, 224, 224]                          */
     RCRE_Layout target_layout;   /* HWC or CHW                                      */
-    RCRE_DType  target_dtype;    /* U8, F32, F16                                    */
+    RCRE_DType  target_dtype;    /* U8, F32                                         */
     float       mean[4];         /* Channel-wise normalization: (x - mean) / std    */
     float       std[4];
     bool        preserve_aspect; /* If true, applies letterboxing                   */
@@ -215,6 +205,12 @@ RCRE_NODISCARD int rcre_tensor_adapt(const RCRE_Tensor* src,
 
 /* ========================================================================= */
 /* Concurrency & Threadpool Engine (THR-REQ-01 to THR-REQ-03)                */
+/* Architectural Design: Unix Philosophy (Keep Kernel Primitives Pure &      */
+/* Single-Threaded). RCRE kernel operators (CV filters, FFT, CNN, ML) are    */
+/* strictly deterministic, re-entrant, and single-threaded for universal    */
+/* portability across bare-metal, embedded microcontrollers, and WASM.       */
+/* The threadpool is an opt-in pipeline concurrency engine for orchestrating */
+/* outer batch loops, multi-stream camera feeds, or tile partitioning.       */
 /* ========================================================================= */
 
 typedef struct RCRE_ThreadPool RCRE_ThreadPool;
@@ -729,6 +725,59 @@ void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
 #endif
 
 #endif /* RCRE_HAL_INTERNAL_H */
+
+/* --- Internal Machine Learning Mathematical Primitives --- */
+/**
+ * @file ml_internal.h
+ * @brief Internal Mathematical & Distance Primitives for RCRE ML Subsystem
+ */
+
+#ifndef RCRE_ML_INTERNAL_H
+#define RCRE_ML_INTERNAL_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <math.h>
+
+/**
+ * @brief Canonical direct squared Euclidean L2 distance between two vectors.
+ */
+static inline float rcre_squared_l2_distance(const float* a, const float* b, size_t d) {
+    float sum = 0.0f;
+    for (size_t i = 0; i < d; ++i) {
+        float diff = a[i] - b[i];
+        sum += diff * diff;
+    }
+    return sum;
+}
+
+/**
+ * @brief Numerically clamped logistic sigmoid activation.
+ */
+static inline float rcre_fast_sigmoidf(float z) {
+    if (z > 16.0f) return 1.0f;
+    if (z < -16.0f) return 0.0f;
+    return 1.0f / (1.0f + expf(-z));
+}
+
+/**
+ * @brief SplitMix64 pseudo-random number generator for reproducible sampling.
+ */
+static inline uint64_t rcre_splitmix64(uint64_t* state) {
+    uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+/**
+ * @brief Uniform floating-point random number generator in range [0.0, 1.0).
+ */
+static inline float rcre_rand_f32(uint64_t* state) {
+    return (float)((rcre_splitmix64(state) >> 40) * (1.0 / 16777216.0));
+}
+
+#endif /* RCRE_ML_INTERNAL_H */
 
 /* --- Source: kernels_scalar.c --- */
 /**
@@ -1894,7 +1943,6 @@ RCRE_NODISCARD size_t rcre_dtype_size(RCRE_DType dtype) {
     switch (dtype) {
         case RCRE_DTYPE_U8:  return 1;
         case RCRE_DTYPE_I32: return 4;
-        case RCRE_DTYPE_F16: return 2;
         case RCRE_DTYPE_F32: return 4;
         default:             return 0;
     }
@@ -2123,6 +2171,10 @@ RCRE_NODISCARD int rcre_tensor_adapt(const RCRE_Tensor* src,
         return RCRE_ERR_INVALID_ARG;
     }
 
+    if (src->dtype != RCRE_DTYPE_U8 && src->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
     /* Extract source dimensions */
     size_t in_h = 0, in_w = 0, in_c = 1;
     size_t stride_y = 0, stride_x = 0, stride_c = 0;
@@ -2319,6 +2371,14 @@ RCRE_NODISCARD int rcre_tensor_adapt(const RCRE_Tensor* src,
  * 
  * Satisfies THR-REQ-01, THR-REQ-02, and THR-REQ-03.
  * Uses atomic fetch-and-add task distribution and pthread/C23 thread workers.
+ *
+ * ARCHITECTURAL DESIGN NOTE (Unix Philosophy — Keep Primitives Single-Threaded):
+ * Core RCRE computational kernels (CV filters, FFT, CNN layers, ML models) are
+ * intentionally designed to be purely deterministic, re-entrant, and single-threaded.
+ * This guarantees 100% portability to bare-metal embedded microcontrollers and WASM
+ * runtimes where OS threads are absent or require SharedArrayBuffer.
+ * This threadpool engine is an opt-in pipeline concurrency tool for orchestrating
+ * outer loops, multi-camera capture streams, or high-level spatial tile decomposition.
  */
 
 #include <stdlib.h>
@@ -3228,6 +3288,39 @@ static void ensure_hal_init(void) {
     }
 }
 
+static inline int nn_parse_spatial(const RCRE_Tensor* input, size_t* batch_size,
+                                   size_t* channels, size_t* h, size_t* w) {
+    if (input->ndim == 3) {
+        *batch_size = 1;
+        *channels = input->shape[0];
+        *h = input->shape[1];
+        *w = input->shape[2];
+        return RCRE_OK;
+    } else if (input->ndim == 4) {
+        *batch_size = input->shape[0];
+        *channels = input->shape[1];
+        *h = input->shape[2];
+        *w = input->shape[3];
+        return RCRE_OK;
+    }
+    return RCRE_ERR_SHAPE_MISMATCH;
+}
+
+static inline int nn_ensure_output(RCRE_Tensor* output, const size_t* out_shape, uint8_t out_ndim,
+                                   RCRE_Layout layout, RCRE_Arena* arena) {
+    if (!output->data) {
+        if (!arena) return RCRE_ERR_INVALID_ARG;
+        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, layout, arena);
+        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
+    } else {
+        if (output->ndim != out_ndim) return RCRE_ERR_SHAPE_MISMATCH;
+        for (uint8_t i = 0; i < out_ndim; ++i) {
+            if (output->shape[i] != out_shape[i]) return RCRE_ERR_SHAPE_MISMATCH;
+        }
+    }
+    return RCRE_OK;
+}
+
 /* ========================================================================= */
 /* 2D Spatial Convolution                                                    */
 /* ========================================================================= */
@@ -3243,21 +3336,9 @@ RCRE_NODISCARD int rcre_nn_conv2d(const RCRE_Tensor* input,
     }
     ensure_hal_init();
 
-    size_t batch_size = 1;
-    size_t in_c = 0, in_h = 0, in_w = 0;
-
-    if (input->ndim == 3) {
-        in_c = input->shape[0];
-        in_h = input->shape[1];
-        in_w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        in_c = input->shape[1];
-        in_h = input->shape[2];
-        in_w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, in_c = 0, in_h = 0, in_w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &in_c, &in_h, &in_w);
+    if (err != RCRE_OK) return err;
 
     if (weights->ndim != 4) {
         return RCRE_ERR_SHAPE_MISMATCH;
@@ -3295,16 +3376,8 @@ RCRE_NODISCARD int rcre_nn_conv2d(const RCRE_Tensor* input,
         out_shape[3] = out_w;
     }
 
-    if (!output->data) {
-        if (!arena) return RCRE_ERR_INVALID_ARG;
-        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
-        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
-    } else {
-        if (output->ndim != out_ndim) return RCRE_ERR_SHAPE_MISMATCH;
-        for (uint8_t i = 0; i < out_ndim; ++i) {
-            if (output->shape[i] != out_shape[i]) return RCRE_ERR_SHAPE_MISMATCH;
-        }
-    }
+    err = nn_ensure_output(output, out_shape, out_ndim, RCRE_LAYOUT_CHW, arena);
+    if (err != RCRE_OK) return err;
 
     const float* in_ptr = (const float*)input->data;
     const float* w_ptr = (const float*)weights->data;
@@ -3375,21 +3448,9 @@ RCRE_NODISCARD int rcre_nn_depthwise_conv2d(const RCRE_Tensor* input,
     }
     ensure_hal_init();
 
-    size_t batch_size = 1;
-    size_t in_c = 0, in_h = 0, in_w = 0;
-
-    if (input->ndim == 3) {
-        in_c = input->shape[0];
-        in_h = input->shape[1];
-        in_w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        in_c = input->shape[1];
-        in_h = input->shape[2];
-        in_w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, in_c = 0, in_h = 0, in_w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &in_c, &in_h, &in_w);
+    if (err != RCRE_OK) return err;
 
     size_t k_h = 0, k_w = 0;
     if (weights->ndim == 4) {
@@ -3433,16 +3494,8 @@ RCRE_NODISCARD int rcre_nn_depthwise_conv2d(const RCRE_Tensor* input,
         out_shape[3] = out_w;
     }
 
-    if (!output->data) {
-        if (!arena) return RCRE_ERR_INVALID_ARG;
-        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
-        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
-    } else {
-        if (output->ndim != out_ndim) return RCRE_ERR_SHAPE_MISMATCH;
-        for (uint8_t i = 0; i < out_ndim; ++i) {
-            if (output->shape[i] != out_shape[i]) return RCRE_ERR_SHAPE_MISMATCH;
-        }
-    }
+    err = nn_ensure_output(output, out_shape, out_ndim, RCRE_LAYOUT_CHW, arena);
+    if (err != RCRE_OK) return err;
 
     const float* in_ptr = (const float*)input->data;
     const float* w_ptr = (const float*)weights->data;
@@ -3507,21 +3560,9 @@ RCRE_NODISCARD int rcre_nn_pointwise_conv2d(const RCRE_Tensor* input,
     }
     ensure_hal_init();
 
-    size_t batch_size = 1;
-    size_t in_c = 0, h = 0, w = 0;
-
-    if (input->ndim == 3) {
-        in_c = input->shape[0];
-        h = input->shape[1];
-        w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        in_c = input->shape[1];
-        h = input->shape[2];
-        w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, in_c = 0, h = 0, w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &in_c, &h, &w);
+    if (err != RCRE_OK) return err;
 
     size_t out_c = weights->shape[0];
     if (weights->ndim == 2) {
@@ -3547,16 +3588,8 @@ RCRE_NODISCARD int rcre_nn_pointwise_conv2d(const RCRE_Tensor* input,
         out_shape[3] = w;
     }
 
-    if (!output->data) {
-        if (!arena) return RCRE_ERR_INVALID_ARG;
-        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
-        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
-    } else {
-        if (output->ndim != out_ndim) return RCRE_ERR_SHAPE_MISMATCH;
-        for (uint8_t i = 0; i < out_ndim; ++i) {
-            if (output->shape[i] != out_shape[i]) return RCRE_ERR_SHAPE_MISMATCH;
-        }
-    }
+    err = nn_ensure_output(output, out_shape, out_ndim, RCRE_LAYOUT_CHW, arena);
+    if (err != RCRE_OK) return err;
 
     const float* in_ptr = (const float*)input->data;
     const float* w_ptr = (const float*)weights->data;
@@ -3610,21 +3643,9 @@ RCRE_NODISCARD int rcre_nn_batchnorm2d(const RCRE_Tensor* input,
     }
     if (eps < 0.0f) eps = 1e-5f;
 
-    size_t batch_size = 1;
-    size_t num_channels = 0, h = 0, w = 0;
-
-    if (input->ndim == 3) {
-        num_channels = input->shape[0];
-        h = input->shape[1];
-        w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        num_channels = input->shape[1];
-        h = input->shape[2];
-        w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, num_channels = 0, h = 0, w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &num_channels, &h, &w);
+    if (err != RCRE_OK) return err;
 
     if (gamma->shape[0] != num_channels || beta->shape[0] != num_channels ||
         mean->shape[0] != num_channels || var->shape[0] != num_channels) {
@@ -3749,21 +3770,9 @@ RCRE_NODISCARD int rcre_nn_global_avgpool(const RCRE_Tensor* input, RCRE_Tensor*
         return RCRE_ERR_INVALID_ARG;
     }
 
-    size_t batch_size = 1;
-    size_t channels = 0, h = 0, w = 0;
-
-    if (input->ndim == 3) {
-        channels = input->shape[0];
-        h = input->shape[1];
-        w = input->shape[2];
-    } else if (input->ndim == 4) {
-        batch_size = input->shape[0];
-        channels = input->shape[1];
-        h = input->shape[2];
-        w = input->shape[3];
-    } else {
-        return RCRE_ERR_SHAPE_MISMATCH;
-    }
+    size_t batch_size = 1, channels = 0, h = 0, w = 0;
+    int err = nn_parse_spatial(input, &batch_size, &channels, &h, &w);
+    if (err != RCRE_OK) return err;
 
     size_t spatial_size = h * w;
     if (spatial_size == 0) return RCRE_ERR_INVALID_ARG;
@@ -3840,11 +3849,8 @@ RCRE_NODISCARD int rcre_nn_linear(const RCRE_Tensor* input,
         out_shape[1] = out_features;
     }
 
-    if (!output->data) {
-        if (!arena) return RCRE_ERR_INVALID_ARG;
-        *output = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
-        if (!output->data) return RCRE_ERR_OUT_OF_MEMORY;
-    }
+    int err = nn_ensure_output(output, out_shape, out_ndim, RCRE_LAYOUT_TABULAR, arena);
+    if (err != RCRE_OK) return err;
 
     const float* in_ptr = (const float*)input->data;
     const float* w_ptr = (const float*)weights->data;
@@ -4043,14 +4049,7 @@ RCRE_NODISCARD int rcre_ml_ols_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
     return RCRE_OK;
 }
 
-#ifndef RCRE_FAST_SIGMOID_DEFINED
-#define RCRE_FAST_SIGMOID_DEFINED
-static inline float rcre_fast_sigmoidf(float z) {
-    if (z > 16.0f) return 1.0f;
-    if (z < -16.0f) return 0.0f;
-    return 1.0f / (1.0f + expf(-z));
-}
-#endif
+
 
 RCRE_NODISCARD int rcre_ml_logistic_fit(const RCRE_Tensor* X, const RCRE_Tensor* y, 
                                         RCRE_Tensor* weights, float lr, 
@@ -4168,27 +4167,7 @@ RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tenso
 #include <string.h>
 #include <stdlib.h>
 
-/* Compute squared Euclidean distance between two D-dimensional vectors */
-static inline float squared_l2_distance(const float* a, const float* b, size_t d) {
-    float sum = 0.0f;
-    for (size_t i = 0; i < d; ++i) {
-        float diff = a[i] - b[i];
-        sum += diff * diff;
-    }
-    return sum;
-}
-
-/* SplitMix64 pseudo-random number generator for reproducible sampling */
-static inline uint64_t rcre_splitmix64(uint64_t* state) {
-    uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-    return z ^ (z >> 31);
-}
-
-static inline float rcre_rand_f32(uint64_t* state) {
-    return (float)((rcre_splitmix64(state) >> 40) * (1.0 / 16777216.0));
-}
+#define squared_l2_distance rcre_squared_l2_distance
 
 RCRE_NODISCARD int rcre_ml_kmeans_fit_ex(const RCRE_Tensor* X, size_t k,
                                          const RCRE_KMeansParams* params,
@@ -4756,15 +4735,6 @@ RCRE_NODISCARD int rcre_ml_pca_inverse_transform(const RCRE_Tensor* X_proj, cons
 
 #include <math.h>
 
-#ifndef RCRE_FAST_SIGMOID_DEFINED
-#define RCRE_FAST_SIGMOID_DEFINED
-static inline float rcre_fast_sigmoidf(float z) {
-    if (z > 16.0f) return 1.0f;
-    if (z < -16.0f) return 0.0f;
-    return 1.0f / (1.0f + expf(-z));
-}
-#endif
-
 RCRE_NODISCARD int rcre_ml_gbdt_predict(const RCRE_GBDTModel* model, 
                                         const RCRE_Tensor* X, 
                                         RCRE_Tensor* preds) {
@@ -4863,12 +4833,7 @@ struct RCRE_HNSWIndex {
 
 static float compute_distance(const float* a, const float* b, size_t dim, RCRE_MetricType metric) {
     if (metric == RCRE_METRIC_L2) {
-        float sum = 0.0f;
-        for (size_t i = 0; i < dim; ++i) {
-            float diff = a[i] - b[i];
-            sum += diff * diff;
-        }
-        return sum;
+        return rcre_squared_l2_distance(a, b, dim);
     } else {
         /* Cosine distance: 1.0 - (a . b) / (|a| * |b|) */
         float dot = rcre_hal.dot_f32(a, b, dim);

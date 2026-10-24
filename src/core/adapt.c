@@ -42,6 +42,10 @@ RCRE_NODISCARD int rcre_tensor_adapt(const RCRE_Tensor* src,
         return RCRE_ERR_INVALID_ARG;
     }
 
+    if (src->dtype != RCRE_DTYPE_U8 && src->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
     /* Extract source dimensions */
     size_t in_h = 0, in_w = 0, in_c = 1;
     size_t stride_y = 0, stride_x = 0, stride_c = 0;

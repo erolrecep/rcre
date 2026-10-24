@@ -72,8 +72,33 @@ static void test_adapt_letterbox_and_normalization(void) {
     rcre_arena_destroy(arena);
 }
 
+static void test_adapt_unsupported_dtype_rejected(void) {
+    RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+
+    size_t in_shape[2] = {10, 10};
+    /* Create I32 tensor (unsupported for visual adaptation) */
+    RCRE_Tensor src = rcre_tensor_create(in_shape, 2, RCRE_DTYPE_I32, RCRE_LAYOUT_TABULAR, arena);
+    ASSERT_NOT_NULL(src.data);
+
+    RCRE_PreprocessSpec spec = {
+        .target_shape = {1, 1, 10, 10},
+        .target_layout = RCRE_LAYOUT_CHW,
+        .target_dtype = RCRE_DTYPE_F32,
+        .preserve_aspect = false,
+        .pad_value = 0.0f
+    };
+
+    RCRE_Tensor dst = {0};
+    int status = rcre_tensor_adapt(&src, &spec, arena, &dst);
+    ASSERT_INT_EQ(RCRE_ERR_UNSUPPORTED_OP, status);
+
+    rcre_arena_destroy(arena);
+}
+
 int main(void) {
     test_suite_begin("RCRE Input Adaptation Pipeline (CORE-REQ-03)");
     TEST_RUN(test_adapt_letterbox_and_normalization);
+    TEST_RUN(test_adapt_unsupported_dtype_rejected);
     return test_suite_report();
 }

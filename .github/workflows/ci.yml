@@ -47,10 +47,13 @@ jobs:
         run: |
           make test-sanitizers
 
-      - name: Run Benchmarks Validation
+      - name: Run Hardware Acceleration Benchmark
         run: |
-          make benchmarks
-          ./bin/bench_gemm
-          ./bin/bench_rgb_gray
-          ./bin/bench_gbdt
-          ./bin/bench_hnsw
+          make bench
+
+      - name: Setup uv for Python Parity Tests
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run Python OpenCV & Scikit-Learn Parity Verification
+        run: |
+          make test-parity

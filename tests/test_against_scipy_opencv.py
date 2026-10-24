@@ -20,7 +20,6 @@ from sklearn.decomposition import PCA
 
 class RCRE_Tensor(ctypes.Structure):
     _fields_ = [
-        ("storage", ctypes.c_void_p),
         ("data", ctypes.c_void_p),
         ("shape", ctypes.c_size_t * 4),
         ("strides", ctypes.c_ssize_t * 4),

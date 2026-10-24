@@ -11,12 +11,12 @@ ifeq ($(UNAME_S),Darwin)
     OPEN_CMD = open
 else ifeq ($(UNAME_S),Linux)
     CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/cam_v4l2.c src/extras/gui_stub.c
-    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_v4l2.o src/extras/gui_stub.c
+    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_v4l2.o src/extras/gui_stub.o
     CAM_LDFLAGS =
     OPEN_CMD = xdg-open
 else
     CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/gui_stub.c
-    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/gui_stub.c
+    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/gui_stub.o
     CAM_LDFLAGS =
     OPEN_CMD = echo
 endif
@@ -85,6 +85,8 @@ $(DYLIB): $(ALL_OBJS)
 	@mkdir -p lib
 	$(CC) -shared $(CFLAGS) $^ $(CAM_LDFLAGS) -lm -lpthread -o $@
 	@echo "✅ Built $@"
+
+$(OBJS): include/rcre.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

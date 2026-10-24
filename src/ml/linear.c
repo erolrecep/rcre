@@ -6,6 +6,7 @@
  */
 
 #include "rcre.h"
+#include "ml_internal.h"
 #include <math.h>
 #include <string.h>
 
@@ -123,14 +124,7 @@ RCRE_NODISCARD int rcre_ml_ols_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
     return RCRE_OK;
 }
 
-#ifndef RCRE_FAST_SIGMOID_DEFINED
-#define RCRE_FAST_SIGMOID_DEFINED
-static inline float rcre_fast_sigmoidf(float z) {
-    if (z > 16.0f) return 1.0f;
-    if (z < -16.0f) return 0.0f;
-    return 1.0f / (1.0f + expf(-z));
-}
-#endif
+
 
 RCRE_NODISCARD int rcre_ml_logistic_fit(const RCRE_Tensor* X, const RCRE_Tensor* y, 
                                         RCRE_Tensor* weights, float lr, 

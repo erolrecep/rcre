@@ -4,6 +4,14 @@
  * 
  * Satisfies THR-REQ-01, THR-REQ-02, and THR-REQ-03.
  * Uses atomic fetch-and-add task distribution and pthread/C23 thread workers.
+ *
+ * ARCHITECTURAL DESIGN NOTE (Unix Philosophy — Keep Primitives Single-Threaded):
+ * Core RCRE computational kernels (CV filters, FFT, CNN layers, ML models) are
+ * intentionally designed to be purely deterministic, re-entrant, and single-threaded.
+ * This guarantees 100% portability to bare-metal embedded microcontrollers and WASM
+ * runtimes where OS threads are absent or require SharedArrayBuffer.
+ * This threadpool engine is an opt-in pipeline concurrency tool for orchestrating
+ * outer loops, multi-camera capture streams, or high-level spatial tile decomposition.
  */
 
 #include "rcre.h"

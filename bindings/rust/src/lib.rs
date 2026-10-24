@@ -15,7 +15,6 @@ pub struct RCRE_Arena {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RCRE_Tensor {
-    pub storage: *mut std::ffi::c_void,
     pub data: *mut std::ffi::c_void,
     pub shape: [usize; 4],
     pub strides: [isize; 4],

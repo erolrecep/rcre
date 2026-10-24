@@ -323,6 +323,12 @@ static void test_linear_and_softmax(void) {
     ASSERT_FLOAT_NEAR(1.0f, probs[0] + probs[1], EPSILON);
     ASSERT_TRUE(probs[1] > probs[0]);
 
+    /* Test pre-allocated output with wrong dimensions returns RCRE_ERR_SHAPE_MISMATCH */
+    size_t bad_shape[2] = {1, 99};
+    RCRE_Tensor bad_out = rcre_tensor_create(bad_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    int bad_status = rcre_nn_linear(&in, &weights, &bias, &bad_out, arena);
+    ASSERT_INT_EQ(RCRE_ERR_SHAPE_MISMATCH, bad_status);
+
     rcre_arena_destroy(arena);
 }
 
