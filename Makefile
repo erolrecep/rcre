@@ -55,7 +55,14 @@ SRCS = src/core/arena.c \
        src/hal/kernels_scalar.c \
        src/hal/kernels_neon.c \
        src/hal/kernels_avx2.c \
-       src/hal/kernels_wasm.c
+       src/hal/kernels_wasm.c \
+       src/transformer/nn.c \
+       src/transformer/model.c \
+       src/transformer/kv_cache.c \
+       src/transformer/tokenizer.c \
+       src/transformer/dataset.c \
+       src/transformer/optim.c \
+       src/transformer/generate.c
 
 OBJS = $(SRCS:.c=.o)
 ALL_OBJS = $(OBJS) $(CAM_OBJS)
@@ -63,16 +70,16 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
-EXAMPLES = webcam_edge_filter tabular_gbdt_predict hnsw_vector_search mlp_autograd_train
+EXAMPLES = webcam_edge_filter tabular_gbdt_predict hnsw_vector_search mlp_autograd_train gpt_generate
 EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo
+.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo
 
 default: help
 
@@ -176,6 +183,9 @@ hnsw_test: bin/hnsw_vector_search
 mlp_train: bin/mlp_autograd_train
 	@bin/mlp_autograd_train
 
+gpt_demo: bin/gpt_generate
+	@bin/gpt_generate
+
 project_lens_test: $(LIB)
 	@$(MAKE) -C projects/reverse_image_search test
 
@@ -225,6 +235,9 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@bin/test_autograd_tensor
 	@bin/test_nn_train
 	@bin/test_merger_report
+	@bin/test_transformer_nn
+	@bin/test_transformer_kv_cache
+	@bin/test_transformer_bpe
 	@echo "🎉 All RCRE Unit Tests Passed!"
 
 test-sanitizers: $(AMALGAMATED_HEADER)
@@ -270,6 +283,12 @@ endif
 	@bin/test_nn_train_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_merger_report.c -lm -lpthread -o bin/test_merger_report_asan
 	@bin/test_merger_report_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_transformer_nn.c -lm -lpthread -o bin/test_transformer_nn_asan
+	@bin/test_transformer_nn_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_transformer_kv_cache.c -lm -lpthread -o bin/test_transformer_kv_cache_asan
+	@bin/test_transformer_kv_cache_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_transformer_bpe.c -lm -lpthread -o bin/test_transformer_bpe_asan
+	@bin/test_transformer_bpe_asan
 	@echo "🎉 Zero Memory Leaks & Zero Undefined Behavior Detected!"
 
 test-parity: $(DYLIB)
@@ -285,7 +304,7 @@ test-all: test test-sanitizers test-parity
 	@echo "=================================================================="
 
 clean:
-	rm -rf lib bin dist src/core/*.o src/cv/*.o src/ml/*.o src/hal/*.o src/extras/*.o
+	rm -rf lib bin dist src/core/*.o src/cv/*.o src/ml/*.o src/hal/*.o src/extras/*.o src/autograd/*.o src/nn/*.o src/transformer/*.o
 	@echo "🧹 Cleaned all build artifacts"
 
 docs:

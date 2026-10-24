@@ -43,13 +43,20 @@ C_FILES = [
     SRC_DIR / "nn" / "optim.c",
     SRC_DIR / "nn" / "data.c",
     SRC_DIR / "nn" / "vis.c",
+    SRC_DIR / "transformer" / "nn.c",
+    SRC_DIR / "transformer" / "model.c",
+    SRC_DIR / "transformer" / "kv_cache.c",
+    SRC_DIR / "transformer" / "tokenizer.c",
+    SRC_DIR / "transformer" / "dataset.c",
+    SRC_DIR / "transformer" / "optim.c",
+    SRC_DIR / "transformer" / "generate.c",
 ]
 
 def clean_file_content(content: str) -> str:
     """Removes local includes that are redundant in amalgamated file."""
     lines = []
     for line in content.splitlines():
-        if re.match(r'^\s*#include\s*["<](rcre\.h|rcre_autograd\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h)[">]', line):
+        if re.match(r'^\s*#include\s*["<](rcre\.h|rcre_autograd\.h|rcre_transformer\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h)[">]', line):
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -79,9 +86,14 @@ def main():
     autograd_clean = clean_file_content(autograd_header)
     header_content = header_content.replace('#include "rcre_autograd.h"', autograd_clean)
 
+    transformer_header = (INCLUDE_DIR / "rcre_transformer.h").read_text(encoding="utf-8")
+    transformer_clean = clean_file_content(transformer_header)
+    header_content = header_content.replace('#include "rcre_transformer.h"', transformer_clean)
+
     hal_internal = (SRC_DIR / "hal" / "hal_internal.h").read_text(encoding="utf-8")
     ml_internal = (SRC_DIR / "ml" / "ml_internal.h").read_text(encoding="utf-8")
     rng_internal = (SRC_DIR / "core" / "rcre_rng.h").read_text(encoding="utf-8")
+    transformer_internal = (SRC_DIR / "transformer" / "transformer_internal.h").read_text(encoding="utf-8")
 
     out_lines = []
     out_lines.append("/* ========================================================================= */")
@@ -101,6 +113,9 @@ def main():
     out_lines.append("")
     out_lines.append("/* --- Internal Random Number Generation --- */")
     out_lines.append(clean_file_content(rng_internal))
+    out_lines.append("")
+    out_lines.append("/* --- Internal Transformer Definitions & Helpers --- */")
+    out_lines.append(clean_file_content(transformer_internal))
     out_lines.append("")
 
     for c_file in C_FILES:

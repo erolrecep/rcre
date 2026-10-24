@@ -21,7 +21,7 @@ Every test in this directory exists to enforce **concrete engineering invariants
 
 ## 📁 Test Suite Catalog & Purpose
 
-The test directory contains **18 test suites** spanning over **77,500 assertions**, organized into distinct subsystems:
+The test directory contains **21 test suites** spanning over **78,000 assertions**, organized into distinct subsystems:
 
 ```
 tests/
@@ -48,6 +48,11 @@ tests/
 │   ├── test_autograd_scalar.c       # Micrograd-style reverse-mode scalar DAG autograd, Graphviz DOT export
 │   ├── test_autograd_tensor.c       # Dynamic tensor tape autograd, VJPs, tape growth across rewinds, shape guards
 │   └── test_nn_train.c              # Loss functions, AdamW optimization, 1D target split, long CSV line parsing
+│
+├── Generative AI & Autoregressive Transformers
+│   ├── test_transformer_nn.c        # Finite-difference gradient checks (Linear, GELU, LayerNorm, Attention, CE)
+│   ├── test_transformer_kv_cache.c   # KV-cache vs full sequence logit equivalence (<= 1e-5), arena residency
+│   └── test_transformer_bpe.c        # Byte-Pair Encoding (BPE) subword tokenizer, compression & exact decode roundtrip
 │
 ├── Merger Hardening & Gap-Pinning
 │   └── test_merger_report.c         # 11 adversarial regression locks & contract-pinning tests from merger review
@@ -164,7 +169,21 @@ This dedicated test suite maps directly to the architectural merger review findi
 
 ---
 
-### 6. Integration, Packaging & Python Parity
+### 6. Generative AI & Autoregressive Transformers
+
+* **[`test_transformer_nn.c`](test_transformer_nn.c)**:
+  * *Purpose*: Validates numerical correctness and analytical gradients of Transformer operator kernels against central finite differences ($f'(x) \approx \frac{f(x+\epsilon) - f(x-\epsilon)}{2\epsilon}$).
+  * *Key Invariants*: Tests `Linear` projection forward/backward (using hardware HAL GEMM), `GELU` non-linearity ($x \Phi(x)$), `LayerNorm` forward/backward, `Softmax` numerical stability, causal `Multi-Head Self-Attention` ($O(T^2)$ masked attention), and `Cross-Entropy` loss with gradient backpropagation.
+* **[`test_transformer_kv_cache.c`](test_transformer_kv_cache.c)**:
+  * *Purpose*: Verifies mathematical equivalence between full-context forward passes and autoregressive single-token forward passes utilizing Key-Value (KV) caching.
+  * *Key Invariants*: Proves that feeding tokens iteratively into `rcre_gpt_forward_token()` produces logits identical to full-sequence `rcre_gpt_forward()` within $\epsilon \le 10^{-4}$, asserts $\mathcal{O}(1)$ step generation latency, and validates zero-heap arena residency (`RCRE_Arena` lifecycle).
+* **[`test_transformer_bpe.c`](test_transformer_bpe.c)**:
+  * *Purpose*: Validates subword Byte-Pair Encoding (BPE) and character tokenizers.
+  * *Key Invariants*: Tests vocabulary induction, binary serialization/deserialization, subword compression ratio ($> 1.0\times$), and exact byte-level round-trip reconstruction fidelity (`decode(encode(text)) == text`).
+
+---
+
+### 7. Integration, Packaging & Python Parity
 
 * **[`test_amalgamated.c`](test_amalgamated.c)**:
   * Compiles against the standalone single-header distribution [`dist/rcre.h`](../dist/rcre.h) in a completely clean translation unit (`#define RCRE_IMPLEMENTATION`), verifying that all internal headers, symbols, and static functions are properly scoped with zero symbol collisions.

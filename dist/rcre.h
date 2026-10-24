@@ -1063,6 +1063,303 @@ bool rcre_vis_export_3d_clusters_html(const RCRE_Tensor* points, const size_t* a
 #endif /* RCRE_AUTOGRAD_H */
 #endif
 
+/* ========================================================================= */
+/* Generative AI & Autoregressive Transformer Architecture                    */
+/* ========================================================================= */
+#ifndef RCRE_NO_TRANSFORMER
+/**
+ * @file rcre_transformer.h
+ * @brief RCRE Generative AI & Autoregressive Transformer Architecture (ISO C23)
+ *
+ * Implements a complete Decoder-Only Transformer (Micro-GPT) engine in pure C23:
+ *  - Causal Multi-Head Self-Attention with causal masking
+ *  - Pre-LayerNorm architecture and GELU non-linearities
+ *  - Inference Key-Value (KV) Cache for O(1) token generation
+ *  - Subword Byte-Pair Encoding (BPE) & Character Tokenizers
+ *  - Analytical backward passes and Decoupled AdamW optimization
+ *  - Direct acceleration via RCRE dynamic Hardware Abstraction Layer (HAL)
+ */
+
+#ifndef RCRE_TRANSFORMER_H
+#define RCRE_TRANSFORMER_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* Architectural Hyperparameters & Configuration                             */
+/* ========================================================================= */
+
+#define RCRE_GPT_DEFAULT_BATCH_SIZE   4     /* Sequences per training step   */
+#define RCRE_GPT_DEFAULT_SEQ_LEN      64    /* Maximum context length (T)    */
+#define RCRE_GPT_DEFAULT_EMBED_DIM    64    /* Model dimension (d_model, C)  */
+#define RCRE_GPT_DEFAULT_NUM_HEADS    4     /* Number of attention heads (H) */
+#define RCRE_GPT_DEFAULT_NUM_LAYERS   2     /* Transformer blocks depth (L)  */
+#define RCRE_GPT_DEFAULT_MLP_MULT     4     /* MLP expansion multiplier (4*C)*/
+#define RCRE_MAX_CHAR_VOCAB           256   /* Max size for char tokenizer   */
+
+typedef struct {
+    int vocab_size;   /* V: Number of distinct tokens in vocabulary          */
+    int seq_len;      /* T: Maximum context window                           */
+    int embed_dim;    /* C: Hidden model dimension (d_model)                 */
+    int num_heads;    /* H: Number of parallel attention heads               */
+    int head_dim;     /* d_k = C / H                                         */
+    int num_layers;   /* L: Depth (number of Transformer blocks)             */
+    int mlp_dim;      /* Feed-forward network inner dimension (typically 4*C)*/
+} RCRE_GPTConfig;
+
+/* Transformer Block Parameters */
+typedef struct {
+    float *ln1_w;  float *ln1_b;   /* LayerNorm 1: (C), (C)                  */
+    float *q_w;    float *q_b;     /* Query projection: (C, C), (C)          */
+    float *k_w;    float *k_b;     /* Key projection: (C, C), (C)            */
+    float *v_w;    float *v_b;     /* Value projection: (C, C), (C)          */
+    float *proj_w; float *proj_b;  /* Multi-head output projection: (C, C),(C)*/
+    float *ln2_w;  float *ln2_b;   /* LayerNorm 2: (C), (C)                  */
+    float *fc1_w;  float *fc1_b;   /* MLP Expand: (C, mlp_dim), (mlp_dim)    */
+    float *fc2_w;  float *fc2_b;   /* MLP Contract: (mlp_dim, C), (C)        */
+} RCRE_GPTBlockWeights;
+
+/* Forward Activations cached for backward pass */
+typedef struct {
+    float *ln1_out;
+    float *ln1_mean;
+    float *ln1_rstd;
+    float *q, *k, *v;
+    float *att_scores;
+    float *att_out;
+    float *proj_out;
+    float *resid1_out;
+
+    float *ln2_out;
+    float *ln2_mean;
+    float *ln2_rstd;
+    float *fc1_out;
+    float *gelu_out;
+    float *fc2_out;
+    float *resid2_out;
+} RCRE_GPTBlockActs;
+
+/* Full GPT Model Parameters */
+typedef struct {
+    RCRE_GPTConfig config;
+    size_t num_params;
+
+    /* Contiguous flat parameter buffers */
+    float *params;
+    float *grads;
+    float *m; /* AdamW 1st moment vector */
+    float *v; /* AdamW 2nd moment vector */
+
+    /* Named pointers into params */
+    float *wte;                      /* Token Embedding: (V, C)             */
+    float *wpe;                      /* Positional Embedding: (T, C)        */
+    RCRE_GPTBlockWeights *blocks;    /* Array of L blocks                   */
+    float *ln_f_w;                   /* Final LayerNorm weight: (C)         */
+    float *ln_f_b;                   /* Final LayerNorm bias: (C)           */
+    float *head_w;                   /* LM Head Projection: (C, V)          */
+
+    RCRE_Arena *arena;               /* Non-null if arena-resident          */
+    bool owns_heap;                  /* True if heap-allocated              */
+} RCRE_GPTModel;
+
+/* Full Model Forward Activations */
+typedef struct {
+    float *emb_out;
+    RCRE_GPTBlockActs *blocks;
+    float *ln_f_out;
+    float *ln_f_mean;
+    float *ln_f_rstd;
+    float *logits;
+    float *probs;
+    RCRE_Arena *arena;
+    bool owns_heap;
+} RCRE_GPTActs;
+
+/* Inference Key-Value (KV) Cache for O(1) Token Generation */
+typedef struct {
+    float *k;          /* Key cache: (L, H, max_T, d_k)                      */
+    float *v;          /* Value cache: (L, H, max_T, d_k)                    */
+    int max_seq_len;
+    int current_pos;
+    RCRE_Arena *arena;
+    bool owns_heap;
+} RCRE_KVCache;
+
+/* AdamW Optimizer Configuration for Transformers */
+typedef struct {
+    float lr_max;
+    float lr_min;
+    int warmup_steps;
+    int max_steps;
+    float beta1;
+    float beta2;
+    float eps;
+    float weight_decay;
+    float grad_clip;
+    int current_step;
+} RCRE_GPTAdamWConfig;
+
+/* Generation & Sampling Configuration */
+typedef struct {
+    float temperature; /* Sampling temperature (> 0.0, default 0.8)          */
+    int top_k;         /* Top-K filtering (0 to disable)                     */
+    int max_new_tokens;/* Maximum number of tokens to generate               */
+} RCRE_GPTGenerateConfig;
+
+/* Character-Level Tokenizer */
+typedef struct {
+    int vocab_size;
+    int char_to_id[256];
+    unsigned char id_to_char[256];
+} RCRE_CharTokenizer;
+
+/* Subword Byte-Pair Encoding (BPE) Rule & Tokenizer */
+typedef struct {
+    uint16_t id1;
+    uint16_t id2;
+    uint16_t new_id;
+} RCRE_BPEMergeRule;
+
+typedef struct {
+    int vocab_size;
+    int num_rules;
+    RCRE_BPEMergeRule *rules;
+    char **id_to_token_str;
+} RCRE_BPETokenizer;
+
+/* Dataset / DataLoader */
+typedef struct {
+    int *tokens;
+    size_t num_tokens;
+    int batch_size;
+    int seq_len;
+    size_t current_idx;
+} RCRE_GPTDataLoader;
+
+/* ========================================================================= */
+/* Core Neural Network Forward and Backward Kernels                          */
+/* ========================================================================= */
+
+/* 1. Linear Projection: Y = X * W + b */
+void rcre_transformer_linear_forward(float *out, const float *x, const float *w, const float *b, int N, int Din, int Dout);
+void rcre_transformer_linear_backward(float *dx, float *dw, float *db, const float *dout, const float *x, const float *w, int N, int Din, int Dout);
+
+/* 2. GELU Non-linearity */
+RCRE_NODISCARD float rcre_transformer_gelu_scalar(float x);
+RCRE_NODISCARD float rcre_transformer_gelu_scalar_backward(float x, float dout);
+void rcre_transformer_gelu_forward(float *out, const float *x, int N);
+void rcre_transformer_gelu_backward(float *dx, const float *x, const float *dout, int N);
+
+/* 3. Layer Normalization (Pre-norm Transformer standard) */
+void rcre_transformer_layernorm_forward(float *out, float *mean, float *rstd, const float *x, const float *weight, const float *bias, int N, int C);
+void rcre_transformer_layernorm_backward(float *dx, float *dweight, float *dbias, const float *dout, const float *x, const float *mean, const float *rstd, const float *weight, int N, int C);
+
+/* 4. Numerically Stable Softmax */
+void rcre_transformer_softmax_forward(float *out, const float *inp, int N, int C);
+void rcre_transformer_softmax_backward(float *dinp, const float *dout, const float *out, int N, int C);
+
+/* 5. Causal Multi-Head Self-Attention */
+void rcre_transformer_attention_forward(
+    float *out, float *att_scores,
+    const float *q, const float *k, const float *v,
+    int B, int T, int C, int H
+);
+void rcre_transformer_attention_backward(
+    float *dq, float *dk, float *dv,
+    float *datt_scores,
+    const float *dout, const float *att_scores,
+    const float *q, const float *k, const float *v,
+    int B, int T, int C, int H
+);
+
+/* 6. Cross-Entropy Loss with Softmax over Vocabulary */
+float rcre_transformer_cross_entropy_forward(float *probs, const float *logits, const int *targets, int N, int V);
+void rcre_transformer_cross_entropy_backward(float *dlogits, const float *probs, const int *targets, int N, int V);
+
+/* ========================================================================= */
+/* Model Lifecycle, Forward, Backward & KV-Cache                             */
+/* ========================================================================= */
+
+RCRE_NODISCARD RCRE_GPTModel* rcre_gpt_create(RCRE_GPTConfig config, RCRE_Arena *arena);
+void rcre_gpt_init_weights(RCRE_GPTModel *model, uint64_t *rng_state);
+void rcre_gpt_zero_grads(RCRE_GPTModel *model);
+void rcre_gpt_free(RCRE_GPTModel *model);
+
+RCRE_NODISCARD RCRE_GPTActs* rcre_gpt_acts_create(RCRE_GPTConfig config, int B, int T, RCRE_Arena *arena);
+void rcre_gpt_acts_free(RCRE_GPTActs *acts, int num_layers);
+
+float rcre_gpt_forward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inputs, const int *targets, int B, int T);
+void rcre_gpt_backward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inputs, const int *targets, int B, int T);
+
+/* KV-Cache Functions */
+RCRE_NODISCARD RCRE_KVCache* rcre_kv_cache_create(RCRE_GPTConfig config, RCRE_Arena *arena);
+void rcre_kv_cache_reset(RCRE_KVCache *cache);
+void rcre_kv_cache_free(RCRE_KVCache *cache);
+void rcre_gpt_forward_token(RCRE_GPTModel *model, RCRE_KVCache *cache, int token, int pos, float *out_logits);
+
+/* ========================================================================= */
+/* Tokenization Subsystems                                                   */
+/* ========================================================================= */
+
+/* Character Tokenizer */
+void rcre_char_tokenizer_init(RCRE_CharTokenizer *tok);
+bool rcre_char_tokenizer_train_from_file(RCRE_CharTokenizer *tok, const char *filepath);
+bool rcre_char_tokenizer_save(const RCRE_CharTokenizer *tok, const char *filepath);
+bool rcre_char_tokenizer_load(RCRE_CharTokenizer *tok, const char *filepath);
+int rcre_char_tokenizer_encode(const RCRE_CharTokenizer *tok, const char *text, size_t len, int *out_tokens);
+size_t rcre_char_tokenizer_decode(const RCRE_CharTokenizer *tok, const int *tokens, size_t num_tokens, char *out_text, size_t max_out_len);
+void rcre_char_tokenizer_print_info(const RCRE_CharTokenizer *tok);
+
+/* Byte-Pair Encoding (BPE) Tokenizer */
+RCRE_NODISCARD RCRE_BPETokenizer* rcre_bpe_create(void);
+bool rcre_bpe_train_from_file(RCRE_BPETokenizer *tok, const char *filepath, int target_vocab_size);
+bool rcre_bpe_save(const RCRE_BPETokenizer *tok, const char *filepath);
+bool rcre_bpe_load(RCRE_BPETokenizer *tok, const char *filepath);
+int rcre_bpe_encode(const RCRE_BPETokenizer *tok, const char *text, size_t text_len, int *out_tokens, int max_tokens);
+size_t rcre_bpe_decode(const RCRE_BPETokenizer *tok, const int *tokens, size_t num_tokens, char *out_text, size_t max_out_len);
+void rcre_bpe_print_summary(const RCRE_BPETokenizer *tok);
+void rcre_bpe_free(RCRE_BPETokenizer *tok);
+
+/* ========================================================================= */
+/* Dataset & DataLoader                                                      */
+/* ========================================================================= */
+
+RCRE_NODISCARD RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_CharTokenizer *tok, int batch_size, int seq_len);
+void rcre_gpt_dataloader_next_batch_random(RCRE_GPTDataLoader *loader, int *x_batch, int *y_batch, uint64_t *rng_state);
+void rcre_gpt_dataloader_next_batch_sequential(RCRE_GPTDataLoader *loader, int *x_batch, int *y_batch);
+void rcre_gpt_dataloader_reset(RCRE_GPTDataLoader *loader);
+void rcre_gpt_dataloader_free(RCRE_GPTDataLoader *loader);
+
+/* ========================================================================= */
+/* Optimization & Text Generation                                            */
+/* ========================================================================= */
+
+RCRE_NODISCARD float rcre_gpt_get_scheduled_lr(const RCRE_GPTAdamWConfig *cfg, int step);
+float rcre_gpt_clip_gradients(float *grads, size_t num_params, float max_norm);
+void rcre_gpt_adamw_step(RCRE_GPTModel *model, RCRE_GPTAdamWConfig *cfg);
+
+int rcre_gpt_sample_token(const float *logits, int vocab_size, float temperature, int top_k, uint64_t *rng_state);
+void rcre_gpt_generate(
+    RCRE_GPTModel *model,
+    const RCRE_CharTokenizer *tok,
+    const char *prompt,
+    const RCRE_GPTGenerateConfig *gen_cfg,
+    uint64_t *rng_state
+);
+
+bool rcre_gpt_save_checkpoint(const RCRE_GPTModel *model, const char *filepath);
+bool rcre_gpt_load_checkpoint(RCRE_GPTModel *model, const char *filepath);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_TRANSFORMER_H */
+#endif
+
 #ifdef __cplusplus
 }
 #endif
@@ -1235,6 +1532,61 @@ static inline float rcre_rng_gaussian_f32(uint64_t* state, float mean, float std
 }
 
 #endif /* RCRE_RNG_H */
+
+/* --- Internal Transformer Definitions & Helpers --- */
+/**
+ * @file transformer_internal.h
+ * @brief RCRE Internal Transformer Definitions, Helpers & GEMM Dispatch
+ */
+
+#ifndef RCRE_TRANSFORMER_INTERNAL_H
+#define RCRE_TRANSFORMER_INTERNAL_H
+
+#include "../core/rcre_rng.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <math.h>
+#include <assert.h>
+
+/* Multi-dimensional tensor row-major index helpers */
+#define IDX2(r, c, cols) ((r) * (cols) + (c))
+#define IDX3(b, t, c, T, C) (((b) * (T) * (C)) + ((t) * (C)) + (c))
+#define IDX4(b, h, t, d, H, T, D) (((b) * (T) * (H) * (D)) + ((t) * (H) * (D)) + ((h) * (D)) + (d))
+#define IDX_ATTN(b, h, tq, tk, H, T) (((b) * (H) * (T) * (T)) + ((h) * (T) * (T)) + ((tq) * (T)) + (tk))
+
+/* Aligned dynamic memory allocation */
+static inline void* rcre_transformer_alloc_mem(RCRE_Arena *arena, size_t size, size_t align) {
+    if (arena != nullptr) {
+        return rcre_arena_alloc(arena, size, align);
+    }
+    void *ptr = nullptr;
+    if (posix_memalign(&ptr, align < sizeof(void*) ? sizeof(void*) : align, size) != 0) {
+        return nullptr;
+    }
+    return ptr;
+}
+
+static inline void rcre_transformer_free_mem(RCRE_Arena *arena, void *ptr) {
+    if (arena == nullptr && ptr != nullptr) {
+        free(ptr);
+    }
+}
+
+/* Transpose-capable GEMM using RCRE HAL for contiguous blocks */
+void rcre_transformer_gemm(
+    bool transA, bool transB,
+    size_t M, size_t N, size_t K,
+    float alpha,
+    const float *A, size_t lda,
+    const float *B, size_t ldb,
+    float beta,
+    float *C, size_t ldc
+);
+
+#endif /* RCRE_TRANSFORMER_INTERNAL_H */
 
 /* --- Source: kernels_scalar.c --- */
 /**
@@ -7577,6 +7929,1772 @@ bool rcre_vis_export_3d_clusters_html(const RCRE_Tensor* points, const size_t* a
     fprintf(f, "Plotly.newPlot('plot', data, layout);\n");
     fprintf(f, "</script>\n</body>\n</html>\n");
 
+    fclose(f);
+    return true;
+}
+
+/* --- Source: nn.c --- */
+/**
+ * @file nn.c
+ * @brief RCRE Transformer Neural Network Kernels & Mathematical Primitives (ISO C23)
+ */
+
+
+/* ========================================================================= */
+/* Transpose-Capable GEMM Driver                                             */
+/* ========================================================================= */
+
+void rcre_transformer_gemm(
+    bool transA, bool transB,
+    size_t M, size_t N, size_t K,
+    float alpha,
+    const float *A, size_t lda,
+    const float *B, size_t ldb,
+    float beta,
+    float *C, size_t ldc
+) {
+    /* Fast path: Direct HAL dispatch when no transpositions are requested */
+    if (!transA && !transB) {
+        rcre_hal.gemm_f32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+
+    /* Initialize or scale C */
+    if (beta == 0.0f) {
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = 0; j < N; ++j) {
+                C[i * ldc + j] = 0.0f;
+            }
+        }
+    } else if (beta != 1.0f) {
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = 0; j < N; ++j) {
+                C[i * ldc + j] *= beta;
+            }
+        }
+    }
+
+    if (alpha == 0.0f) return;
+
+    /* Cache-blocked GEMM: 64x64x64 tiles */
+    const size_t MB = 64;
+    const size_t NB = 64;
+    const size_t KB = 64;
+
+    for (size_t ii = 0; ii < M; ii += MB) {
+        size_t m_end = (ii + MB < M) ? ii + MB : M;
+        for (size_t kk = 0; kk < K; kk += KB) {
+            size_t k_end = (kk + KB < K) ? kk + KB : K;
+            for (size_t jj = 0; jj < N; jj += NB) {
+                size_t j_end = (jj + NB < N) ? jj + NB : N;
+
+                for (size_t i = ii; i < m_end; ++i) {
+                    for (size_t k = kk; k < k_end; ++k) {
+                        float a_val = alpha * (transA ? A[k * lda + i] : A[i * lda + k]);
+                        for (size_t j = jj; j < j_end; ++j) {
+                            float b_val = transB ? B[j * ldb + k] : B[k * ldb + j];
+                            C[i * ldc + j] += a_val * b_val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 1. Linear Projection (Dense Layer)                                        */
+/* ========================================================================= */
+
+void rcre_transformer_linear_forward(float *out, const float *x, const float *w, const float *b, int N, int Din, int Dout) {
+    if (b != nullptr) {
+        for (int n = 0; n < N; n++) {
+            memcpy(out + n * Dout, b, sizeof(float) * Dout);
+        }
+    }
+    rcre_transformer_gemm(
+        false, false,
+        (size_t)N, (size_t)Dout, (size_t)Din,
+        1.0f,
+        x, (size_t)Din,
+        w, (size_t)Dout,
+        (b != nullptr) ? 1.0f : 0.0f,
+        out, (size_t)Dout
+    );
+}
+
+void rcre_transformer_linear_backward(float *dx, float *dw, float *db, const float *dout, const float *x, const float *w, int N, int Din, int Dout) {
+    /* 1. dx = dout * W^T */
+    if (dx != nullptr) {
+        rcre_transformer_gemm(
+            false, true,
+            (size_t)N, (size_t)Din, (size_t)Dout,
+            1.0f,
+            dout, (size_t)Dout,
+            w, (size_t)Dout,
+            0.0f,
+            dx, (size_t)Din
+        );
+    }
+
+    /* 2. dw += X^T * dout (accumulate) */
+    if (dw != nullptr) {
+        rcre_transformer_gemm(
+            true, false,
+            (size_t)Din, (size_t)Dout, (size_t)N,
+            1.0f,
+            x, (size_t)Din,
+            dout, (size_t)Dout,
+            1.0f, /* Accumulate into existing dw! */
+            dw, (size_t)Dout
+        );
+    }
+
+    /* 3. db += sum(dout, axis=0) */
+    if (db != nullptr) {
+        for (int j = 0; j < Dout; j++) {
+            float sum = 0.0f;
+            for (int n = 0; n < N; n++) {
+                sum += dout[n * Dout + j];
+            }
+            db[j] += sum;
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 2. GELU Non-Linearity                                                     */
+/* ========================================================================= */
+
+constexpr float SQRT_2_OVER_PI = 0.7978845608028654f;
+constexpr float GELU_COEF = 0.044715f;
+
+float rcre_transformer_gelu_scalar(float x) {
+    float cube = x * x * x;
+    float inner = SQRT_2_OVER_PI * (x + GELU_COEF * cube);
+    return 0.5f * x * (1.0f + tanhf(inner));
+}
+
+float rcre_transformer_gelu_scalar_backward(float x, float dout) {
+    float cube = x * x * x;
+    float inner = SQRT_2_OVER_PI * (x + GELU_COEF * cube);
+    float t = tanhf(inner);
+    float dt_dinner = 1.0f - t * t;
+    float dinner_dx = SQRT_2_OVER_PI * (1.0f + 3.0f * GELU_COEF * x * x);
+    float dgelu_dx = 0.5f * (1.0f + t) + 0.5f * x * dt_dinner * dinner_dx;
+    return dout * dgelu_dx;
+}
+
+void rcre_transformer_gelu_forward(float *out, const float *x, int N) {
+    for (int i = 0; i < N; i++) {
+        out[i] = rcre_transformer_gelu_scalar(x[i]);
+    }
+}
+
+void rcre_transformer_gelu_backward(float *dx, const float *x, const float *dout, int N) {
+    for (int i = 0; i < N; i++) {
+        dx[i] = rcre_transformer_gelu_scalar_backward(x[i], dout[i]);
+    }
+}
+
+/* ========================================================================= */
+/* 3. Layer Normalization                                                    */
+/* ========================================================================= */
+
+constexpr float LN_EPS = 1e-5f;
+
+void rcre_transformer_layernorm_forward(float *out, float *mean, float *rstd, const float *x, const float *weight, const float *bias, int N, int C) {
+    for (int n = 0; n < N; n++) {
+        const float *x_row = x + n * C;
+        float *out_row = out + n * C;
+
+        /* Mean */
+        float sum = 0.0f;
+        for (int i = 0; i < C; i++) {
+            sum += x_row[i];
+        }
+        float m = sum / (float)C;
+
+        /* Variance */
+        float var_sum = 0.0f;
+        for (int i = 0; i < C; i++) {
+            float diff = x_row[i] - m;
+            var_sum += diff * diff;
+        }
+        float r = 1.0f / sqrtf(var_sum / (float)C + LN_EPS);
+
+        mean[n] = m;
+        rstd[n] = r;
+
+        /* Normalize & Scale */
+        for (int i = 0; i < C; i++) {
+            float x_hat = (x_row[i] - m) * r;
+            out_row[i] = x_hat * weight[i] + bias[i];
+        }
+    }
+}
+
+void rcre_transformer_layernorm_backward(float *dx, float *dweight, float *dbias, const float *dout, const float *x, const float *mean, const float *rstd, const float *weight, int N, int C) {
+    for (int n = 0; n < N; n++) {
+        const float *dout_row = dout + n * C;
+        const float *x_row = x + n * C;
+        float *dx_row = dx + n * C;
+        float m = mean[n];
+        float r = rstd[n];
+
+        /* Dot-products: sum(dout * gamma) and sum(dout * gamma * x_hat) */
+        float sum_dhat = 0.0f;
+        float sum_dhat_xhat = 0.0f;
+        for (int i = 0; i < C; i++) {
+            float x_hat = (x_row[i] - m) * r;
+            float dhat = dout_row[i] * weight[i];
+            sum_dhat += dhat;
+            sum_dhat_xhat += dhat * x_hat;
+
+            if (dweight != nullptr) dweight[i] += dout_row[i] * x_hat;
+            if (dbias != nullptr) dbias[i] += dout_row[i];
+        }
+
+        /* Input gradient dx */
+        float inv_C = 1.0f / (float)C;
+        for (int i = 0; i < C; i++) {
+            float x_hat = (x_row[i] - m) * r;
+            float dhat = dout_row[i] * weight[i];
+            dx_row[i] = r * (dhat - inv_C * sum_dhat - inv_C * x_hat * sum_dhat_xhat);
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 4. Softmax                                                                */
+/* ========================================================================= */
+
+void rcre_transformer_softmax_forward(float *out, const float *inp, int N, int C) {
+    for (int n = 0; n < N; n++) {
+        const float *inp_row = inp + n * C;
+        float *out_row = out + n * C;
+
+        /* Max for numerical stability */
+        float max_val = inp_row[0];
+        for (int i = 1; i < C; i++) {
+            if (inp_row[i] > max_val) max_val = inp_row[i];
+        }
+
+        /* Exponentiate & sum */
+        float sum = 0.0f;
+        for (int i = 0; i < C; i++) {
+            float e = expf(inp_row[i] - max_val);
+            out_row[i] = e;
+            sum += e;
+        }
+
+        float inv_sum = 1.0f / sum;
+        for (int i = 0; i < C; i++) {
+            out_row[i] *= inv_sum;
+        }
+    }
+}
+
+void rcre_transformer_softmax_backward(float *dinp, const float *dout, const float *out, int N, int C) {
+    for (int n = 0; n < N; n++) {
+        const float *dout_row = dout + n * C;
+        const float *out_row = out + n * C;
+        float *dinp_row = dinp + n * C;
+
+        float sum = 0.0f;
+        for (int i = 0; i < C; i++) {
+            sum += dout_row[i] * out_row[i];
+        }
+
+        for (int i = 0; i < C; i++) {
+            dinp_row[i] = out_row[i] * (dout_row[i] - sum);
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 5. Causal Multi-Head Self-Attention                                       */
+/* ========================================================================= */
+
+void rcre_transformer_attention_forward(
+    float *out, float *att_scores,
+    const float *q, const float *k, const float *v,
+    int B, int T, int C, int H
+) {
+    int d_k = C / H;
+    float scale = 1.0f / sqrtf((float)d_k);
+
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < H; h++) {
+            for (int tq = 0; tq < T; tq++) {
+                const float *q_row = q + IDX4(b, h, tq, 0, H, T, d_k);
+                float *att_row = att_scores + IDX_ATTN(b, h, tq, 0, H, T);
+
+                /* 1. Raw dot-product scores for causal positions: tk <= tq */
+                float max_val = -1e9f;
+                for (int tk = 0; tk <= tq; tk++) {
+                    const float *k_row = k + IDX4(b, h, tk, 0, H, T, d_k);
+                    float dot = 0.0f;
+                    for (int d = 0; d < d_k; d++) {
+                        dot += q_row[d] * k_row[d];
+                    }
+                    dot *= scale;
+                    att_row[tk] = dot;
+                    if (dot > max_val) max_val = dot;
+                }
+
+                /* Causal mask */
+                for (int tk = tq + 1; tk < T; tk++) {
+                    att_row[tk] = 0.0f;
+                }
+
+                /* 2. Softmax over tk <= tq */
+                float sum = 0.0f;
+                for (int tk = 0; tk <= tq; tk++) {
+                    float e = expf(att_row[tk] - max_val);
+                    att_row[tk] = e;
+                    sum += e;
+                }
+                float inv_sum = 1.0f / sum;
+                for (int tk = 0; tk <= tq; tk++) {
+                    att_row[tk] *= inv_sum;
+                }
+
+                /* 3. Weighted sum of V: out = att_scores * V */
+                float *out_head_row = out + IDX4(b, h, tq, 0, H, T, d_k);
+                for (int d = 0; d < d_k; d++) {
+                    float val = 0.0f;
+                    for (int tk = 0; tk <= tq; tk++) {
+                        const float *v_row = v + IDX4(b, h, tk, 0, H, T, d_k);
+                        val += att_row[tk] * v_row[d];
+                    }
+                    out_head_row[d] = val;
+                }
+            }
+        }
+    }
+}
+
+void rcre_transformer_attention_backward(
+    float *dq, float *dk, float *dv,
+    float *datt_scores,
+    const float *dout, const float *att_scores,
+    const float *q, const float *k, const float *v,
+    int B, int T, int C, int H
+) {
+    int d_k = C / H;
+    float scale = 1.0f / sqrtf((float)d_k);
+
+    memset(dq, 0, sizeof(float) * B * H * T * d_k);
+    memset(dk, 0, sizeof(float) * B * H * T * d_k);
+    memset(dv, 0, sizeof(float) * B * H * T * d_k);
+    memset(datt_scores, 0, sizeof(float) * B * H * T * T);
+
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < H; h++) {
+            for (int tq = 0; tq < T; tq++) {
+                const float *dout_head_row = dout + IDX4(b, h, tq, 0, H, T, d_k);
+                const float *att_row = att_scores + IDX_ATTN(b, h, tq, 0, H, T);
+                float *datt_row = datt_scores + IDX_ATTN(b, h, tq, 0, H, T);
+
+                /* 1. Gradient w.r.t. att_scores and w.r.t. V */
+                for (int tk = 0; tk <= tq; tk++) {
+                    const float *v_row = v + IDX4(b, h, tk, 0, H, T, d_k);
+                    float *dv_row = dv + IDX4(b, h, tk, 0, H, T, d_k);
+                    float d_att = 0.0f;
+                    for (int d = 0; d < d_k; d++) {
+                        d_att += dout_head_row[d] * v_row[d];
+                        dv_row[d] += att_row[tk] * dout_head_row[d];
+                    }
+                    datt_row[tk] = d_att;
+                }
+
+                /* 2. Gradient through causal softmax */
+                float sum_datt_att = 0.0f;
+                for (int tk = 0; tk <= tq; tk++) {
+                    sum_datt_att += datt_row[tk] * att_row[tk];
+                }
+
+                /* 3. Gradient w.r.t. Q and K */
+                float *dq_row = dq + IDX4(b, h, tq, 0, H, T, d_k);
+                for (int tk = 0; tk <= tq; tk++) {
+                    float dscore = att_row[tk] * (datt_row[tk] - sum_datt_att) * scale;
+                    const float *k_row = k + IDX4(b, h, tk, 0, H, T, d_k);
+                    float *dk_row = dk + IDX4(b, h, tk, 0, H, T, d_k);
+                    const float *q_row = q + IDX4(b, h, tq, 0, H, T, d_k);
+
+                    for (int d = 0; d < d_k; d++) {
+                        dq_row[d] += dscore * k_row[d];
+                        dk_row[d] += dscore * q_row[d];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 6. Cross-Entropy Loss with Softmax over Vocabulary                         */
+/* ========================================================================= */
+
+float rcre_transformer_cross_entropy_forward(float *probs, const float *logits, const int *targets, int N, int V) {
+    rcre_transformer_softmax_forward(probs, logits, N, V);
+
+    float total_loss = 0.0f;
+    for (int n = 0; n < N; n++) {
+        int target = targets[n];
+        assert(target >= 0 && target < V);
+        float p = probs[n * V + target];
+        total_loss += -logf(p + 1e-12f);
+    }
+    return total_loss / (float)N;
+}
+
+void rcre_transformer_cross_entropy_backward(float *dlogits, const float *probs, const int *targets, int N, int V) {
+    float inv_N = 1.0f / (float)N;
+    for (int n = 0; n < N; n++) {
+        int target = targets[n];
+        for (int v = 0; v < V; v++) {
+            float p = probs[n * V + v];
+            if (v == target) {
+                dlogits[n * V + v] = (p - 1.0f) * inv_N;
+            } else {
+                dlogits[n * V + v] = p * inv_N;
+            }
+        }
+    }
+}
+
+/* --- Source: model.c --- */
+/**
+ * @file model.c
+ * @brief RCRE GPT Model Architecture, Lifecycle, Forward & Backward Passes (ISO C23)
+ */
+
+
+static void map_block_pointers(RCRE_GPTBlockWeights *block, float *base, const RCRE_GPTConfig *cfg, size_t *offset) {
+    int C = cfg->embed_dim;
+    int M = cfg->mlp_dim;
+
+    block->ln1_w = base + *offset; *offset += C;
+    block->ln1_b = base + *offset; *offset += C;
+
+    block->q_w = base + *offset; *offset += C * C;
+    block->q_b = base + *offset; *offset += C;
+
+    block->k_w = base + *offset; *offset += C * C;
+    block->k_b = base + *offset; *offset += C;
+
+    block->v_w = base + *offset; *offset += C * C;
+    block->v_b = base + *offset; *offset += C;
+
+    block->proj_w = base + *offset; *offset += C * C;
+    block->proj_b = base + *offset; *offset += C;
+
+    block->ln2_w = base + *offset; *offset += C;
+    block->ln2_b = base + *offset; *offset += C;
+
+    block->fc1_w = base + *offset; *offset += C * M;
+    block->fc1_b = base + *offset; *offset += M;
+
+    block->fc2_w = base + *offset; *offset += M * C;
+    block->fc2_b = base + *offset; *offset += C;
+}
+
+RCRE_GPTModel* rcre_gpt_create(RCRE_GPTConfig config, RCRE_Arena *arena) {
+    bool owns_heap = (arena == nullptr);
+    RCRE_GPTModel *model = (RCRE_GPTModel*)rcre_transformer_alloc_mem(arena, sizeof(RCRE_GPTModel), alignof(RCRE_GPTModel));
+    if (!model) return nullptr;
+
+    model->config = config;
+    model->arena = arena;
+    model->owns_heap = owns_heap;
+
+    int V = config.vocab_size;
+    int T = config.seq_len;
+    int C = config.embed_dim;
+    int L = config.num_layers;
+    int M = config.mlp_dim;
+
+    /* Calculate total parameter count */
+    size_t count = 0;
+    count += (size_t)V * C; /* wte */
+    count += (size_t)T * C; /* wpe */
+    size_t block_params = (size_t)(2 * C) +
+                          (size_t)(C * C + C) * 3 +
+                          (size_t)(C * C + C) +
+                          (size_t)(2 * C) +
+                          (size_t)(C * M + M) +
+                          (size_t)(M * C + C);
+    count += (size_t)L * block_params;
+    count += (size_t)(2 * C); /* ln_f */
+    count += (size_t)(C * V); /* head_w */
+
+    model->num_params = count;
+
+    /* Aligned allocations for parameters, gradients, and optimizer state */
+    model->params = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * count, 64);
+    model->grads  = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * count, 64);
+    model->m      = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * count, 64);
+    model->v      = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * count, 64);
+
+    if (!model->params || !model->grads || !model->m || !model->v) {
+        rcre_gpt_free(model);
+        return nullptr;
+    }
+
+    memset(model->grads, 0, sizeof(float) * count);
+    memset(model->m, 0, sizeof(float) * count);
+    memset(model->v, 0, sizeof(float) * count);
+
+    /* Map flat parameter buffer into structured pointers */
+    size_t offset = 0;
+    model->wte = model->params + offset; offset += (size_t)V * C;
+    model->wpe = model->params + offset; offset += (size_t)T * C;
+
+    model->blocks = (RCRE_GPTBlockWeights*)rcre_transformer_alloc_mem(arena, sizeof(RCRE_GPTBlockWeights) * L, alignof(RCRE_GPTBlockWeights));
+    if (!model->blocks) {
+        rcre_gpt_free(model);
+        return nullptr;
+    }
+
+    for (int l = 0; l < L; l++) {
+        map_block_pointers(&model->blocks[l], model->params, &config, &offset);
+    }
+
+    model->ln_f_w = model->params + offset; offset += C;
+    model->ln_f_b = model->params + offset; offset += C;
+    model->head_w = model->params + offset; offset += (size_t)C * V;
+
+    assert(offset == count);
+    return model;
+}
+
+void rcre_gpt_init_weights(RCRE_GPTModel *model, uint64_t *rng_state) {
+    uint64_t local_state = 1337ULL;
+    uint64_t *rng = rng_state ? rng_state : &local_state;
+    float std = 0.02f;
+
+    memset(model->params, 0, sizeof(float) * model->num_params);
+
+    /* 1. Embeddings */
+    for (size_t i = 0; i < (size_t)model->config.vocab_size * model->config.embed_dim; i++) {
+        model->wte[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
+    }
+    for (size_t i = 0; i < (size_t)model->config.seq_len * model->config.embed_dim; i++) {
+        model->wpe[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
+    }
+
+    /* 2. Transformer Blocks */
+    int C = model->config.embed_dim;
+    int M = model->config.mlp_dim;
+
+    for (int l = 0; l < model->config.num_layers; l++) {
+        RCRE_GPTBlockWeights *b = &model->blocks[l];
+        for (int i = 0; i < C; i++) {
+            b->ln1_w[i] = 1.0f;
+            b->ln1_b[i] = 0.0f;
+            b->ln2_w[i] = 1.0f;
+            b->ln2_b[i] = 0.0f;
+        }
+        for (int i = 0; i < C * C; i++) {
+            b->q_w[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
+            b->k_w[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
+            b->v_w[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
+            b->proj_w[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
+        }
+        for (int i = 0; i < C * M; i++) b->fc1_w[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
+        for (int i = 0; i < M * C; i++) b->fc2_w[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
+    }
+
+    /* 3. Final LayerNorm & LM Head */
+    for (int i = 0; i < C; i++) {
+        model->ln_f_w[i] = 1.0f;
+        model->ln_f_b[i] = 0.0f;
+    }
+    for (size_t i = 0; i < (size_t)C * model->config.vocab_size; i++) {
+        model->head_w[i] = rcre_rng_gaussian_f32(rng, 0.0f, std);
+    }
+}
+
+void rcre_gpt_zero_grads(RCRE_GPTModel *model) {
+    if (model && model->grads) {
+        memset(model->grads, 0, sizeof(float) * model->num_params);
+    }
+}
+
+void rcre_gpt_free(RCRE_GPTModel *model) {
+    if (!model) return;
+    if (model->owns_heap) {
+        if (model->params) free(model->params);
+        if (model->grads)  free(model->grads);
+        if (model->m)      free(model->m);
+        if (model->v)      free(model->v);
+        if (model->blocks) free(model->blocks);
+        free(model);
+    }
+}
+
+RCRE_GPTActs* rcre_gpt_acts_create(RCRE_GPTConfig config, int B, int T, RCRE_Arena *arena) {
+    bool owns_heap = (arena == nullptr);
+    RCRE_GPTActs *acts = (RCRE_GPTActs*)rcre_transformer_alloc_mem(arena, sizeof(RCRE_GPTActs), alignof(RCRE_GPTActs));
+    if (!acts) return nullptr;
+
+    acts->arena = arena;
+    acts->owns_heap = owns_heap;
+
+    int C = config.embed_dim;
+    int H = config.num_heads;
+    int L = config.num_layers;
+    int M = config.mlp_dim;
+    int V = config.vocab_size;
+    int BT = B * T;
+
+    acts->emb_out   = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+    acts->ln_f_out  = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+    acts->ln_f_mean = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT, 64);
+    acts->ln_f_rstd = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT, 64);
+    acts->logits    = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * V, 64);
+    acts->probs     = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * V, 64);
+
+    acts->blocks = (RCRE_GPTBlockActs*)rcre_transformer_alloc_mem(arena, sizeof(RCRE_GPTBlockActs) * L, alignof(RCRE_GPTBlockActs));
+    if (!acts->blocks) {
+        rcre_gpt_acts_free(acts, L);
+        return nullptr;
+    }
+
+    for (int l = 0; l < L; l++) {
+        RCRE_GPTBlockActs *ba = &acts->blocks[l];
+        ba->ln1_out    = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+        ba->ln1_mean   = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT, 64);
+        ba->ln1_rstd   = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT, 64);
+        ba->q          = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+        ba->k          = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+        ba->v          = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+        ba->att_scores = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * B * H * T * T, 64);
+        ba->att_out    = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+        ba->proj_out   = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+        ba->resid1_out = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+
+        ba->ln2_out    = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+        ba->ln2_mean   = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT, 64);
+        ba->ln2_rstd   = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT, 64);
+        ba->fc1_out    = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * M, 64);
+        ba->gelu_out   = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * M, 64);
+        ba->fc2_out    = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+        ba->resid2_out = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+    }
+    return acts;
+}
+
+void rcre_gpt_acts_free(RCRE_GPTActs *acts, int num_layers) {
+    if (!acts) return;
+    if (acts->owns_heap) {
+        if (acts->emb_out)   free(acts->emb_out);
+        if (acts->ln_f_out)  free(acts->ln_f_out);
+        if (acts->ln_f_mean) free(acts->ln_f_mean);
+        if (acts->ln_f_rstd) free(acts->ln_f_rstd);
+        if (acts->logits)    free(acts->logits);
+        if (acts->probs)     free(acts->probs);
+
+        if (acts->blocks) {
+            for (int l = 0; l < num_layers; l++) {
+                RCRE_GPTBlockActs *ba = &acts->blocks[l];
+                if (ba->ln1_out)    free(ba->ln1_out);
+                if (ba->ln1_mean)   free(ba->ln1_mean);
+                if (ba->ln1_rstd)   free(ba->ln1_rstd);
+                if (ba->q)          free(ba->q);
+                if (ba->k)          free(ba->k);
+                if (ba->v)          free(ba->v);
+                if (ba->att_scores) free(ba->att_scores);
+                if (ba->att_out)    free(ba->att_out);
+                if (ba->proj_out)   free(ba->proj_out);
+                if (ba->resid1_out) free(ba->resid1_out);
+                if (ba->ln2_out)    free(ba->ln2_out);
+                if (ba->ln2_mean)   free(ba->ln2_mean);
+                if (ba->ln2_rstd)   free(ba->ln2_rstd);
+                if (ba->fc1_out)    free(ba->fc1_out);
+                if (ba->gelu_out)   free(ba->gelu_out);
+                if (ba->fc2_out)    free(ba->fc2_out);
+                if (ba->resid2_out) free(ba->resid2_out);
+            }
+            free(acts->blocks);
+        }
+        free(acts);
+    }
+}
+
+float rcre_gpt_forward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inputs, const int *targets, int B, int T) {
+    const RCRE_GPTConfig *cfg = &model->config;
+    int C = cfg->embed_dim;
+    int H = cfg->num_heads;
+    int L = cfg->num_layers;
+    int M = cfg->mlp_dim;
+    int V = cfg->vocab_size;
+    int BT = B * T;
+
+    /* 1. Embedding: emb_out = wte[token] + wpe[t] */
+    for (int b = 0; b < B; b++) {
+        for (int t = 0; t < T; t++) {
+            int token = inputs[b * T + t];
+            assert(token >= 0 && token < V);
+            const float *wte_row = model->wte + token * C;
+            const float *wpe_row = model->wpe + t * C;
+            float *out_row = acts->emb_out + IDX3(b, t, 0, T, C);
+            for (int c = 0; c < C; c++) {
+                out_row[c] = wte_row[c] + wpe_row[c];
+            }
+        }
+    }
+
+    /* 2. Transformer Blocks */
+    const float *curr_input = acts->emb_out;
+
+    for (int l = 0; l < L; l++) {
+        RCRE_GPTBlockWeights *w = &model->blocks[l];
+        RCRE_GPTBlockActs *a = &acts->blocks[l];
+
+        rcre_transformer_layernorm_forward(a->ln1_out, a->ln1_mean, a->ln1_rstd, curr_input, w->ln1_w, w->ln1_b, BT, C);
+
+        rcre_transformer_linear_forward(a->q, a->ln1_out, w->q_w, w->q_b, BT, C, C);
+        rcre_transformer_linear_forward(a->k, a->ln1_out, w->k_w, w->k_b, BT, C, C);
+        rcre_transformer_linear_forward(a->v, a->ln1_out, w->v_w, w->v_b, BT, C, C);
+
+        rcre_transformer_attention_forward(a->att_out, a->att_scores, a->q, a->k, a->v, B, T, C, H);
+
+        rcre_transformer_linear_forward(a->proj_out, a->att_out, w->proj_w, w->proj_b, BT, C, C);
+
+        for (int i = 0; i < BT * C; i++) {
+            a->resid1_out[i] = curr_input[i] + a->proj_out[i];
+        }
+
+        rcre_transformer_layernorm_forward(a->ln2_out, a->ln2_mean, a->ln2_rstd, a->resid1_out, w->ln2_w, w->ln2_b, BT, C);
+
+        rcre_transformer_linear_forward(a->fc1_out, a->ln2_out, w->fc1_w, w->fc1_b, BT, C, M);
+        rcre_transformer_gelu_forward(a->gelu_out, a->fc1_out, BT * M);
+        rcre_transformer_linear_forward(a->fc2_out, a->gelu_out, w->fc2_w, w->fc2_b, BT, M, C);
+
+        for (int i = 0; i < BT * C; i++) {
+            a->resid2_out[i] = a->resid1_out[i] + a->fc2_out[i];
+        }
+
+        curr_input = a->resid2_out;
+    }
+
+    /* 3. Final LayerNorm */
+    rcre_transformer_layernorm_forward(acts->ln_f_out, acts->ln_f_mean, acts->ln_f_rstd, curr_input, model->ln_f_w, model->ln_f_b, BT, C);
+
+    /* 4. LM Head Projection */
+    rcre_transformer_linear_forward(acts->logits, acts->ln_f_out, model->head_w, nullptr, BT, C, V);
+
+    /* 5. Loss */
+    if (targets != nullptr) {
+        return rcre_transformer_cross_entropy_forward(acts->probs, acts->logits, targets, BT, V);
+    }
+    return 0.0f;
+}
+
+void rcre_gpt_backward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inputs, const int *targets, int B, int T) {
+    const RCRE_GPTConfig *cfg = &model->config;
+    int C = cfg->embed_dim;
+    int H = cfg->num_heads;
+    int L = cfg->num_layers;
+    int M = cfg->mlp_dim;
+    int V = cfg->vocab_size;
+    int BT = B * T;
+
+    /* Temporary scratch buffers for backpropagation */
+    float *d_logits = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * V, 64);
+    float *d_ln_f   = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+    float *d_x      = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+    float *d_ln_out = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+    float *d_fc1    = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * M, 64);
+    float *d_gelu   = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * M, 64);
+    float *d_att    = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+    float *dq       = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+    float *dk       = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+    float *dv       = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+    float *datt_sc  = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * B * H * T * T, 64);
+    float *d_qkv_in = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+    float *d_resid1 = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+
+    size_t offset = 0;
+    float *d_wte = model->grads + offset; offset += (size_t)V * C;
+    float *d_wpe = model->grads + offset; offset += (size_t)T * C;
+
+    RCRE_GPTBlockWeights d_blocks[L];
+    for (int l = 0; l < L; l++) {
+        map_block_pointers(&d_blocks[l], model->grads, cfg, &offset);
+    }
+
+    float *d_ln_f_w = model->grads + offset; offset += C;
+    float *d_ln_f_b = model->grads + offset; offset += C;
+    float *d_head_w = model->grads + offset; offset += (size_t)C * V;
+
+    /* 1. Loss Gradient */
+    rcre_transformer_cross_entropy_backward(d_logits, acts->probs, targets, BT, V);
+
+    /* 2. LM Head Gradient */
+    rcre_transformer_linear_backward(d_ln_f, d_head_w, nullptr, d_logits, acts->ln_f_out, model->head_w, BT, C, V);
+
+    /* 3. Final LayerNorm Backward */
+    const float *last_resid = acts->blocks[L - 1].resid2_out;
+    rcre_transformer_layernorm_backward(d_x, d_ln_f_w, d_ln_f_b, d_ln_f, last_resid, acts->ln_f_mean, acts->ln_f_rstd, model->ln_f_w, BT, C);
+
+    /* 4. Blocks Backward */
+    for (int l = L - 1; l >= 0; l--) {
+        RCRE_GPTBlockWeights *w = &model->blocks[l];
+        RCRE_GPTBlockWeights *dw = &d_blocks[l];
+        RCRE_GPTBlockActs *a = &acts->blocks[l];
+
+        rcre_transformer_linear_backward(d_gelu, dw->fc2_w, dw->fc2_b, d_x, a->gelu_out, w->fc2_w, BT, M, C);
+        rcre_transformer_gelu_backward(d_fc1, a->fc1_out, d_gelu, BT * M);
+        rcre_transformer_linear_backward(d_ln_out, dw->fc1_w, dw->fc1_b, d_fc1, a->ln2_out, w->fc1_w, BT, C, M);
+
+        rcre_transformer_layernorm_backward(d_resid1, dw->ln2_w, dw->ln2_b, d_ln_out, a->resid1_out, a->ln2_mean, a->ln2_rstd, w->ln2_w, BT, C);
+
+        for (int i = 0; i < BT * C; i++) {
+            d_resid1[i] += d_x[i];
+        }
+
+        rcre_transformer_linear_backward(d_att, dw->proj_w, dw->proj_b, d_resid1, a->att_out, w->proj_w, BT, C, C);
+        rcre_transformer_attention_backward(dq, dk, dv, datt_sc, d_att, a->att_scores, a->q, a->k, a->v, B, T, C, H);
+
+        memset(d_qkv_in, 0, sizeof(float) * BT * C);
+        rcre_transformer_linear_backward(d_ln_out, dw->q_w, dw->q_b, dq, a->ln1_out, w->q_w, BT, C, C);
+        for (int i = 0; i < BT * C; i++) d_qkv_in[i] += d_ln_out[i];
+
+        rcre_transformer_linear_backward(d_ln_out, dw->k_w, dw->k_b, dk, a->ln1_out, w->k_w, BT, C, C);
+        for (int i = 0; i < BT * C; i++) d_qkv_in[i] += d_ln_out[i];
+
+        rcre_transformer_linear_backward(d_ln_out, dw->v_w, dw->v_b, dv, a->ln1_out, w->v_w, BT, C, C);
+        for (int i = 0; i < BT * C; i++) d_qkv_in[i] += d_ln_out[i];
+
+        const float *prev_input = (l > 0) ? acts->blocks[l - 1].resid2_out : acts->emb_out;
+        rcre_transformer_layernorm_backward(d_x, dw->ln1_w, dw->ln1_b, d_qkv_in, prev_input, a->ln1_mean, a->ln1_rstd, w->ln1_w, BT, C);
+
+        for (int i = 0; i < BT * C; i++) {
+            d_x[i] += d_resid1[i];
+        }
+    }
+
+    /* 5. Embedding Backward */
+    for (int b = 0; b < B; b++) {
+        for (int t = 0; t < T; t++) {
+            int token = inputs[b * T + t];
+            const float *d_emb = d_x + IDX3(b, t, 0, T, C);
+            float *dwte_row = d_wte + token * C;
+            float *dwpe_row = d_wpe + t * C;
+            for (int c = 0; c < C; c++) {
+                dwte_row[c] += d_emb[c];
+                dwpe_row[c] += d_emb[c];
+            }
+        }
+    }
+
+    /* Free temporary scratch buffers */
+    free(d_logits);
+    free(d_ln_f);
+    free(d_x);
+    free(d_ln_out);
+    free(d_fc1);
+    free(d_gelu);
+    free(d_att);
+    free(dq);
+    free(dk);
+    free(dv);
+    free(datt_sc);
+    free(d_qkv_in);
+    free(d_resid1);
+}
+
+/* --- Source: kv_cache.c --- */
+/**
+ * @file kv_cache.c
+ * @brief RCRE Key-Value (KV) Cache Engine for O(1) Autoregressive Generation (ISO C23)
+ */
+
+
+RCRE_KVCache* rcre_kv_cache_create(RCRE_GPTConfig config, RCRE_Arena *arena) {
+    bool owns_heap = (arena == nullptr);
+    RCRE_KVCache *cache = (RCRE_KVCache*)rcre_transformer_alloc_mem(arena, sizeof(RCRE_KVCache), alignof(RCRE_KVCache));
+    if (!cache) return nullptr;
+
+    int L = config.num_layers;
+    int H = config.num_heads;
+    int max_T = config.seq_len;
+    int d_k = config.head_dim;
+    size_t size = (size_t)L * H * max_T * d_k;
+
+    cache->k = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * size, 64);
+    cache->v = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * size, 64);
+    cache->max_seq_len = max_T;
+    cache->current_pos = 0;
+    cache->arena = arena;
+    cache->owns_heap = owns_heap;
+
+    if (!cache->k || !cache->v) {
+        rcre_kv_cache_free(cache);
+        return nullptr;
+    }
+    memset(cache->k, 0, sizeof(float) * size);
+    memset(cache->v, 0, sizeof(float) * size);
+    return cache;
+}
+
+void rcre_kv_cache_reset(RCRE_KVCache *cache) {
+    if (cache) {
+        cache->current_pos = 0;
+    }
+}
+
+void rcre_kv_cache_free(RCRE_KVCache *cache) {
+    if (!cache) return;
+    if (cache->owns_heap) {
+        if (cache->k) free(cache->k);
+        if (cache->v) free(cache->v);
+        free(cache);
+    }
+}
+
+void rcre_gpt_forward_token(
+    RCRE_GPTModel *model,
+    RCRE_KVCache *cache,
+    int token,
+    int pos,
+    float *out_logits
+) {
+    const RCRE_GPTConfig *cfg = &model->config;
+    int C = cfg->embed_dim;
+    int H = cfg->num_heads;
+    int L = cfg->num_layers;
+    int M = cfg->mlp_dim;
+    int V = cfg->vocab_size;
+    int max_T = cfg->seq_len;
+    int d_k = cfg->head_dim;
+    float scale = 1.0f / sqrtf((float)d_k);
+
+    assert(pos < max_T);
+    assert(token >= 0 && token < V);
+
+    /* Allocate local buffers dynamically to avoid VLA stack limits */
+    float *x        = (float*)malloc(sizeof(float) * C);
+    float *x_norm   = (float*)malloc(sizeof(float) * C);
+    float *q        = (float*)malloc(sizeof(float) * C);
+    float *k        = (float*)malloc(sizeof(float) * C);
+    float *v        = (float*)malloc(sizeof(float) * C);
+    float *att_out  = (float*)malloc(sizeof(float) * C);
+    float *proj_out = (float*)malloc(sizeof(float) * C);
+    float *fc1_out  = (float*)malloc(sizeof(float) * M);
+    float *gelu_out = (float*)malloc(sizeof(float) * M);
+    float *fc2_out  = (float*)malloc(sizeof(float) * C);
+    float *scores   = (float*)malloc(sizeof(float) * (pos + 1));
+    float mean = 0.0f, rstd = 0.0f;
+
+    /* 1. Embedding: wte[token] + wpe[pos] */
+    const float *wte_row = model->wte + token * C;
+    const float *wpe_row = model->wpe + pos * C;
+    for (int c = 0; c < C; c++) {
+        x[c] = wte_row[c] + wpe_row[c];
+    }
+
+    /* 2. Transformer Blocks */
+    for (int l = 0; l < L; l++) {
+        RCRE_GPTBlockWeights *w = &model->blocks[l];
+
+        rcre_transformer_layernorm_forward(x_norm, &mean, &rstd, x, w->ln1_w, w->ln1_b, 1, C);
+
+        rcre_transformer_linear_forward(q, x_norm, w->q_w, w->q_b, 1, C, C);
+        rcre_transformer_linear_forward(k, x_norm, w->k_w, w->k_b, 1, C, C);
+        rcre_transformer_linear_forward(v, x_norm, w->v_w, w->v_b, 1, C, C);
+
+        /* Store k and v into KV-cache at position pos */
+        for (int h = 0; h < H; h++) {
+            size_t slot_idx = (size_t)l * (H * max_T * d_k) + (size_t)h * (max_T * d_k) + (size_t)pos * d_k;
+            memcpy(cache->k + slot_idx, k + h * d_k, sizeof(float) * d_k);
+            memcpy(cache->v + slot_idx, v + h * d_k, sizeof(float) * d_k);
+        }
+
+        /* Attention over cached keys and values */
+        for (int h = 0; h < H; h++) {
+            const float *q_head = q + h * d_k;
+            float *out_head = att_out + h * d_k;
+
+            float max_s = -1e9f;
+            for (int s = 0; s <= pos; s++) {
+                size_t k_idx = (size_t)l * (H * max_T * d_k) + (size_t)h * (max_T * d_k) + (size_t)s * d_k;
+                const float *k_head = cache->k + k_idx;
+                float dot = 0.0f;
+                for (int d = 0; d < d_k; d++) {
+                    dot += q_head[d] * k_head[d];
+                }
+                dot *= scale;
+                scores[s] = dot;
+                if (dot > max_s) max_s = dot;
+            }
+
+            float sum = 0.0f;
+            for (int s = 0; s <= pos; s++) {
+                float e = expf(scores[s] - max_s);
+                scores[s] = e;
+                sum += e;
+            }
+            float inv_sum = 1.0f / sum;
+
+            for (int d = 0; d < d_k; d++) {
+                float val = 0.0f;
+                for (int s = 0; s <= pos; s++) {
+                    size_t v_idx = (size_t)l * (H * max_T * d_k) + (size_t)h * (max_T * d_k) + (size_t)s * d_k;
+                    val += (scores[s] * inv_sum) * cache->v[v_idx + d];
+                }
+                out_head[d] = val;
+            }
+        }
+
+        rcre_transformer_linear_forward(proj_out, att_out, w->proj_w, w->proj_b, 1, C, C);
+
+        for (int c = 0; c < C; c++) {
+            x[c] += proj_out[c];
+        }
+
+        rcre_transformer_layernorm_forward(x_norm, &mean, &rstd, x, w->ln2_w, w->ln2_b, 1, C);
+
+        rcre_transformer_linear_forward(fc1_out, x_norm, w->fc1_w, w->fc1_b, 1, C, M);
+        rcre_transformer_gelu_forward(gelu_out, fc1_out, M);
+        rcre_transformer_linear_forward(fc2_out, gelu_out, w->fc2_w, w->fc2_b, 1, M, C);
+
+        for (int c = 0; c < C; c++) {
+            x[c] += fc2_out[c];
+        }
+    }
+
+    /* 3. Final LayerNorm */
+    rcre_transformer_layernorm_forward(x_norm, &mean, &rstd, x, model->ln_f_w, model->ln_f_b, 1, C);
+
+    /* 4. LM Head Projection */
+    rcre_transformer_linear_forward(out_logits, x_norm, model->head_w, nullptr, 1, C, V);
+
+    free(x);
+    free(x_norm);
+    free(q);
+    free(k);
+    free(v);
+    free(att_out);
+    free(proj_out);
+    free(fc1_out);
+    free(gelu_out);
+    free(fc2_out);
+    free(scores);
+}
+
+/* --- Source: tokenizer.c --- */
+/**
+ * @file tokenizer.c
+ * @brief RCRE Character & Byte-Pair Encoding (BPE) Subword Tokenizers (ISO C23)
+ */
+
+
+/* ========================================================================= */
+/* Character-Level Tokenizer                                                 */
+/* ========================================================================= */
+
+void rcre_char_tokenizer_init(RCRE_CharTokenizer *tok) {
+    if (!tok) return;
+    tok->vocab_size = 0;
+    for (int i = 0; i < 256; i++) {
+        tok->char_to_id[i] = -1;
+        tok->id_to_char[i] = 0;
+    }
+}
+
+bool rcre_char_tokenizer_train_from_file(RCRE_CharTokenizer *tok, const char *filepath) {
+    rcre_char_tokenizer_init(tok);
+
+    FILE *f = fopen(filepath, "rb");
+    if (!f) {
+        return false;
+    }
+
+    bool seen[256] = {false};
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        seen[(unsigned char)c] = true;
+    }
+    fclose(f);
+
+    int id = 0;
+    for (int i = 0; i < 256; i++) {
+        if (seen[i]) {
+            tok->char_to_id[i] = id;
+            tok->id_to_char[id] = (unsigned char)i;
+            id++;
+        }
+    }
+    tok->vocab_size = id;
+    return true;
+}
+
+bool rcre_char_tokenizer_save(const RCRE_CharTokenizer *tok, const char *filepath) {
+    FILE *f = fopen(filepath, "wb");
+    if (!f) return false;
+    if (fwrite(&tok->vocab_size, sizeof(int), 1, f) != 1) { fclose(f); return false; }
+    if (fwrite(tok->id_to_char, sizeof(unsigned char), (size_t)tok->vocab_size, f) != (size_t)tok->vocab_size) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+    return true;
+}
+
+bool rcre_char_tokenizer_load(RCRE_CharTokenizer *tok, const char *filepath) {
+    rcre_char_tokenizer_init(tok);
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return false;
+    if (fread(&tok->vocab_size, sizeof(int), 1, f) != 1) {
+        fclose(f);
+        return false;
+    }
+    if (fread(tok->id_to_char, sizeof(unsigned char), (size_t)tok->vocab_size, f) != (size_t)tok->vocab_size) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    for (int i = 0; i < tok->vocab_size; i++) {
+        unsigned char ch = tok->id_to_char[i];
+        tok->char_to_id[ch] = i;
+    }
+    return true;
+}
+
+int rcre_char_tokenizer_encode(const RCRE_CharTokenizer *tok, const char *text, size_t len, int *out_tokens) {
+    int count = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        int id = tok->char_to_id[ch];
+        if (id != -1) {
+            out_tokens[count++] = id;
+        }
+    }
+    return count;
+}
+
+size_t rcre_char_tokenizer_decode(const RCRE_CharTokenizer *tok, const int *tokens, size_t num_tokens, char *out_text, size_t max_out_len) {
+    size_t i = 0;
+    for (; i < num_tokens && i + 1 < max_out_len; i++) {
+        int token_id = tokens[i];
+        if (token_id >= 0 && token_id < tok->vocab_size) {
+            out_text[i] = (char)tok->id_to_char[token_id];
+        } else {
+            out_text[i] = '?';
+        }
+    }
+    out_text[i] = '\0';
+    return i;
+}
+
+void rcre_char_tokenizer_print_info(const RCRE_CharTokenizer *tok) {
+    printf("========================================\n");
+    printf("   Tokenizer Vocabulary Info (V = %d)   \n", tok->vocab_size);
+    printf("========================================\n");
+    for (int i = 0; i < tok->vocab_size; i++) {
+        unsigned char c = tok->id_to_char[i];
+        if (c == '\n') {
+            printf("[%2d]: '\\n'  ", i);
+        } else if (c == ' ') {
+            printf("[%2d]: ' '   ", i);
+        } else if (c == '\t') {
+            printf("[%2d]: '\\t'  ", i);
+        } else if (c >= 32 && c <= 126) {
+            printf("[%2d]: '%c'   ", i, c);
+        } else {
+            printf("[%2d]: 0x%02X ", i, c);
+        }
+        if ((i + 1) % 6 == 0) printf("\n");
+    }
+    printf("\n========================================\n");
+}
+
+/* ========================================================================= */
+/* Byte-Pair Encoding (BPE) Subword Tokenizer                                */
+/* ========================================================================= */
+
+RCRE_BPETokenizer* rcre_bpe_create(void) {
+    RCRE_BPETokenizer *tok = (RCRE_BPETokenizer*)malloc(sizeof(RCRE_BPETokenizer));
+    if (!tok) return nullptr;
+
+    tok->vocab_size = 256;
+    tok->num_rules = 0;
+    tok->rules = nullptr;
+
+    tok->id_to_token_str = (char**)malloc(sizeof(char*) * 2048);
+    for (int i = 0; i < 256; i++) {
+        tok->id_to_token_str[i] = (char*)malloc(2);
+        tok->id_to_token_str[i][0] = (char)(unsigned char)i;
+        tok->id_to_token_str[i][1] = '\0';
+    }
+    for (int i = 256; i < 2048; i++) {
+        tok->id_to_token_str[i] = nullptr;
+    }
+    return tok;
+}
+
+bool rcre_bpe_train_from_file(RCRE_BPETokenizer *tok, const char *filepath, int target_vocab_size) {
+    if (target_vocab_size <= 256 || target_vocab_size > 2048) {
+        return false;
+    }
+
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return false;
+
+    size_t max_sample = 250000;
+    unsigned char *raw_bytes = (unsigned char*)malloc(max_sample);
+    if (!raw_bytes) { fclose(f); return false; }
+    size_t n_read = fread(raw_bytes, 1, max_sample, f);
+    fclose(f);
+
+    if (n_read < 100) {
+        free(raw_bytes);
+        return false;
+    }
+
+    size_t current_len = n_read;
+    uint16_t *tokens = (uint16_t*)malloc(sizeof(uint16_t) * current_len);
+    if (!tokens) { free(raw_bytes); return false; }
+    for (size_t i = 0; i < current_len; i++) {
+        tokens[i] = (uint16_t)raw_bytes[i];
+    }
+    free(raw_bytes);
+
+    int max_merges = target_vocab_size - 256;
+    tok->rules = (RCRE_BPEMergeRule*)malloc(sizeof(RCRE_BPEMergeRule) * max_merges);
+    tok->num_rules = 0;
+
+    int current_vocab = 256;
+
+    for (int m = 0; m < max_merges; m++) {
+        size_t map_size = (size_t)current_vocab * current_vocab;
+        uint32_t *counts = (uint32_t*)calloc(map_size, sizeof(uint32_t));
+        if (!counts) break;
+
+        for (size_t i = 0; i + 1 < current_len; i++) {
+            uint16_t t1 = tokens[i];
+            uint16_t t2 = tokens[i + 1];
+            counts[t1 * current_vocab + t2]++;
+        }
+
+        uint32_t best_count = 0;
+        uint16_t best_p1 = 0, best_p2 = 0;
+        for (int p1 = 0; p1 < current_vocab; p1++) {
+            for (int p2 = 0; p2 < current_vocab; p2++) {
+                uint32_t c = counts[p1 * current_vocab + p2];
+                if (c > best_count) {
+                    best_count = c;
+                    best_p1 = (uint16_t)p1;
+                    best_p2 = (uint16_t)p2;
+                }
+            }
+        }
+        free(counts);
+
+        if (best_count <= 1) {
+            break;
+        }
+
+        uint16_t new_id = (uint16_t)current_vocab;
+        tok->rules[tok->num_rules].id1 = best_p1;
+        tok->rules[tok->num_rules].id2 = best_p2;
+        tok->rules[tok->num_rules].new_id = new_id;
+        tok->num_rules++;
+
+        size_t len1 = strlen(tok->id_to_token_str[best_p1]);
+        size_t len2 = strlen(tok->id_to_token_str[best_p2]);
+        char *merged_str = (char*)malloc(len1 + len2 + 1);
+        memcpy(merged_str, tok->id_to_token_str[best_p1], len1);
+        memcpy(merged_str + len1, tok->id_to_token_str[best_p2], len2);
+        merged_str[len1 + len2] = '\0';
+        tok->id_to_token_str[new_id] = merged_str;
+
+        size_t write_idx = 0;
+        for (size_t i = 0; i < current_len; i++) {
+            if (i + 1 < current_len && tokens[i] == best_p1 && tokens[i + 1] == best_p2) {
+                tokens[write_idx++] = new_id;
+                i++;
+            } else {
+                tokens[write_idx++] = tokens[i];
+            }
+        }
+        current_len = write_idx;
+        current_vocab++;
+    }
+
+    tok->vocab_size = current_vocab;
+    free(tokens);
+    return true;
+}
+
+bool rcre_bpe_save(const RCRE_BPETokenizer *tok, const char *filepath) {
+    FILE *f = fopen(filepath, "wb");
+    if (!f) return false;
+    fwrite(&tok->vocab_size, sizeof(int), 1, f);
+    fwrite(&tok->num_rules, sizeof(int), 1, f);
+    fwrite(tok->rules, sizeof(RCRE_BPEMergeRule), tok->num_rules, f);
+
+    for (int i = 0; i < tok->vocab_size; i++) {
+        size_t len = strlen(tok->id_to_token_str[i]);
+        fwrite(&len, sizeof(size_t), 1, f);
+        fwrite(tok->id_to_token_str[i], 1, len, f);
+    }
+    fclose(f);
+    return true;
+}
+
+bool rcre_bpe_load(RCRE_BPETokenizer *tok, const char *filepath) {
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return false;
+
+    if (fread(&tok->vocab_size, sizeof(int), 1, f) != 1) { fclose(f); return false; }
+    if (fread(&tok->num_rules, sizeof(int), 1, f) != 1) { fclose(f); return false; }
+
+    tok->rules = (RCRE_BPEMergeRule*)malloc(sizeof(RCRE_BPEMergeRule) * tok->num_rules);
+    if (fread(tok->rules, sizeof(RCRE_BPEMergeRule), tok->num_rules, f) != (size_t)tok->num_rules) {
+        fclose(f);
+        return false;
+    }
+
+    for (int i = 0; i < tok->vocab_size; i++) {
+        if (tok->id_to_token_str[i]) free(tok->id_to_token_str[i]);
+        size_t len = 0;
+        if (fread(&len, sizeof(size_t), 1, f) != 1) { fclose(f); return false; }
+        tok->id_to_token_str[i] = (char*)malloc(len + 1);
+        if (fread(tok->id_to_token_str[i], 1, len, f) != len) { fclose(f); return false; }
+        tok->id_to_token_str[i][len] = '\0';
+    }
+    fclose(f);
+    return true;
+}
+
+int rcre_bpe_encode(const RCRE_BPETokenizer *tok, const char *text, size_t text_len, int *out_tokens, int max_tokens) {
+    if (text_len == 0) return 0;
+
+    size_t cur_len = text_len;
+    uint16_t *buf = (uint16_t*)malloc(sizeof(uint16_t) * cur_len);
+    if (!buf) return 0;
+    for (size_t i = 0; i < cur_len; i++) {
+        buf[i] = (unsigned char)text[i];
+    }
+
+    for (int r = 0; r < tok->num_rules; r++) {
+        uint16_t p1 = tok->rules[r].id1;
+        uint16_t p2 = tok->rules[r].id2;
+        uint16_t new_id = tok->rules[r].new_id;
+
+        size_t write_idx = 0;
+        for (size_t i = 0; i < cur_len; i++) {
+            if (i + 1 < cur_len && buf[i] == p1 && buf[i + 1] == p2) {
+                buf[write_idx++] = new_id;
+                i++;
+            } else {
+                buf[write_idx++] = buf[i];
+            }
+        }
+        cur_len = write_idx;
+    }
+
+    int count = (cur_len < (size_t)max_tokens) ? (int)cur_len : max_tokens;
+    for (int i = 0; i < count; i++) {
+        out_tokens[i] = (int)buf[i];
+    }
+    free(buf);
+    return count;
+}
+
+size_t rcre_bpe_decode(const RCRE_BPETokenizer *tok, const int *tokens, size_t num_tokens, char *out_text, size_t max_out_len) {
+    size_t written = 0;
+    out_text[0] = '\0';
+
+    for (size_t i = 0; i < num_tokens; i++) {
+        int token_id = tokens[i];
+        if (token_id >= 0 && token_id < tok->vocab_size) {
+            const char *piece = tok->id_to_token_str[token_id];
+            size_t plen = strlen(piece);
+            if (written + plen < max_out_len) {
+                memcpy(out_text + written, piece, plen);
+                written += plen;
+                out_text[written] = '\0';
+            } else {
+                break;
+            }
+        }
+    }
+    return written;
+}
+
+void rcre_bpe_print_summary(const RCRE_BPETokenizer *tok) {
+    printf("===================================================================\n");
+    printf("   Byte-Pair Encoding (BPE) Summary: V = %d (%d Merges Learned)   \n",
+           tok->vocab_size, tok->num_rules);
+    printf("===================================================================\n");
+    printf("Top 15 Most Frequent Merged Tokens:\n");
+    for (int i = 0; i < 15 && i < tok->num_rules; i++) {
+        int id = 256 + i;
+        printf("  Token [%d]: \"", id);
+        for (const char *p = tok->id_to_token_str[id]; *p; p++) {
+            if (*p == '\n') printf("\\n");
+            else if (*p == '\t') printf("\\t");
+            else if (*p == ' ') printf(" ");
+            else printf("%c", *p);
+        }
+        printf("\"\n");
+    }
+    printf("===================================================================\n");
+}
+
+void rcre_bpe_free(RCRE_BPETokenizer *tok) {
+    if (tok) {
+        if (tok->rules) free(tok->rules);
+        if (tok->id_to_token_str) {
+            for (int i = 0; i < tok->vocab_size; i++) {
+                if (tok->id_to_token_str[i]) free(tok->id_to_token_str[i]);
+            }
+            free(tok->id_to_token_str);
+        }
+        free(tok);
+    }
+}
+
+/* --- Source: dataset.c --- */
+/**
+ * @file dataset.c
+ * @brief RCRE Dataset & Autoregressive DataLoader Subsystem (ISO C23)
+ */
+
+
+RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_CharTokenizer *tok, int batch_size, int seq_len) {
+    FILE *f = fopen(filepath, "rb");
+    if (!f) {
+        return nullptr;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (file_size <= 0) {
+        fclose(f);
+        return nullptr;
+    }
+
+    char *raw_text = (char*)malloc((size_t)file_size);
+    if (!raw_text) {
+        fclose(f);
+        return nullptr;
+    }
+
+    size_t read_bytes = fread(raw_text, 1, (size_t)file_size, f);
+    fclose(f);
+
+    RCRE_GPTDataLoader *loader = (RCRE_GPTDataLoader*)malloc(sizeof(RCRE_GPTDataLoader));
+    if (!loader) {
+        free(raw_text);
+        return nullptr;
+    }
+
+    loader->batch_size = batch_size;
+    loader->seq_len = seq_len;
+    loader->current_idx = 0;
+    loader->tokens = (int*)malloc(sizeof(int) * read_bytes);
+    if (!loader->tokens) {
+        free(raw_text);
+        free(loader);
+        return nullptr;
+    }
+
+    int valid_tokens = rcre_char_tokenizer_encode(tok, raw_text, read_bytes, loader->tokens);
+    free(raw_text);
+
+    loader->num_tokens = (size_t)valid_tokens;
+    if (loader->num_tokens <= (size_t)(seq_len + 1)) {
+        free(loader->tokens);
+        free(loader);
+        return nullptr;
+    }
+
+    return loader;
+}
+
+void rcre_gpt_dataloader_next_batch_random(RCRE_GPTDataLoader *loader, int *x_batch, int *y_batch, uint64_t *rng_state) {
+    size_t max_start = loader->num_tokens - (size_t)loader->seq_len - 1;
+    for (int b = 0; b < loader->batch_size; b++) {
+        size_t start;
+        if (rng_state != nullptr) {
+            start = (size_t)(rcre_rng_next(rng_state) % max_start);
+        } else {
+            start = (((size_t)rand() << 32) | (size_t)rand()) % max_start;
+        }
+        for (int t = 0; t < loader->seq_len; t++) {
+            x_batch[b * loader->seq_len + t] = loader->tokens[start + t];
+            y_batch[b * loader->seq_len + t] = loader->tokens[start + t + 1];
+        }
+    }
+}
+
+void rcre_gpt_dataloader_next_batch_sequential(RCRE_GPTDataLoader *loader, int *x_batch, int *y_batch) {
+    size_t max_start = loader->num_tokens - (size_t)loader->seq_len - 1;
+    for (int b = 0; b < loader->batch_size; b++) {
+        if (loader->current_idx >= max_start) {
+            loader->current_idx = 0;
+        }
+        size_t start = loader->current_idx;
+        for (int t = 0; t < loader->seq_len; t++) {
+            x_batch[b * loader->seq_len + t] = loader->tokens[start + t];
+            y_batch[b * loader->seq_len + t] = loader->tokens[start + t + 1];
+        }
+        loader->current_idx += (size_t)loader->seq_len;
+    }
+}
+
+void rcre_gpt_dataloader_reset(RCRE_GPTDataLoader *loader) {
+    if (loader) {
+        loader->current_idx = 0;
+    }
+}
+
+void rcre_gpt_dataloader_free(RCRE_GPTDataLoader *loader) {
+    if (loader) {
+        if (loader->tokens) {
+            free(loader->tokens);
+        }
+        free(loader);
+    }
+}
+
+/* --- Source: optim.c --- */
+/**
+ * @file optim.c
+ * @brief RCRE Decoupled Weight Decay AdamW Optimizer & Learning Rate Schedule (ISO C23)
+ */
+
+
+float rcre_gpt_get_scheduled_lr(const RCRE_GPTAdamWConfig *cfg, int step) {
+    if (step < cfg->warmup_steps) {
+        return cfg->lr_max * ((float)(step + 1) / (float)cfg->warmup_steps);
+    }
+    if (step >= cfg->max_steps) {
+        return cfg->lr_min;
+    }
+    float progress = (float)(step - cfg->warmup_steps) / (float)(cfg->max_steps - cfg->warmup_steps);
+    float cosine_coeff = 0.5f * (1.0f + cosf((float)M_PI * progress));
+    return cfg->lr_min + cosine_coeff * (cfg->lr_max - cfg->lr_min);
+}
+
+float rcre_gpt_clip_gradients(float *grads, size_t num_params, float max_norm) {
+    float norm_sq = 0.0f;
+    for (size_t i = 0; i < num_params; i++) {
+        float g = grads[i];
+        norm_sq += g * g;
+    }
+    float norm = sqrtf(norm_sq);
+    if (norm > max_norm && norm > 1e-6f) {
+        float scale = max_norm / norm;
+        for (size_t i = 0; i < num_params; i++) {
+            grads[i] *= scale;
+        }
+    }
+    return norm;
+}
+
+void rcre_gpt_adamw_step(RCRE_GPTModel *model, RCRE_GPTAdamWConfig *cfg) {
+    cfg->current_step++;
+    int t = cfg->current_step;
+    float lr = rcre_gpt_get_scheduled_lr(cfg, t);
+
+    /* 1. Gradient Clipping */
+    if (cfg->grad_clip > 0.0f) {
+        rcre_gpt_clip_gradients(model->grads, model->num_params, cfg->grad_clip);
+    }
+
+    /* 2. Bias correction terms */
+    float beta1 = cfg->beta1;
+    float beta2 = cfg->beta2;
+    float beta1_pow = powf(beta1, (float)t);
+    float beta2_pow = powf(beta2, (float)t);
+    float alpha = lr * sqrtf(1.0f - beta2_pow) / (1.0f - beta1_pow);
+    float eps = cfg->eps;
+    float wd = cfg->weight_decay;
+
+    /* 3. Parameter updates */
+    float *params = model->params;
+    float *grads  = model->grads;
+    float *m      = model->m;
+    float *v      = model->v;
+    size_t N      = model->num_params;
+
+    for (size_t i = 0; i < N; i++) {
+        float g = grads[i];
+        float p = params[i];
+
+        p -= lr * wd * p;
+        m[i] = beta1 * m[i] + (1.0f - beta1) * g;
+        v[i] = beta2 * v[i] + (1.0f - beta2) * (g * g);
+        p -= alpha * m[i] / (sqrtf(v[i]) + eps);
+
+        params[i] = p;
+    }
+}
+
+/* --- Source: generate.c --- */
+/**
+ * @file generate.c
+ * @brief RCRE Autoregressive Sampling, Generation & Model Checkpointing (ISO C23)
+ */
+
+
+int rcre_gpt_sample_token(const float *logits, int vocab_size, float temperature, int top_k, uint64_t *rng_state) {
+    float *scaled = (float*)malloc(sizeof(float) * vocab_size);
+    if (!scaled) return 0;
+
+    float temp = (temperature > 0.0f) ? temperature : 1.0f;
+    for (int v = 0; v < vocab_size; v++) {
+        scaled[v] = logits[v] / temp;
+    }
+
+    /* Top-K filtering */
+    if (top_k > 0 && top_k < vocab_size) {
+        float *sorted = (float*)malloc(sizeof(float) * vocab_size);
+        if (sorted) {
+            memcpy(sorted, scaled, sizeof(float) * vocab_size);
+            for (int i = 0; i < top_k; i++) {
+                for (int j = i + 1; j < vocab_size; j++) {
+                    if (sorted[j] > sorted[i]) {
+                        float tmp = sorted[i];
+                        sorted[i] = sorted[j];
+                        sorted[j] = tmp;
+                    }
+                }
+            }
+            float threshold = sorted[top_k - 1];
+            for (int v = 0; v < vocab_size; v++) {
+                if (scaled[v] < threshold) {
+                    scaled[v] = -1e9f;
+                }
+            }
+            free(sorted);
+        }
+    }
+
+    /* Softmax */
+    float *probs = (float*)malloc(sizeof(float) * vocab_size);
+    if (!probs) {
+        free(scaled);
+        return 0;
+    }
+    rcre_transformer_softmax_forward(probs, scaled, 1, vocab_size);
+
+    /* Cumulative sampling */
+    float r;
+    if (rng_state != nullptr) {
+        r = rcre_rng_uniform_f32(rng_state, 0.0f, 1.0f);
+    } else {
+        r = ((float)rand()) / ((float)RAND_MAX + 1.0f);
+    }
+
+    int selected = vocab_size - 1;
+    float cum = 0.0f;
+    for (int v = 0; v < vocab_size; v++) {
+        cum += probs[v];
+        if (cum >= r) {
+            selected = v;
+            break;
+        }
+    }
+
+    free(scaled);
+    free(probs);
+    return selected;
+}
+
+void rcre_gpt_generate(
+    RCRE_GPTModel *model,
+    const RCRE_CharTokenizer *tok,
+    const char *prompt,
+    const RCRE_GPTGenerateConfig *gen_cfg,
+    uint64_t *rng_state
+) {
+    int max_T = model->config.seq_len;
+    int V = model->config.vocab_size;
+
+    int *prompt_tokens = (int*)malloc(sizeof(int) * max_T);
+    if (!prompt_tokens) return;
+    int prompt_len = 0;
+
+    if (prompt != nullptr && strlen(prompt) > 0) {
+        prompt_len = rcre_char_tokenizer_encode(tok, prompt, strlen(prompt), prompt_tokens);
+        if (prompt_len > max_T - 1) {
+            prompt_len = max_T - 1;
+        }
+        printf("%s", prompt);
+        fflush(stdout);
+    } else {
+        prompt_tokens[0] = 0;
+        prompt_len = 1;
+    }
+
+    RCRE_KVCache *cache = rcre_kv_cache_create(model->config, nullptr);
+    if (!cache) {
+        free(prompt_tokens);
+        return;
+    }
+
+    float *logits = (float*)malloc(sizeof(float) * V);
+    if (!logits) {
+        rcre_kv_cache_free(cache);
+        free(prompt_tokens);
+        return;
+    }
+
+    /* 1. Prefill Phase */
+    for (int t = 0; t < prompt_len; t++) {
+        rcre_gpt_forward_token(model, cache, prompt_tokens[t], t, logits);
+    }
+
+    /* 2. Autoregressive Generation */
+    int current_pos = prompt_len;
+    for (int step = 0; step < gen_cfg->max_new_tokens && current_pos < max_T; step++) {
+        int next_token = rcre_gpt_sample_token(logits, V, gen_cfg->temperature, gen_cfg->top_k, rng_state);
+
+        char c_str[2] = {(char)tok->id_to_char[next_token], '\0'};
+        printf("%s", c_str);
+        fflush(stdout);
+
+        rcre_gpt_forward_token(model, cache, next_token, current_pos, logits);
+        current_pos++;
+    }
+    printf("\n");
+
+    free(logits);
+    rcre_kv_cache_free(cache);
+    free(prompt_tokens);
+}
+
+bool rcre_gpt_save_checkpoint(const RCRE_GPTModel *model, const char *filepath) {
+    FILE *f = fopen(filepath, "wb");
+    if (!f) return false;
+    if (fwrite(&model->config, sizeof(RCRE_GPTConfig), 1, f) != 1) { fclose(f); return false; }
+    if (fwrite(&model->num_params, sizeof(size_t), 1, f) != 1) { fclose(f); return false; }
+    if (fwrite(model->params, sizeof(float), model->num_params, f) != model->num_params) { fclose(f); return false; }
+    fclose(f);
+    return true;
+}
+
+bool rcre_gpt_load_checkpoint(RCRE_GPTModel *model, const char *filepath) {
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return false;
+    RCRE_GPTConfig cfg;
+    if (fread(&cfg, sizeof(RCRE_GPTConfig), 1, f) != 1) { fclose(f); return false; }
+    size_t count;
+    if (fread(&count, sizeof(size_t), 1, f) != 1 || count != model->num_params) { fclose(f); return false; }
+    if (fread(model->params, sizeof(float), count, f) != count) { fclose(f); return false; }
     fclose(f);
     return true;
 }

@@ -722,6 +722,13 @@ const char* rcre_cpu_get_brand(void);
 #include "rcre_autograd.h"
 #endif
 
+/* ========================================================================= */
+/* Generative AI & Autoregressive Transformer Architecture                    */
+/* ========================================================================= */
+#ifndef RCRE_NO_TRANSFORMER
+#include "rcre_transformer.h"
+#endif
+
 #ifdef __cplusplus
 }
 #endif
