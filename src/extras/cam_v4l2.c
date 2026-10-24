@@ -8,6 +8,9 @@
 #include "cam_internal.h"
 
 #if defined(__linux__)
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
