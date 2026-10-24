@@ -70,9 +70,13 @@ typedef struct {
 static RCRE_TestSuiteState s_test_suite_state = {0};
 
 static inline double rcre_test_get_time_ms(void) {
+#if defined(CLOCK_MONOTONIC)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+#else
+    return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
+#endif
 }
 
 static inline void test_suite_begin(const char* suite_name) {

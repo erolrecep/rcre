@@ -14,6 +14,10 @@
 #ifndef RCRE_H
 #define RCRE_H
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>

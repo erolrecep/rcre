@@ -14,6 +14,8 @@ else ifeq ($(UNAME_S),Linux)
     CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_v4l2.o src/extras/gui_stub.o
     CAM_LDFLAGS =
     OPEN_CMD = xdg-open
+    CFLAGS += -D_GNU_SOURCE
+    SANITIZER_FLAGS += -D_GNU_SOURCE
 else
     CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/gui_stub.c
     CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/gui_stub.o
