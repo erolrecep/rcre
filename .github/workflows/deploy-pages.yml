@@ -22,14 +22,24 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Locate Web Suite
+        # Works in both layouts: the monorepo (apps/rcre/web) and the
+        # standalone project repository (web/ at the repo root).
+        id: locate
+        run: |
+          if [ -d "apps/rcre/web" ]; then
+            echo "web_dir=apps/rcre/web" >> "$GITHUB_OUTPUT"
+          else
+            echo "web_dir=web" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
 
       - name: Upload Web Artifacts
         uses: actions/upload-pages-artifact@v3
         with:
-          # Monorepo layout: the web suite lives in apps/rcre/web
-          path: "apps/rcre/web"
+          path: "${{ steps.locate.outputs.web_dir }}"
 
       - name: Deploy to GitHub Pages
         id: deployment

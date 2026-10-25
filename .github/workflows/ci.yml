@@ -10,10 +10,6 @@ jobs:
   build-and-test:
     name: Build & Sanitize (${{ matrix.os }} - ${{ matrix.compiler }})
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        # Monorepo layout: the RCRE project lives in apps/rcre
-        working-directory: apps/rcre
     strategy:
       fail-fast: false
       matrix:
@@ -27,6 +23,17 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Locate RCRE Project Root
+        # Works in both layouts: the monorepo (project under apps/rcre) and
+        # the standalone project repository (project at the repo root).
+        id: locate
+        run: |
+          if [ -d "apps/rcre" ]; then
+            echo "rcre_dir=apps/rcre" >> "$GITHUB_OUTPUT"
+          else
+            echo "rcre_dir=." >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -39,25 +46,25 @@ jobs:
 
       - name: Build Core Library & Binaries
         run: |
-          make clean
-          make
+          make -C "${{ steps.locate.outputs.rcre_dir }}" clean
+          make -C "${{ steps.locate.outputs.rcre_dir }}" 
 
       - name: Run Unit Tests
         run: |
-          make test
+          make -C "${{ steps.locate.outputs.rcre_dir }}" test
 
       - name: Run AddressSanitizer & UBSan (Clang only)
         if: matrix.compiler == 'clang'
         run: |
-          make test-sanitizers
+          make -C "${{ steps.locate.outputs.rcre_dir }}" test-sanitizers
 
       - name: Run Hardware Acceleration Benchmark
         run: |
-          make bench
+          make -C "${{ steps.locate.outputs.rcre_dir }}" bench
 
       - name: Setup uv for Python Parity Tests
         uses: astral-sh/setup-uv@v5
 
       - name: Run Python OpenCV & Scikit-Learn Parity Verification
         run: |
-          make test-parity
+          make -C "${{ steps.locate.outputs.rcre_dir }}" test-parity
