@@ -190,3 +190,20 @@ RCRE_ScalarVal* rcre_scalar_loss_bce(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds,
     RCRE_ScalarVal* n_val = rcre_scalar_val_const(ctx, (double)count);
     return rcre_scalar_div(ctx, total_loss, n_val);
 }
+
+RCRE_ScalarVal* rcre_scalar_loss_svm_max_margin(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count) {
+    if (!ctx || !preds || !targets || count == 0) return nullptr;
+    RCRE_ScalarVal* total_loss = rcre_scalar_val_const(ctx, 0.0);
+    RCRE_ScalarVal* one = rcre_scalar_val_const(ctx, 1.0);
+
+    for (size_t i = 0; i < count; ++i) {
+        RCRE_ScalarVal* y_target = rcre_scalar_val_const(ctx, targets[i]);
+        RCRE_ScalarVal* score = preds[i];
+        RCRE_ScalarVal* y_score = rcre_scalar_mul(ctx, y_target, score);
+        RCRE_ScalarVal* diff = rcre_scalar_sub(ctx, one, y_score);
+        RCRE_ScalarVal* margin = rcre_scalar_relu(ctx, diff);
+        total_loss = rcre_scalar_add(ctx, total_loss, margin);
+    }
+    RCRE_ScalarVal* n_val = rcre_scalar_val_const(ctx, (double)count);
+    return rcre_scalar_div(ctx, total_loss, n_val);
+}

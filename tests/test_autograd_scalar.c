@@ -92,10 +92,37 @@ static void test_scalar_graphviz_export(void) {
     rcre_graph_ctx_destroy(ctx);
 }
 
+static void test_scalar_svm_max_margin_loss(void) {
+    RCRE_GraphCtx* ctx = rcre_graph_ctx_create(128 * 1024, 128 * 1024);
+    ASSERT_NOT_NULL(ctx);
+
+    /* Points: x0 correctly classified with margin (y=1, score=2.0 -> margin=0)
+     *         x1 misclassified (y=-1, score=0.5 -> 1 - (-0.5) = 1.5) */
+    RCRE_ScalarVal* p0 = rcre_scalar_val_param(ctx, 2.0, "p0");
+    RCRE_ScalarVal* p1 = rcre_scalar_val_param(ctx, 0.5, "p1");
+    RCRE_ScalarVal* preds[2] = { p0, p1 };
+    double targets[2] = { 1.0, -1.0 };
+
+    RCRE_ScalarVal* loss = rcre_scalar_loss_svm_max_margin(ctx, preds, targets, 2);
+    ASSERT_NOT_NULL(loss);
+
+    /* Loss = (0.0 + 1.5) / 2 = 0.75 */
+    ASSERT_DOUBLE_NEAR(0.75, loss->data, EPSILON);
+
+    rcre_scalar_backward(loss);
+    /* dloss/dp0 = 0.0 (active margin = 0)
+     * dloss/dp1 = -(-1.0) / 2 = 0.5 */
+    ASSERT_DOUBLE_NEAR(0.0, p0->grad, EPSILON);
+    ASSERT_DOUBLE_NEAR(0.5, p1->grad, EPSILON);
+
+    rcre_graph_ctx_destroy(ctx);
+}
+
 int main(void) {
     test_suite_begin("RCRE Scalar Reverse-Mode Autograd (AUTOGRAD-SCALAR-01)");
     TEST_RUN(test_scalar_arithmetic_and_backward);
     TEST_RUN(test_scalar_transcendental_ops);
+    TEST_RUN(test_scalar_svm_max_margin_loss);
     TEST_RUN(test_scalar_graphviz_export);
     return test_suite_report();
 }

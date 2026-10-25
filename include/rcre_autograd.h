@@ -205,6 +205,7 @@ int rcre_data_validate_labels(const size_t* targets, size_t n, size_t num_classe
  */
 RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_loss_mse(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count);
 RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_loss_bce(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count);
+RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_loss_svm_max_margin(RCRE_GraphCtx* ctx, RCRE_ScalarVal** preds, const double* targets, size_t count);
 
 /* ========================================================================= */
 /* 5. Optimizers: SGD w/ Momentum & Decoupled Weight Decay AdamW             */
