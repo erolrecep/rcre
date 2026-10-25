@@ -21,7 +21,7 @@ Every test in this directory exists to enforce **concrete engineering invariants
 
 ## 📁 Test Suite Catalog & Purpose
 
-The test directory contains **21 test suites** spanning over **78,000 assertions**, organized into distinct subsystems:
+The test directory contains **25 test suites** spanning over **205,000 assertions**, organized into distinct subsystems:
 
 ```
 tests/
@@ -33,6 +33,10 @@ tests/
 │
 ├── Computer Vision, Signal Processing & Hardware Acceleration
 │   ├── test_cv_filters.c            # Rec.601 RGB-to-gray (0 LSB), separable Gaussian blur, Sobel derivatives
+│   ├── test_cv_geom.c               # Subpixel continuous NN & Bilinear resize, HSV <-> RGB conversions, clamp
+│   ├── test_cv_features.c           # Harris structure tensor, Gaussian cornerness response, 3x3 NMS, patch matching
+│   ├── test_cv_homography.c         # Direct Linear Transform (DLT) 8x8 solver, RANSAC consensus, warp & stitching
+│   ├── test_cv_optical_flow.c       # Summed-area table integral images (O(1) box), Lucas-Kanade velocity fields
 │   ├── test_fft.c                   # 1D & 2D Fast Fourier Transform, FFTShift, Gaussian spectral filtering
 │   ├── test_hal.c                   # Dynamic CPU feature probing, dispatch table, ARM NEON / AVX2 / WASM SIMD
 │   └── test_cam.c                   # Hardware camera companion (AVFoundation macOS, V4L2 Linux, synthetic dummy)
@@ -59,7 +63,7 @@ tests/
 │
 └── Integration, Packaging & Python Parity
     ├── test_amalgamated.c           # Single-header dist/rcre.h standalone compilation self-test
-    ├── test_against_scipy_opencv.py # 9 Automated numerical parity gates against OpenCV, Scikit-Learn & NumPy
+    ├── test_against_scipy_opencv.py # 11 Automated numerical parity gates against OpenCV, Scikit-Learn & NumPy
     └── test_python_bindings.py      # Python ctypes FFI bindings validation
 ```
 
@@ -89,6 +93,18 @@ tests/
 * **[`test_cv_filters.c`](test_cv_filters.c)**:
   * *Purpose*: Tests low-level spatial filtering and pixel math.
   * *Key Invariants*: Verifies 15-bit fixed-point Rec.601 RGB-to-grayscale conversion against OpenCV (`0 LSB` discrepancy), verifies 2D separable Gaussian convolution mathematical equivalence ($O(K^2) \to O(2K)$), and asserts Sobel gradient magnitude accuracy.
+* **[`test_cv_geom.c`](test_cv_geom.c)**:
+  * *Purpose*: Validates continuous coordinate geometric transformations and color spaces.
+  * *Key Invariants*: Verifies identity resizing, subpixel continuous bilinear interpolation monotonic ramp scaling ($2 \times 2 \to 4 \times 4$), exact OpenCV `cv2.resize(..., INTER_LINEAR)` parity ($\epsilon \le 1.2 \times 10^{-7}$), and HSV $\leftrightarrow$ RGB roundtrip color conversions.
+* **[`test_cv_features.c`](test_cv_features.c)**:
+  * *Purpose*: Validates Harris corner detection and local patch descriptors.
+  * *Key Invariants*: Verifies structure tensor construction ($I_x^2, I_y^2, I_x I_y$), Gaussian smoothing, cornerness response score ($R = \det(S) - 0.06 \text{Tr}(S)^2$), straight-edge suppression ($R < 0$), $3 \times 3$ Non-Maximum Suppression (NMS), and normalized gradient patch descriptor self-matching with Lowe's ratio test.
+* **[`test_cv_homography.c`](test_cv_homography.c)**:
+  * *Purpose*: Validates perspective geometry, Direct Linear Transform (DLT), and RANSAC consensus.
+  * *Key Invariants*: Validates $8 \times 8$ SVD/Gaussian linear solver recovering known affine matrices, RANSAC inlier consensus discarding 50% severe synthetic outliers, backward perspective bilinear warping, and cylindrical coordinate unrolling for panorama stitching.
+* **[`test_cv_optical_flow.c`](test_cv_optical_flow.c)**:
+  * *Purpose*: Validates dense/strided motion tracking and integral images.
+  * *Key Invariants*: Validates $\mathcal{O}(1)$ integral image prefix-sum table against naive 2D accumulation and OpenCV `cv2.integral` ($r_{\text{diff}} \le 1.3 \times 10^{-6}$), constant-time box filtering, and Lucas-Kanade spatiotemporal structure tensor velocity field estimation.
 * **[`test_fft.c`](test_fft.c)**:
   * *Purpose*: Validates 1D and 2D Cooley-Tukey Fast Fourier Transforms.
   * *Key Invariants*: Tests forward FFT and inverse IFFT reconstruction identity ($\text{IFFT}(\text{FFT}(X)) \approx X$ with $\epsilon < 10^{-6}$), 2D quadrant `fftshift`, and frequency-domain Gaussian lowpass/highpass filtering.

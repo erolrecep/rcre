@@ -37,8 +37,12 @@ SRCS = src/core/arena.c \
        src/core/adapt.c \
        src/core/threadpool.c \
        src/cv/color.c \
+       src/cv/geom.c \
        src/cv/filter.c \
        src/cv/fft.c \
+       src/cv/features.c \
+       src/cv/homography.c \
+       src/cv/optical_flow.c \
        src/cv/nn.c \
        src/ml/linear.c \
        src/ml/cluster.c \
@@ -70,7 +74,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -238,6 +242,10 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@bin/test_transformer_nn
 	@bin/test_transformer_kv_cache
 	@bin/test_transformer_bpe
+	@bin/test_cv_geom
+	@bin/test_cv_features
+	@bin/test_cv_homography
+	@bin/test_cv_optical_flow
 	@echo "🎉 All RCRE Unit Tests Passed!"
 
 test-sanitizers: $(AMALGAMATED_HEADER)
@@ -289,6 +297,14 @@ endif
 	@bin/test_transformer_kv_cache_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_transformer_bpe.c -lm -lpthread -o bin/test_transformer_bpe_asan
 	@bin/test_transformer_bpe_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cv_geom.c -lm -lpthread -o bin/test_cv_geom_asan
+	@bin/test_cv_geom_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cv_features.c -lm -lpthread -o bin/test_cv_features_asan
+	@bin/test_cv_features_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cv_homography.c -lm -lpthread -o bin/test_cv_homography_asan
+	@bin/test_cv_homography_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cv_optical_flow.c -lm -lpthread -o bin/test_cv_optical_flow_asan
+	@bin/test_cv_optical_flow_asan
 	@echo "🎉 Zero Memory Leaks & Zero Undefined Behavior Detected!"
 
 test-parity: $(DYLIB)

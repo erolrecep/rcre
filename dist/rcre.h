@@ -311,7 +311,7 @@ void rcre_threadpool_parallel_for_2d(RCRE_ThreadPool* pool, size_t height, size_
 void rcre_threadpool_destroy(RCRE_ThreadPool* pool);
 
 /* ========================================================================= */
-/* Computer Vision Reference Primitives (CV-REQ-01 to CV-REQ-03)             */
+/* Computer Vision Reference Primitives (CV-REQ-01 to CV-REQ-07)             */
 /* ========================================================================= */
 
 /**
@@ -325,6 +325,41 @@ RCRE_NODISCARD int rcre_cv_rgb_to_gray(const RCRE_Tensor* src, RCRE_Tensor* dst)
 RCRE_NODISCARD int rcre_cv_bgr_to_rgb(const RCRE_Tensor* src, RCRE_Tensor* dst);
 
 /**
+ * @brief Converts 3-channel RGB [0, 1] image to HSV [H in [0, 1), S in [0, 1], V in [0, 1]].
+ */
+RCRE_NODISCARD int rcre_cv_rgb_to_hsv(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
+ * @brief Converts 3-channel HSV image back to RGB [0, 1].
+ */
+RCRE_NODISCARD int rcre_cv_hsv_to_rgb(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
+ * @brief Scales a single channel in an image by a multiplier factor.
+ */
+RCRE_NODISCARD int rcre_cv_scale_channel(RCRE_Tensor* tensor, size_t channel_idx, float scale);
+
+/**
+ * @brief Shifts a single channel in an image by a constant offset.
+ */
+RCRE_NODISCARD int rcre_cv_shift_channel(RCRE_Tensor* tensor, size_t channel_idx, float shift);
+
+/**
+ * @brief Clamps tensor values in-place into [min_val, max_val].
+ */
+RCRE_NODISCARD int rcre_cv_clamp(RCRE_Tensor* tensor, float min_val, float max_val);
+
+/**
+ * @brief Resizes an image using Nearest-Neighbor interpolation with continuous subpixel coordinates.
+ */
+RCRE_NODISCARD int rcre_cv_resize_nn(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
+ * @brief Resizes an image using 4-point Bilinear interpolation with continuous subpixel coordinates.
+ */
+RCRE_NODISCARD int rcre_cv_resize_bilinear(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
  * @brief Separable 2D Gaussian blur with reflection padding.
  */
 RCRE_NODISCARD int rcre_cv_gaussian_blur(const RCRE_Tensor* src, RCRE_Tensor* dst, 
@@ -335,6 +370,148 @@ RCRE_NODISCARD int rcre_cv_gaussian_blur(const RCRE_Tensor* src, RCRE_Tensor* ds
  */
 RCRE_NODISCARD int rcre_cv_sobel(const RCRE_Tensor* src, RCRE_Tensor* dst_dx, 
                                  RCRE_Tensor* dst_dy, RCRE_Arena* arena);
+
+/**
+ * @brief General 2D spatial convolution across channels with edge clamping.
+ */
+RCRE_NODISCARD int rcre_cv_convolve_2d(const RCRE_Tensor* src, const RCRE_Tensor* kernel,
+                                      RCRE_Tensor* dst, bool preserve_channels, RCRE_Arena* arena);
+
+/**
+ * @brief Constructs a 2D Box blur filter kernel tensor of size [size, size, 1].
+ */
+RCRE_NODISCARD int rcre_cv_filter_box(RCRE_Tensor* kernel, int size, RCRE_Arena* arena);
+
+/**
+ * @brief Constructs a 3x3 Sharpen filter kernel tensor.
+ */
+RCRE_NODISCARD int rcre_cv_filter_sharpen(RCRE_Tensor* kernel, RCRE_Arena* arena);
+
+/**
+ * @brief Constructs a 3x3 Emboss filter kernel tensor.
+ */
+RCRE_NODISCARD int rcre_cv_filter_emboss(RCRE_Tensor* kernel, RCRE_Arena* arena);
+
+/**
+ * @brief Constructs a 3x3 High-Pass filter kernel tensor.
+ */
+RCRE_NODISCARD int rcre_cv_filter_highpass(RCRE_Tensor* kernel, RCRE_Arena* arena);
+
+/* --- Feature Detection, Descriptors & Matching --- */
+
+typedef struct RCRE_CV_Point {
+    float x;
+    float y;
+} RCRE_CV_Point;
+
+typedef struct RCRE_CV_Descriptor {
+    RCRE_CV_Point pt;
+    int len;
+    float* data;
+} RCRE_CV_Descriptor;
+
+typedef struct RCRE_CV_Match {
+    RCRE_CV_Point p;
+    RCRE_CV_Point q;
+    int idx_a;
+    int idx_b;
+    float distance;
+} RCRE_CV_Match;
+
+/**
+ * @brief Computes Harris cornerness response matrix R = det(S) - k * trace(S)^2.
+ */
+RCRE_NODISCARD int rcre_cv_harris_response(const RCRE_Tensor* src, RCRE_Tensor* dst_r,
+                                          float sigma, float k, RCRE_Arena* arena);
+
+/**
+ * @brief Performs 2D Non-Maximum Suppression (NMS) over a window radius.
+ */
+RCRE_NODISCARD int rcre_cv_nms_2d(const RCRE_Tensor* src, RCRE_Tensor* dst,
+                                 int window_radius, float threshold);
+
+/**
+ * @brief Detects Harris corners and extracts local gradient patch descriptors.
+ */
+RCRE_NODISCARD int rcre_cv_harris_detect(const RCRE_Tensor* src, float sigma, float threshold,
+                                        int nms_radius, RCRE_CV_Descriptor** out_desc,
+                                        int* out_count, RCRE_Arena* arena);
+
+/**
+ * @brief Matches feature descriptors using Lowe's ratio test and mutual uniqueness.
+ */
+RCRE_NODISCARD int rcre_cv_match_descriptors(const RCRE_CV_Descriptor* a, int na,
+                                            const RCRE_CV_Descriptor* b, int nb,
+                                            float ratio_thresh, RCRE_CV_Match** out_matches,
+                                            int* out_count, RCRE_Arena* arena);
+
+/**
+ * @brief Draws crosshair markers on an image for detected keypoints.
+ */
+void rcre_cv_draw_markers(RCRE_Tensor* image, const RCRE_CV_Point* points, int count,
+                          float r, float g, float b);
+
+/* --- Homography, RANSAC & Panorama Stitching --- */
+
+/**
+ * @brief Computes 3x3 projective homography matrix H via Direct Linear Transformation (DLT).
+ */
+RCRE_NODISCARD int rcre_cv_compute_homography_dlt(const RCRE_CV_Match* matches, int n,
+                                                 float H[3][3], RCRE_Arena* arena);
+
+/**
+ * @brief Computes optimal robust homography using RANSAC inlier consensus.
+ */
+RCRE_NODISCARD int rcre_cv_find_homography_ransac(RCRE_CV_Match* matches, int n,
+                                                 float inlier_thresh, int iters, int cutoff,
+                                                 float out_H[3][3], int* out_inliers,
+                                                 RCRE_Arena* arena);
+
+/**
+ * @brief Warps an image using backward projective mapping with bilinear interpolation.
+ */
+RCRE_NODISCARD int rcre_cv_warp_perspective(const RCRE_Tensor* src, const float H[3][3],
+                                           RCRE_Tensor* dst, RCRE_Arena* arena);
+
+/**
+ * @brief Projects an image onto a cylinder with focal length f.
+ */
+RCRE_NODISCARD int rcre_cv_cylindrical_project(const RCRE_Tensor* src, float f,
+                                              RCRE_Tensor* dst, RCRE_Arena* arena);
+
+/**
+ * @brief End-to-end two-image panorama stitching pipeline.
+ */
+RCRE_NODISCARD int rcre_cv_stitch_panorama(const RCRE_Tensor* a, const RCRE_Tensor* b,
+                                          float f_cylindrical, float sigma, float thresh,
+                                          int nms, float inlier_thresh, int iters,
+                                          RCRE_Tensor* dst, RCRE_Arena* arena);
+
+/* --- Integral Images & Lucas-Kanade Optical Flow --- */
+
+/**
+ * @brief Computes 2D Summed-Area Table (Integral Image) for O(1) box queries.
+ */
+RCRE_NODISCARD int rcre_cv_integral_image(const RCRE_Tensor* src, RCRE_Tensor* dst_integral);
+
+/**
+ * @brief Applies constant-time box filter on an image using its precomputed integral table.
+ */
+RCRE_NODISCARD int rcre_cv_box_filter_integral(const RCRE_Tensor* integral, RCRE_Tensor* dst,
+                                              int box_radius);
+
+/**
+ * @brief Computes Lucas-Kanade dense/strided optical flow velocity field [H/s, W/s, 2].
+ */
+RCRE_NODISCARD int rcre_cv_optical_flow_lk(const RCRE_Tensor* curr, const RCRE_Tensor* prev,
+                                          RCRE_Tensor* dst_velocity, int window_size,
+                                          int stride, float max_v, RCRE_Arena* arena);
+
+/**
+ * @brief Overlays optical flow velocity vectors onto an image.
+ */
+void rcre_cv_draw_flow(RCRE_Tensor* canvas, const RCRE_Tensor* velocity, int stride, float scale);
+
 
 /* ========================================================================= */
 /* Fast Fourier Transform & Spectral Image Processing (FFT-REQ-01 to 04)     */
@@ -3579,6 +3756,386 @@ RCRE_NODISCARD int rcre_cv_bgr_to_rgb(const RCRE_Tensor* src, RCRE_Tensor* dst) 
     return RCRE_ERR_UNSUPPORTED_OP;
 }
 
+#include <math.h>
+
+RCRE_NODISCARD int rcre_cv_rgb_to_hsv(const RCRE_Tensor* src, RCRE_Tensor* dst) {
+    if (!src || !src->data || !dst || !dst->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+    if (src->ndim != 3 || src->shape[2] != 3 || dst->ndim != 3 || dst->shape[2] != 3) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+    size_t height = src->shape[0];
+    size_t width = src->shape[1];
+    if (dst->shape[0] != height || dst->shape[1] != width) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    size_t src_sy = (size_t)src->strides[0];
+    size_t src_sx = (size_t)src->strides[1];
+    size_t dst_sy = (size_t)dst->strides[0];
+    size_t dst_sx = (size_t)dst->strides[1];
+
+    const float* in = (const float*)src->data;
+    float* out = (float*)dst->data;
+
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            size_t in_idx = y * src_sy + x * src_sx;
+            size_t out_idx = y * dst_sy + x * dst_sx;
+
+            float r = in[in_idx + 0];
+            float g = in[in_idx + 1];
+            float b = in[in_idx + 2];
+
+            float max_val = (r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b);
+            float min_val = (r < g) ? ((r < b) ? r : b) : ((g < b) ? g : b);
+            float c = max_val - min_val;
+            float v = max_val;
+            float s = (v == 0.0f) ? 0.0f : (c / v);
+
+            float h = 0.0f;
+            if (c != 0.0f) {
+                if (max_val == r) {
+                    h = (g - b) / c;
+                } else if (max_val == g) {
+                    h = (b - r) / c + 2.0f;
+                } else {
+                    h = (r - g) / c + 4.0f;
+                }
+                h /= 6.0f;
+                if (h < 0.0f) h += 1.0f;
+            }
+
+            out[out_idx + 0] = h;
+            out[out_idx + 1] = s;
+            out[out_idx + 2] = v;
+        }
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_hsv_to_rgb(const RCRE_Tensor* src, RCRE_Tensor* dst) {
+    if (!src || !src->data || !dst || !dst->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+    if (src->ndim != 3 || src->shape[2] != 3 || dst->ndim != 3 || dst->shape[2] != 3) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+    size_t height = src->shape[0];
+    size_t width = src->shape[1];
+    if (dst->shape[0] != height || dst->shape[1] != width) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    size_t src_sy = (size_t)src->strides[0];
+    size_t src_sx = (size_t)src->strides[1];
+    size_t dst_sy = (size_t)dst->strides[0];
+    size_t dst_sx = (size_t)dst->strides[1];
+
+    const float* in = (const float*)src->data;
+    float* out = (float*)dst->data;
+
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            size_t in_idx = y * src_sy + x * src_sx;
+            size_t out_idx = y * dst_sy + x * dst_sx;
+
+            float h = in[in_idx + 0];
+            float s = in[in_idx + 1];
+            float v = in[in_idx + 2];
+
+            float c = v * s;
+            float h_prime = h * 6.0f;
+            float mod_val = fmodf(h_prime, 2.0f);
+            float x_val = c * (1.0f - fabsf(mod_val - 1.0f));
+            float m = v - c;
+
+            float r1 = 0.0f, g1 = 0.0f, b1 = 0.0f;
+            if (h_prime >= 0.0f && h_prime < 1.0f) {
+                r1 = c; g1 = x_val; b1 = 0.0f;
+            } else if (h_prime >= 1.0f && h_prime < 2.0f) {
+                r1 = x_val; g1 = c; b1 = 0.0f;
+            } else if (h_prime >= 2.0f && h_prime < 3.0f) {
+                r1 = 0.0f; g1 = c; b1 = x_val;
+            } else if (h_prime >= 3.0f && h_prime < 4.0f) {
+                r1 = 0.0f; g1 = x_val; b1 = c;
+            } else if (h_prime >= 4.0f && h_prime < 5.0f) {
+                r1 = x_val; g1 = 0.0f; b1 = c;
+            } else if (h_prime >= 5.0f && h_prime <= 6.0f) {
+                r1 = c; g1 = 0.0f; b1 = x_val;
+            }
+
+            out[out_idx + 0] = r1 + m;
+            out[out_idx + 1] = g1 + m;
+            out[out_idx + 2] = b1 + m;
+        }
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_scale_channel(RCRE_Tensor* tensor, size_t channel_idx, float scale) {
+    if (!tensor || !tensor->data || tensor->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (tensor->ndim != 3) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+    size_t height = tensor->shape[0];
+    size_t width = tensor->shape[1];
+    size_t channels = tensor->shape[2];
+    if (channel_idx >= channels) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t sy = (size_t)tensor->strides[0];
+    size_t sx = (size_t)tensor->strides[1];
+    float* data = (float*)tensor->data;
+
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            data[y * sy + x * sx + channel_idx] *= scale;
+        }
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_shift_channel(RCRE_Tensor* tensor, size_t channel_idx, float shift) {
+    if (!tensor || !tensor->data || tensor->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (tensor->ndim != 3) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+    size_t height = tensor->shape[0];
+    size_t width = tensor->shape[1];
+    size_t channels = tensor->shape[2];
+    if (channel_idx >= channels) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t sy = (size_t)tensor->strides[0];
+    size_t sx = (size_t)tensor->strides[1];
+    float* data = (float*)tensor->data;
+
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            data[y * sy + x * sx + channel_idx] += shift;
+        }
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_clamp(RCRE_Tensor* tensor, float min_val, float max_val) {
+    if (!tensor || !tensor->data || tensor->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    size_t total = 1;
+    for (size_t i = 0; i < tensor->ndim; ++i) {
+        total *= tensor->shape[i];
+    }
+    float* data = (float*)tensor->data;
+    for (size_t i = 0; i < total; ++i) {
+        float val = data[i];
+        if (val < min_val) val = min_val;
+        if (val > max_val) val = max_val;
+        data[i] = val;
+    }
+    return RCRE_OK;
+}
+
+
+/* --- Source: geom.c --- */
+/**
+ * @file geom.c
+ * @brief Continuous Geometric Transforms and Image Resizing
+ *
+ * Implements Nearest-Neighbor and Bilinear interpolation with continuous
+ * subpixel coordinate mapping, preserving aspect ratio and preventing boundary drift.
+ */
+
+#include <math.h>
+
+static inline int geom_clamp_int(int val, int min_val, int max_val) {
+    if (val < min_val) return min_val;
+    if (val > max_val) return max_val;
+    return val;
+}
+
+static inline float geom_get_f32_pixel_hwc(const float* data, int x, int y, int c,
+                                           int w, int h, int num_channels,
+                                           int stride_y, int stride_x) {
+    x = geom_clamp_int(x, 0, w - 1);
+    y = geom_clamp_int(y, 0, h - 1);
+    c = geom_clamp_int(c, 0, num_channels - 1);
+    return data[y * stride_y + x * stride_x + c];
+}
+
+RCRE_NODISCARD int rcre_cv_resize_nn(const RCRE_Tensor* src, RCRE_Tensor* dst) {
+    if (!src || !src->data || !dst || !dst->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t in_h, in_w, in_c;
+    size_t out_h, out_w, out_c;
+
+    if (src->ndim == 2) {
+        in_h = src->shape[0];
+        in_w = src->shape[1];
+        in_c = 1;
+    } else if (src->ndim == 3) {
+        in_h = src->shape[0];
+        in_w = src->shape[1];
+        in_c = src->shape[2];
+    } else {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    if (dst->ndim == 2) {
+        out_h = dst->shape[0];
+        out_w = dst->shape[1];
+        out_c = 1;
+    } else if (dst->ndim == 3) {
+        out_h = dst->shape[0];
+        out_w = dst->shape[1];
+        out_c = dst->shape[2];
+    } else {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    if (in_c != out_c || in_h == 0 || in_w == 0 || out_h == 0 || out_w == 0) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    const float* in = (const float*)src->data;
+    float* out = (float*)dst->data;
+
+    int src_sy = (src->ndim == 2) ? (int)src->strides[0] : (int)src->strides[0];
+    int src_sx = (src->ndim == 2) ? 1 : (int)src->strides[1];
+    int dst_sy = (dst->ndim == 2) ? (int)dst->strides[0] : (int)dst->strides[0];
+    int dst_sx = (dst->ndim == 2) ? 1 : (int)dst->strides[1];
+
+    float ax = (float)in_w / (float)out_w;
+    float ay = (float)in_h / (float)out_h;
+
+    for (size_t k = 0; k < out_c; ++k) {
+        for (size_t j = 0; j < out_h; ++j) {
+            float y = ((float)j + 0.5f) * ay - 0.5f;
+            int iy = (int)roundf(y);
+
+            for (size_t i = 0; i < out_w; ++i) {
+                float x = ((float)i + 0.5f) * ax - 0.5f;
+                int ix = (int)roundf(x);
+
+                float val = geom_get_f32_pixel_hwc(in, ix, iy, (int)k, (int)in_w, (int)in_h,
+                                                   (int)in_c, src_sy, src_sx);
+                if (dst->ndim == 2) {
+                    out[j * dst_sy + i * dst_sx] = val;
+                } else {
+                    out[j * dst_sy + i * dst_sx + k] = val;
+                }
+            }
+        }
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_resize_bilinear(const RCRE_Tensor* src, RCRE_Tensor* dst) {
+    if (!src || !src->data || !dst || !dst->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t in_h, in_w, in_c;
+    size_t out_h, out_w, out_c;
+
+    if (src->ndim == 2) {
+        in_h = src->shape[0];
+        in_w = src->shape[1];
+        in_c = 1;
+    } else if (src->ndim == 3) {
+        in_h = src->shape[0];
+        in_w = src->shape[1];
+        in_c = src->shape[2];
+    } else {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    if (dst->ndim == 2) {
+        out_h = dst->shape[0];
+        out_w = dst->shape[1];
+        out_c = 1;
+    } else if (dst->ndim == 3) {
+        out_h = dst->shape[0];
+        out_w = dst->shape[1];
+        out_c = dst->shape[2];
+    } else {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    if (in_c != out_c || in_h == 0 || in_w == 0 || out_h == 0 || out_w == 0) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    const float* in = (const float*)src->data;
+    float* out = (float*)dst->data;
+
+    int src_sy = (src->ndim == 2) ? (int)src->strides[0] : (int)src->strides[0];
+    int src_sx = (src->ndim == 2) ? 1 : (int)src->strides[1];
+    int dst_sy = (dst->ndim == 2) ? (int)dst->strides[0] : (int)dst->strides[0];
+    int dst_sx = (dst->ndim == 2) ? 1 : (int)dst->strides[1];
+
+    float ax = (float)in_w / (float)out_w;
+    float ay = (float)in_h / (float)out_h;
+
+    for (size_t k = 0; k < out_c; ++k) {
+        for (size_t j = 0; j < out_h; ++j) {
+            float y = ((float)j + 0.5f) * ay - 0.5f;
+            int y1 = (int)floorf(y);
+            int y2 = y1 + 1;
+            float d3 = y - (float)y1;
+            float d4 = 1.0f - d3;
+
+            for (size_t i = 0; i < out_w; ++i) {
+                float x = ((float)i + 0.5f) * ax - 0.5f;
+                int x1 = (int)floorf(x);
+                int x2 = x1 + 1;
+                float d1 = x - (float)x1;
+                float d2 = 1.0f - d1;
+
+                float v00 = geom_get_f32_pixel_hwc(in, x1, y1, (int)k, (int)in_w, (int)in_h,
+                                                   (int)in_c, src_sy, src_sx);
+                float v10 = geom_get_f32_pixel_hwc(in, x2, y1, (int)k, (int)in_w, (int)in_h,
+                                                   (int)in_c, src_sy, src_sx);
+                float v01 = geom_get_f32_pixel_hwc(in, x1, y2, (int)k, (int)in_w, (int)in_h,
+                                                   (int)in_c, src_sy, src_sx);
+                float v11 = geom_get_f32_pixel_hwc(in, x2, y2, (int)k, (int)in_w, (int)in_h,
+                                                   (int)in_c, src_sy, src_sx);
+
+                float val = d2 * d4 * v00 + d1 * d4 * v10 + d2 * d3 * v01 + d1 * d3 * v11;
+
+                if (dst->ndim == 2) {
+                    out[j * dst_sy + i * dst_sx] = val;
+                } else {
+                    out[j * dst_sy + i * dst_sx + k] = val;
+                }
+            }
+        }
+    }
+    return RCRE_OK;
+}
+
 /* --- Source: filter.c --- */
 /**
  * @file filter.c
@@ -3761,6 +4318,174 @@ RCRE_NODISCARD int rcre_cv_sobel(const RCRE_Tensor* src, RCRE_Tensor* dst_dx,
 
     return RCRE_OK;
 }
+
+static inline int filter_clamp_coord(int p, int max_val) {
+    if (p < 0) return 0;
+    if (p >= max_val) return max_val - 1;
+    return p;
+}
+
+RCRE_NODISCARD int rcre_cv_convolve_2d(const RCRE_Tensor* src, const RCRE_Tensor* kernel,
+                                      RCRE_Tensor* dst, bool preserve_channels, RCRE_Arena* arena) {
+    (void)arena;
+    if (!src || !src->data || !kernel || !kernel->data || !dst || !dst->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || kernel->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t in_h = src->shape[0];
+    size_t in_w = src->shape[1];
+    size_t in_c = (src->ndim == 3) ? src->shape[2] : 1;
+
+    size_t kh = kernel->shape[0];
+    size_t kw = kernel->shape[1];
+    size_t kc = (kernel->ndim == 3) ? kernel->shape[2] : 1;
+
+    if (kh == 0 || kw == 0 || (kh % 2 == 0) || (kw % 2 == 0)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t out_h = dst->shape[0];
+    size_t out_w = dst->shape[1];
+    size_t out_c = (dst->ndim == 3) ? dst->shape[2] : 1;
+
+    if (out_h != in_h || out_w != in_w) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    if (preserve_channels) {
+        if (out_c != in_c) return RCRE_ERR_SHAPE_MISMATCH;
+    } else {
+        if (out_c != 1) return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    const float* in = (const float*)src->data;
+    const float* k_data = (const float*)kernel->data;
+    float* out = (float*)dst->data;
+
+    int r_y = (int)(kh / 2);
+    int r_x = (int)(kw / 2);
+
+    int src_sy = (src->ndim == 3) ? (int)src->strides[0] : (int)src->strides[0];
+    int src_sx = (src->ndim == 3) ? (int)src->strides[1] : 1;
+    int dst_sy = (dst->ndim == 3) ? (int)dst->strides[0] : (int)dst->strides[0];
+    int dst_sx = (dst->ndim == 3) ? (int)dst->strides[1] : 1;
+
+    if (preserve_channels) {
+        for (size_t y = 0; y < in_h; ++y) {
+            for (size_t x = 0; x < in_w; ++x) {
+                for (size_t c = 0; c < in_c; ++c) {
+                    size_t k_channel = (kc == in_c) ? c : 0;
+                    float sum = 0.0f;
+
+                    for (int dy = -r_y; dy <= r_y; ++dy) {
+                        int sy_coord = filter_clamp_coord((int)y + dy, (int)in_h);
+                        for (int dx = -r_x; dx <= r_x; ++dx) {
+                            int sx_coord = filter_clamp_coord((int)x + dx, (int)in_w);
+
+                            float pixel_val = in[sy_coord * src_sy + sx_coord * src_sx + c];
+                            size_t k_idx = ((size_t)(dy + r_y) * kw + (size_t)(dx + r_x)) * kc + k_channel;
+                            sum += pixel_val * k_data[k_idx];
+                        }
+                    }
+                    if (dst->ndim == 3) {
+                        out[y * dst_sy + x * dst_sx + c] = sum;
+                    } else {
+                        out[y * dst_sy + x * dst_sx] = sum;
+                    }
+                }
+            }
+        }
+    } else {
+        /* Merge / collapse across channels */
+        for (size_t y = 0; y < in_h; ++y) {
+            for (size_t x = 0; x < in_w; ++x) {
+                float total_sum = 0.0f;
+                for (size_t c = 0; c < in_c; ++c) {
+                    size_t k_channel = (kc == in_c) ? c : 0;
+                    for (int dy = -r_y; dy <= r_y; ++dy) {
+                        int sy_coord = filter_clamp_coord((int)y + dy, (int)in_h);
+                        for (int dx = -r_x; dx <= r_x; ++dx) {
+                            int sx_coord = filter_clamp_coord((int)x + dx, (int)in_w);
+
+                            float pixel_val = in[sy_coord * src_sy + sx_coord * src_sx + c];
+                            size_t k_idx = ((size_t)(dy + r_y) * kw + (size_t)(dx + r_x)) * kc + k_channel;
+                            total_sum += pixel_val * k_data[k_idx];
+                        }
+                    }
+                }
+                out[y * dst_sy + x * dst_sx] = total_sum;
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_filter_box(RCRE_Tensor* kernel, int size, RCRE_Arena* arena) {
+    if (!kernel || size <= 0 || (size % 2 == 0) || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    size_t shape[3] = {(size_t)size, (size_t)size, 1};
+    *kernel = rcre_tensor_create(shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!kernel->data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    float val = 1.0f / (float)(size * size);
+    float* data = (float*)kernel->data;
+    size_t total = (size_t)(size * size);
+    for (size_t i = 0; i < total; ++i) {
+        data[i] = val;
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_filter_sharpen(RCRE_Tensor* kernel, RCRE_Arena* arena) {
+    if (!kernel || !arena) return RCRE_ERR_INVALID_ARG;
+    size_t shape[3] = {3, 3, 1};
+    *kernel = rcre_tensor_create(shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!kernel->data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    float weights[9] = {
+        0.0f, -1.0f,  0.0f,
+       -1.0f,  5.0f, -1.0f,
+        0.0f, -1.0f,  0.0f
+    };
+    memcpy(kernel->data, weights, sizeof(weights));
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_filter_emboss(RCRE_Tensor* kernel, RCRE_Arena* arena) {
+    if (!kernel || !arena) return RCRE_ERR_INVALID_ARG;
+    size_t shape[3] = {3, 3, 1};
+    *kernel = rcre_tensor_create(shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!kernel->data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    float weights[9] = {
+       -2.0f, -1.0f, 0.0f,
+       -1.0f,  1.0f, 1.0f,
+        0.0f,  1.0f, 2.0f
+    };
+    memcpy(kernel->data, weights, sizeof(weights));
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_filter_highpass(RCRE_Tensor* kernel, RCRE_Arena* arena) {
+    if (!kernel || !arena) return RCRE_ERR_INVALID_ARG;
+    size_t shape[3] = {3, 3, 1};
+    *kernel = rcre_tensor_create(shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!kernel->data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    float weights[9] = {
+        0.0f, -1.0f,  0.0f,
+       -1.0f,  4.0f, -1.0f,
+        0.0f, -1.0f,  0.0f
+    };
+    memcpy(kernel->data, weights, sizeof(weights));
+    return RCRE_OK;
+}
+
 
 /* --- Source: fft.c --- */
 /**
@@ -4133,6 +4858,1241 @@ RCRE_NODISCARD int rcre_fft_filter_2d(RCRE_Tensor* spectrum_re,
     }
 
     return RCRE_OK;
+}
+
+/* --- Source: features.c --- */
+/**
+ * @file features.c
+ * @brief Harris Corner Detection, Patch Descriptors, and Feature Matching
+ *
+ * Implements structure tensor computation, cornerness response, 2D NMS,
+ * local gradient patch descriptors, and ratio-tested feature matching.
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+static inline int feat_clamp_int(int val, int min_val, int max_val) {
+    if (val < min_val) return min_val;
+    if (val > max_val) return max_val;
+    return val;
+}
+
+static inline float feat_get_pixel_f32(const RCRE_Tensor* t, int x, int y, int c) {
+    x = feat_clamp_int(x, 0, (int)t->shape[1] - 1);
+    y = feat_clamp_int(y, 0, (int)t->shape[0] - 1);
+    int num_c = (t->ndim == 3) ? (int)t->shape[2] : 1;
+    c = feat_clamp_int(c, 0, num_c - 1);
+
+    const float* data = (const float*)t->data;
+    if (t->ndim == 2) {
+        return data[y * (int)t->strides[0] + x * (int)t->strides[1]];
+    }
+    return data[y * (int)t->strides[0] + x * (int)t->strides[1] + c];
+}
+
+RCRE_NODISCARD int rcre_cv_harris_response(const RCRE_Tensor* src, RCRE_Tensor* dst_r,
+                                          float sigma, float k, RCRE_Arena* arena) {
+    if (!src || !src->data || !dst_r || !dst_r->data || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || dst_r->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t height = src->shape[0];
+    size_t width = src->shape[1];
+
+    if (dst_r->shape[0] != height || dst_r->shape[1] != width) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    RCRE_ArenaTemp scratch = rcre_arena_temp_begin(arena);
+
+    /* Step 1: Ensure grayscale single-channel source for derivatives */
+    size_t shape_2d[2] = {height, width};
+    RCRE_Tensor gray = rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!gray.data) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    int status = RCRE_OK;
+    if (src->ndim == 3 && src->shape[2] >= 3) {
+        status = rcre_cv_rgb_to_gray(src, &gray);
+        if (status != RCRE_OK) {
+            rcre_arena_temp_end(scratch);
+            return status;
+        }
+    } else {
+        /* Copy single channel */
+        const float* src_data = (const float*)src->data;
+        float* gray_data = (float*)gray.data;
+        for (size_t y = 0; y < height; ++y) {
+            for (size_t x = 0; x < width; ++x) {
+                gray_data[y * width + x] = src_data[y * src->strides[0] + x * src->strides[1]];
+            }
+        }
+    }
+
+    /* Step 2: Sobel derivatives dx and dy */
+    RCRE_Tensor dx = rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    RCRE_Tensor dy = rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!dx.data || !dy.data) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    status = rcre_cv_sobel(&gray, &dx, &dy, arena);
+    if (status != RCRE_OK) {
+        rcre_arena_temp_end(scratch);
+        return status;
+    }
+
+    /* Step 3: Compute structure tensor components Sxx, Syy, Sxy */
+    size_t shape_3d[3] = {height, width, 3};
+    RCRE_Tensor s_raw = rcre_tensor_create(shape_3d, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!s_raw.data) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    const float* dx_data = (const float*)dx.data;
+    const float* dy_data = (const float*)dy.data;
+    float* s_raw_data = (float*)s_raw.data;
+
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            float ix = dx_data[y * width + x];
+            float iy = dy_data[y * width + x];
+            size_t idx = (y * width + x) * 3;
+            s_raw_data[idx + 0] = ix * ix;     /* Ixx */
+            s_raw_data[idx + 1] = iy * iy;     /* Iyy */
+            s_raw_data[idx + 2] = ix * iy;     /* Ixy */
+        }
+    }
+
+    /* Step 4: Gaussian smooth the structure tensor */
+    RCRE_Tensor s_smooth = rcre_tensor_create(shape_3d, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!s_smooth.data) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    float eff_sigma = (sigma <= 0.0f) ? 1.5f : sigma;
+    status = rcre_cv_gaussian_blur(&s_raw, &s_smooth, eff_sigma, arena);
+    if (status != RCRE_OK) {
+        rcre_arena_temp_end(scratch);
+        return status;
+    }
+
+    /* Step 5: Cornerness response R = det(S) - k * trace(S)^2 */
+    const float* s_data = (const float*)s_smooth.data;
+    float* r_data = (float*)dst_r->data;
+    float eff_k = (k <= 0.0f) ? 0.06f : k;
+
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            size_t s_idx = (y * width + x) * 3;
+            float ixx = s_data[s_idx + 0];
+            float iyy = s_data[s_idx + 1];
+            float ixy = s_data[s_idx + 2];
+
+            float det = ixx * iyy - ixy * ixy;
+            float trace = ixx + iyy;
+            float r_val = det - eff_k * trace * trace;
+
+            if (dst_r->ndim == 2) {
+                r_data[y * dst_r->strides[0] + x * dst_r->strides[1]] = r_val;
+            } else {
+                r_data[y * dst_r->strides[0] + x * dst_r->strides[1] + 0] = r_val;
+            }
+        }
+    }
+
+    rcre_arena_temp_end(scratch);
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_nms_2d(const RCRE_Tensor* src, RCRE_Tensor* dst,
+                                 int window_radius, float threshold) {
+    if (!src || !src->data || !dst || !dst->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+    if (src->shape[0] != dst->shape[0] || src->shape[1] != dst->shape[1]) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    size_t height = src->shape[0];
+    size_t width = src->shape[1];
+    int r = (window_radius < 1) ? 1 : window_radius;
+
+    const float* in = (const float*)src->data;
+    float* out = (float*)dst->data;
+
+    int src_sy = (int)src->strides[0];
+    int src_sx = (int)src->strides[1];
+    int dst_sy = (int)dst->strides[0];
+    int dst_sx = (int)dst->strides[1];
+
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            float val = in[y * src_sy + x * src_sx];
+            int is_max = 1;
+
+            if (val <= threshold) {
+                is_max = 0;
+            } else {
+                for (int dy = -r; dy <= r && is_max; ++dy) {
+                    for (int dx = -r; dx <= r; ++dx) {
+                        if (dx == 0 && dy == 0) continue;
+                        int ny = (int)y + dy;
+                        int nx = (int)x + dx;
+                        if (ny >= 0 && ny < (int)height && nx >= 0 && nx < (int)width) {
+                            if (in[ny * src_sy + nx * src_sx] > val) {
+                                is_max = 0;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (is_max) {
+                out[y * dst_sy + x * dst_sx] = val;
+            } else {
+                out[y * dst_sy + x * dst_sx] = 0.0f;
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_harris_detect(const RCRE_Tensor* src, float sigma, float threshold,
+                                        int nms_radius, RCRE_CV_Descriptor** out_desc,
+                                        int* out_count, RCRE_Arena* arena) {
+    if (!src || !src->data || !out_desc || !out_count || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t height = src->shape[0];
+    size_t width = src->shape[1];
+    size_t channels = (src->ndim == 3) ? src->shape[2] : 1;
+
+    size_t shape_2d[2] = {height, width};
+    RCRE_Tensor resp = rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    RCRE_Tensor nms = rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!resp.data || !nms.data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    int status = rcre_cv_harris_response(src, &resp, sigma, 0.06f, arena);
+    if (status != RCRE_OK) return status;
+
+    int eff_nms = (nms_radius < 1) ? 2 : nms_radius;
+    status = rcre_cv_nms_2d(&resp, &nms, eff_nms, threshold);
+    if (status != RCRE_OK) return status;
+
+    /* Count detected keypoints */
+    const float* nms_data = (const float*)nms.data;
+    int count = 0;
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            if (nms_data[y * nms.strides[0] + x * nms.strides[1]] > threshold) {
+                count++;
+            }
+        }
+    }
+
+    *out_count = count;
+    if (count == 0) {
+        *out_desc = NULL;
+        return RCRE_OK;
+    }
+
+    RCRE_CV_Descriptor* desc_array = (RCRE_CV_Descriptor*)rcre_arena_alloc(arena, (size_t)count * sizeof(RCRE_CV_Descriptor), 64);
+    if (!desc_array) return RCRE_ERR_OUT_OF_MEMORY;
+
+    /* Extract 5x5 local intensity gradient patch descriptors */
+    const int pw = 5;
+    int r = pw / 2;
+    int desc_len = pw * pw * (int)channels;
+
+    int idx = 0;
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            if (nms_data[y * nms.strides[0] + x * nms.strides[1]] > threshold) {
+                desc_array[idx].pt.x = (float)x;
+                desc_array[idx].pt.y = (float)y;
+                desc_array[idx].len = desc_len;
+                desc_array[idx].data = (float*)rcre_arena_alloc(arena, (size_t)desc_len * sizeof(float), 64);
+                if (!desc_array[idx].data) return RCRE_ERR_OUT_OF_MEMORY;
+
+                int p_idx = 0;
+                for (size_t c = 0; c < channels; ++c) {
+                    float center_val = feat_get_pixel_f32(src, (int)x, (int)y, (int)c);
+                    for (int dy = -r; dy <= r; ++dy) {
+                        for (int dx = -r; dx <= r; ++dx) {
+                            float neighbor_val = feat_get_pixel_f32(src, (int)x + dx, (int)y + dy, (int)c);
+                            desc_array[idx].data[p_idx++] = center_val - neighbor_val;
+                        }
+                    }
+                }
+                idx++;
+            }
+        }
+    }
+
+    *out_desc = desc_array;
+    return RCRE_OK;
+}
+
+static inline float feat_descriptor_dist_l1(const float* a, const float* b, int n) {
+    float sum = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        sum += fabsf(a[i] - b[i]);
+    }
+    return sum;
+}
+
+static int feat_compare_matches(const void* a, const void* b) {
+    const RCRE_CV_Match* ma = (const RCRE_CV_Match*)a;
+    const RCRE_CV_Match* mb = (const RCRE_CV_Match*)b;
+    if (ma->distance < mb->distance) return -1;
+    if (ma->distance > mb->distance) return 1;
+    return 0;
+}
+
+RCRE_NODISCARD int rcre_cv_match_descriptors(const RCRE_CV_Descriptor* a, int na,
+                                            const RCRE_CV_Descriptor* b, int nb,
+                                            float ratio_thresh, RCRE_CV_Match** out_matches,
+                                            int* out_count, RCRE_Arena* arena) {
+    if (!a || !b || !out_matches || !out_count || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (na <= 0 || nb <= 0) {
+        *out_count = 0;
+        *out_matches = NULL;
+        return RCRE_OK;
+    }
+
+    RCRE_CV_Match* raw_matches = (RCRE_CV_Match*)rcre_arena_alloc(arena, (size_t)na * sizeof(RCRE_CV_Match), 64);
+    if (!raw_matches) return RCRE_ERR_OUT_OF_MEMORY;
+
+    int candidate_count = 0;
+    float eff_ratio = (ratio_thresh <= 0.0f) ? 0.90f : ratio_thresh;
+
+    for (int j = 0; j < na; ++j) {
+        int best_idx = -1;
+        float best_dist = 1e9f;
+        float second_dist = 1e9f;
+
+        for (int k = 0; k < nb; ++k) {
+            int len = (a[j].len < b[k].len) ? a[j].len : b[k].len;
+            float dist = feat_descriptor_dist_l1(a[j].data, b[k].data, len);
+
+            if (dist < best_dist) {
+                second_dist = best_dist;
+                best_dist = dist;
+                best_idx = k;
+            } else if (dist < second_dist) {
+                second_dist = dist;
+            }
+        }
+
+        /* Lowe's ratio test */
+        if (nb > 1 && best_dist > eff_ratio * second_dist) {
+            continue;
+        }
+
+        if (best_idx >= 0) {
+            raw_matches[candidate_count].idx_a = j;
+            raw_matches[candidate_count].idx_b = best_idx;
+            raw_matches[candidate_count].p = a[j].pt;
+            raw_matches[candidate_count].q = b[best_idx].pt;
+            raw_matches[candidate_count].distance = best_dist;
+            candidate_count++;
+        }
+    }
+
+    if (candidate_count == 0) {
+        *out_count = 0;
+        *out_matches = NULL;
+        return RCRE_OK;
+    }
+
+    qsort(raw_matches, (size_t)candidate_count, sizeof(RCRE_CV_Match), feat_compare_matches);
+
+    /* Enforce 1-to-1 uniqueness on index_b */
+    RCRE_ArenaTemp scratch = rcre_arena_temp_begin(arena);
+    uint8_t* seen = (uint8_t*)rcre_arena_alloc(arena, (size_t)nb * sizeof(uint8_t), 16);
+    if (!seen) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(seen, 0, (size_t)nb * sizeof(uint8_t));
+
+    int unique_count = 0;
+    for (int i = 0; i < candidate_count; ++i) {
+        int bi = raw_matches[i].idx_b;
+        if (!seen[bi]) {
+            seen[bi] = 1;
+            raw_matches[unique_count++] = raw_matches[i];
+        }
+    }
+    rcre_arena_temp_end(scratch);
+
+    *out_count = unique_count;
+    *out_matches = raw_matches;
+    return RCRE_OK;
+}
+
+void rcre_cv_draw_markers(RCRE_Tensor* image, const RCRE_CV_Point* points, int count,
+                          float r, float g, float b) {
+    if (!image || !image->data || !points || count <= 0) return;
+    if (image->dtype != RCRE_DTYPE_F32 || image->ndim < 2) return;
+
+    size_t height = image->shape[0];
+    size_t width = image->shape[1];
+    size_t channels = (image->ndim == 3) ? image->shape[2] : 1;
+
+    float* data = (float*)image->data;
+    int sy = (int)image->strides[0];
+    int sx = (int)image->strides[1];
+
+    for (int k = 0; k < count; ++k) {
+        int cx = (int)roundf(points[k].x);
+        int cy = (int)roundf(points[k].y);
+
+        for (int d = -4; d <= 4; ++d) {
+            /* Horizontal arm */
+            int x1 = cx + d;
+            int y1 = cy;
+            if (x1 >= 0 && x1 < (int)width && y1 >= 0 && y1 < (int)height) {
+                if (channels >= 3) {
+                    data[y1 * sy + x1 * sx + 0] = r;
+                    data[y1 * sy + x1 * sx + 1] = g;
+                    data[y1 * sy + x1 * sx + 2] = b;
+                } else {
+                    data[y1 * sy + x1 * sx] = (r + g + b) / 3.0f;
+                }
+            }
+
+            /* Vertical arm */
+            int x2 = cx;
+            int y2 = cy + d;
+            if (x2 >= 0 && x2 < (int)width && y2 >= 0 && y2 < (int)height) {
+                if (channels >= 3) {
+                    data[y2 * sy + x2 * sx + 0] = r;
+                    data[y2 * sy + x2 * sx + 1] = g;
+                    data[y2 * sy + x2 * sx + 2] = b;
+                } else {
+                    data[y2 * sy + x2 * sx] = (r + g + b) / 3.0f;
+                }
+            }
+        }
+    }
+}
+
+/* --- Source: homography.c --- */
+/**
+ * @file homography.c
+ * @brief Direct Linear Transformation (DLT), RANSAC, Perspective Warping & Panorama Stitching
+ *
+ * Implements linear system solving for 8-DOF projective homographies,
+ * robust consensus matching, cylindrical projection, and image stitching.
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+static inline float homo_point_dist_l2(RCRE_CV_Point p, RCRE_CV_Point q) {
+    float dx = p.x - q.x;
+    float dy = p.y - q.y;
+    return sqrtf(dx * dx + dy * dy);
+}
+
+static inline RCRE_CV_Point homo_project_point_h(const float H[3][3], RCRE_CV_Point p) {
+    float x = H[0][0] * p.x + H[0][1] * p.y + H[0][2];
+    float y = H[1][0] * p.x + H[1][1] * p.y + H[1][2];
+    float w = H[2][0] * p.x + H[2][1] * p.y + H[2][2];
+
+    RCRE_CV_Point q = {0.0f, 0.0f};
+    if (fabsf(w) > 1e-7f) {
+        q.x = x / w;
+        q.y = y / w;
+    }
+    return q;
+}
+
+static inline bool homo_invert_3x3(const float m[3][3], float inv[3][3]) {
+    float det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+                m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+
+    if (fabsf(det) < 1e-8f) return false;
+    float inv_det = 1.0f / det;
+
+    inv[0][0] =  (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_det;
+    inv[0][1] = -(m[0][1] * m[2][2] - m[0][2] * m[2][1]) * inv_det;
+    inv[0][2] =  (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det;
+
+    inv[1][0] = -(m[1][0] * m[2][2] - m[1][2] * m[2][0]) * inv_det;
+    inv[1][1] =  (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det;
+    inv[1][2] = -(m[0][0] * m[1][2] - m[0][2] * m[1][0]) * inv_det;
+
+    inv[2][0] =  (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv_det;
+    inv[2][1] = -(m[0][0] * m[2][1] - m[0][1] * m[2][0]) * inv_det;
+    inv[2][2] =  (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det;
+    return true;
+}
+
+/* Solves 8x8 linear system A * x = b via Gauss-Jordan elimination with partial pivoting */
+static bool homo_solve_8x8(const float A[8][8], const float b[8], float x[8]) {
+    float M[8][9];
+    for (int i = 0; i < 8; ++i) {
+        for (int j = 0; j < 8; ++j) {
+            M[i][j] = A[i][j];
+        }
+        M[i][8] = b[i];
+    }
+
+    for (int k = 0; k < 8; ++k) {
+        /* Pivot selection */
+        int max_row = k;
+        float max_val = fabsf(M[k][k]);
+        for (int i = k + 1; i < 8; ++i) {
+            float val = fabsf(M[i][k]);
+            if (val > max_val) {
+                max_val = val;
+                max_row = i;
+            }
+        }
+
+        if (max_val < 1e-9f) return false;
+
+        /* Swap rows */
+        if (max_row != k) {
+            for (int j = k; j < 9; ++j) {
+                float tmp = M[k][j];
+                M[k][j] = M[max_row][j];
+                M[max_row][j] = tmp;
+            }
+        }
+
+        /* Normalize row k */
+        float pivot = M[k][k];
+        for (int j = k; j < 9; ++j) {
+            M[k][j] /= pivot;
+        }
+
+        /* Eliminate column k in other rows */
+        for (int i = 0; i < 8; ++i) {
+            if (i == k) continue;
+            float factor = M[i][k];
+            for (int j = k; j < 9; ++j) {
+                M[i][j] -= factor * M[k][j];
+            }
+        }
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        x[i] = M[i][8];
+    }
+    return true;
+}
+
+RCRE_NODISCARD int rcre_cv_compute_homography_dlt(const RCRE_CV_Match* matches, int n,
+                                                 float H[3][3], RCRE_Arena* arena) {
+    (void)arena;
+    if (!matches || n < 4 || !H) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    /* Normal equations: MtM * a = Mtb where M is 2n x 8 and b is 2n x 1 */
+    float MtM[8][8] = {0};
+    float Mtb[8] = {0};
+
+    for (int i = 0; i < n; ++i) {
+        float x = matches[i].p.x;
+        float y = matches[i].p.y;
+        float xp = matches[i].q.x;
+        float yp = matches[i].q.y;
+
+        /* Row 1 of M: [x, y, 1, 0, 0, 0, -x*xp, -y*xp], rhs: xp */
+        float r1[8] = {x, y, 1.0f, 0.0f, 0.0f, 0.0f, -x * xp, -y * xp};
+        for (int r = 0; r < 8; ++r) {
+            for (int c = 0; c < 8; ++c) {
+                MtM[r][c] += r1[r] * r1[c];
+            }
+            Mtb[r] += r1[r] * xp;
+        }
+
+        /* Row 2 of M: [0, 0, 0, x, y, 1, -x*yp, -y*yp], rhs: yp */
+        float r2[8] = {0.0f, 0.0f, 0.0f, x, y, 1.0f, -x * yp, -y * yp};
+        for (int r = 0; r < 8; ++r) {
+            for (int c = 0; c < 8; ++c) {
+                MtM[r][c] += r2[r] * r2[c];
+            }
+            Mtb[r] += r2[r] * yp;
+        }
+    }
+
+    float a[8];
+    if (!homo_solve_8x8(MtM, Mtb, a)) {
+        /* Fallback to identity */
+        memset(H, 0, 9 * sizeof(float));
+        H[0][0] = 1.0f; H[1][1] = 1.0f; H[2][2] = 1.0f;
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    H[0][0] = a[0]; H[0][1] = a[1]; H[0][2] = a[2];
+    H[1][0] = a[3]; H[1][1] = a[4]; H[1][2] = a[5];
+    H[2][0] = a[6]; H[2][1] = a[7]; H[2][2] = 1.0f;
+    return RCRE_OK;
+}
+
+static int homo_count_inliers(const float H[3][3], const RCRE_CV_Match* matches, int n,
+                              float thresh, RCRE_CV_Match* inliers_out) {
+    int count = 0;
+    for (int i = 0; i < n; ++i) {
+        RCRE_CV_Point p_proj = homo_project_point_h(H, matches[i].p);
+        float dist = homo_point_dist_l2(p_proj, matches[i].q);
+        if (dist < thresh) {
+            if (inliers_out) {
+                inliers_out[count] = matches[i];
+            }
+            count++;
+        }
+    }
+    return count;
+}
+
+RCRE_NODISCARD int rcre_cv_find_homography_ransac(RCRE_CV_Match* matches, int n,
+                                                 float inlier_thresh, int iters, int cutoff,
+                                                 float out_H[3][3], int* out_inliers,
+                                                 RCRE_Arena* arena) {
+    if (!matches || !out_H || !out_inliers || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    /* Default identity */
+    memset(out_H, 0, 9 * sizeof(float));
+    out_H[0][0] = 1.0f; out_H[1][1] = 1.0f; out_H[2][2] = 1.0f;
+    *out_inliers = 0;
+
+    if (n < 4) return RCRE_OK;
+
+    RCRE_ArenaTemp scratch = rcre_arena_temp_begin(arena);
+    RCRE_CV_Match* inliers_buf = (RCRE_CV_Match*)rcre_arena_alloc(arena, (size_t)n * sizeof(RCRE_CV_Match), 64);
+    if (!inliers_buf) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    int best_inliers = 0;
+    float best_H[3][3];
+    memcpy(best_H, out_H, 9 * sizeof(float));
+
+    int num_iters = (iters <= 0) ? 1000 : iters;
+    float thresh = (inlier_thresh <= 0.0f) ? 3.0f : inlier_thresh;
+
+    for (int iter = 0; iter < num_iters; ++iter) {
+        /* Sample 4 distinct random points */
+        RCRE_CV_Match sample[4];
+        int idxs[4];
+        for (int s = 0; s < 4; ++s) {
+            bool unique;
+            int r;
+            do {
+                unique = true;
+                r = rand() % n;
+                for (int p = 0; p < s; ++p) {
+                    if (idxs[p] == r) {
+                        unique = false;
+                        break;
+                    }
+                }
+            } while (!unique);
+            idxs[s] = r;
+            sample[s] = matches[r];
+        }
+
+        float H_cand[3][3];
+        if (rcre_cv_compute_homography_dlt(sample, 4, H_cand, arena) != RCRE_OK) {
+            continue;
+        }
+
+        int inliers = homo_count_inliers(H_cand, matches, n, thresh, inliers_buf);
+        if (inliers > best_inliers) {
+            best_inliers = inliers;
+            /* Refine homography with all current inliers */
+            if (inliers >= 4) {
+                (void)rcre_cv_compute_homography_dlt(inliers_buf, inliers, best_H, arena);
+            } else {
+                memcpy(best_H, H_cand, 9 * sizeof(float));
+            }
+
+            if (cutoff > 0 && best_inliers >= cutoff) {
+                break;
+            }
+        }
+    }
+
+    memcpy(out_H, best_H, 9 * sizeof(float));
+    *out_inliers = best_inliers;
+    rcre_arena_temp_end(scratch);
+    return RCRE_OK;
+}
+
+static inline float homo_sample_bilinear_src(const RCRE_Tensor* src, float x, float y, size_t c) {
+    size_t w = src->shape[1];
+    size_t h = src->shape[0];
+
+    int x1 = (int)floorf(x);
+    int x2 = x1 + 1;
+    int y1 = (int)floorf(y);
+    int y2 = y1 + 1;
+
+    float d1 = x - (float)x1;
+    float d2 = 1.0f - d1;
+    float d3 = y - (float)y1;
+    float d4 = 1.0f - d3;
+
+    int cx1 = (x1 < 0) ? 0 : (x1 >= (int)w ? (int)w - 1 : x1);
+    int cx2 = (x2 < 0) ? 0 : (x2 >= (int)w ? (int)w - 1 : x2);
+    int cy1 = (y1 < 0) ? 0 : (y1 >= (int)h ? (int)h - 1 : y1);
+    int cy2 = (y2 < 0) ? 0 : (y2 >= (int)h ? (int)h - 1 : y2);
+
+    const float* in = (const float*)src->data;
+    int sy = (int)src->strides[0];
+    int sx = (int)src->strides[1];
+
+    float v00 = in[cy1 * sy + cx1 * sx + c];
+    float v10 = in[cy1 * sy + cx2 * sx + c];
+    float v01 = in[cy2 * sy + cx1 * sx + c];
+    float v11 = in[cy2 * sy + cx2 * sx + c];
+
+    return d2 * d4 * v00 + d1 * d4 * v10 + d2 * d3 * v01 + d1 * d3 * v11;
+}
+
+RCRE_NODISCARD int rcre_cv_warp_perspective(const RCRE_Tensor* src, const float H[3][3],
+                                           RCRE_Tensor* dst, RCRE_Arena* arena) {
+    (void)arena;
+    if (!src || !src->data || !dst || !dst->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    float Hinv[3][3];
+    if (!homo_invert_3x3(H, Hinv)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t in_h = src->shape[0];
+    size_t in_w = src->shape[1];
+    size_t in_c = (src->ndim == 3) ? src->shape[2] : 1;
+
+    size_t out_h = dst->shape[0];
+    size_t out_w = dst->shape[1];
+    size_t out_c = (dst->ndim == 3) ? dst->shape[2] : 1;
+
+    if (in_c != out_c) return RCRE_ERR_SHAPE_MISMATCH;
+
+    float* out = (float*)dst->data;
+    int dst_sy = (int)dst->strides[0];
+    int dst_sx = (int)dst->strides[1];
+
+    for (size_t y = 0; y < out_h; ++y) {
+        for (size_t x = 0; x < out_w; ++x) {
+            RCRE_CV_Point p = {(float)x, (float)y};
+            RCRE_CV_Point src_p = homo_project_point_h(Hinv, p);
+
+            if (src_p.x >= 0.0f && src_p.x < (float)in_w &&
+                src_p.y >= 0.0f && src_p.y < (float)in_h) {
+                for (size_t c = 0; c < in_c; ++c) {
+                    float val = homo_sample_bilinear_src(src, src_p.x, src_p.y, c);
+                    out[y * dst_sy + x * dst_sx + c] = val;
+                }
+            } else {
+                for (size_t c = 0; c < in_c; ++c) {
+                    out[y * dst_sy + x * dst_sx + c] = 0.0f;
+                }
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_cylindrical_project(const RCRE_Tensor* src, float f,
+                                              RCRE_Tensor* dst, RCRE_Arena* arena) {
+    (void)arena;
+    if (!src || !src->data || !dst || !dst->data || f <= 0.0f) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t h = src->shape[0];
+    size_t w = src->shape[1];
+    size_t c = (src->ndim == 3) ? src->shape[2] : 1;
+
+    if (dst->shape[0] != h || dst->shape[1] != w) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    float* out = (float*)dst->data;
+    int dst_sy = (int)dst->strides[0];
+    int dst_sx = (int)dst->strides[1];
+
+    float cx = (float)w / 2.0f;
+    float cy = (float)h / 2.0f;
+
+    for (size_t y = 0; y < h; ++y) {
+        for (size_t x = 0; x < w; ++x) {
+            float theta = ((float)x - cx) / f;
+            float h_ratio = ((float)y - cy) / f;
+
+            float X = sinf(theta);
+            float Y = h_ratio;
+            float Z = cosf(theta);
+
+            float src_x = f * (X / Z) + cx;
+            float src_y = f * (Y / Z) + cy;
+
+            if (src_x >= 0.0f && src_x < (float)w && src_y >= 0.0f && src_y < (float)h) {
+                for (size_t ch = 0; ch < c; ++ch) {
+                    out[y * dst_sy + x * dst_sx + ch] = homo_sample_bilinear_src(src, src_x, src_y, ch);
+                }
+            } else {
+                for (size_t ch = 0; ch < c; ++ch) {
+                    out[y * dst_sy + x * dst_sx + ch] = 0.0f;
+                }
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_stitch_panorama(const RCRE_Tensor* a, const RCRE_Tensor* b,
+                                          float f_cylindrical, float sigma, float thresh,
+                                          int nms, float inlier_thresh, int iters,
+                                          RCRE_Tensor* dst, RCRE_Arena* arena) {
+    if (!a || !b || !dst || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_ArenaTemp scratch = rcre_arena_temp_begin(arena);
+
+    /* Optional cylindrical projection */
+    const RCRE_Tensor* img_a = a;
+    const RCRE_Tensor* img_b = b;
+    RCRE_Tensor proj_a, proj_b;
+
+    if (f_cylindrical > 0.0f) {
+        proj_a = rcre_tensor_create(a->shape, a->ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+        proj_b = rcre_tensor_create(b->shape, b->ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+        if (!proj_a.data || !proj_b.data) {
+            rcre_arena_temp_end(scratch);
+            return RCRE_ERR_OUT_OF_MEMORY;
+        }
+        (void)rcre_cv_cylindrical_project(a, f_cylindrical, &proj_a, arena);
+        (void)rcre_cv_cylindrical_project(b, f_cylindrical, &proj_b, arena);
+        img_a = &proj_a;
+        img_b = &proj_b;
+    }
+
+    /* Feature detection */
+    RCRE_CV_Descriptor *da = NULL, *db = NULL;
+    int na = 0, nb = 0;
+
+    (void)rcre_cv_harris_detect(img_a, sigma, thresh, nms, &da, &na, arena);
+    (void)rcre_cv_harris_detect(img_b, sigma, thresh, nms, &db, &nb, arena);
+
+    if (na < 4 || nb < 4) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    /* Matching */
+    RCRE_CV_Match* matches = NULL;
+    int num_matches = 0;
+    (void)rcre_cv_match_descriptors(da, na, db, nb, 0.90f, &matches, &num_matches, arena);
+
+    if (num_matches < 4) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    /* RANSAC homography estimation */
+    float H[3][3];
+    int inliers = 0;
+    (void)rcre_cv_find_homography_ransac(matches, num_matches, inlier_thresh, iters, 0, H, &inliers, arena);
+
+    /* Warp and blend image b onto image a */
+    float Hinv[3][3];
+    if (!homo_invert_3x3(H, Hinv)) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t out_h = dst->shape[0];
+    size_t out_w = dst->shape[1];
+    size_t out_c = (dst->ndim == 3) ? dst->shape[2] : 1;
+
+    float* dst_data = (float*)dst->data;
+    int dst_sy = (int)dst->strides[0];
+    int dst_sx = (int)dst->strides[1];
+
+    for (size_t y = 0; y < out_h; ++y) {
+        for (size_t x = 0; x < out_w; ++x) {
+            bool has_a = (x < img_a->shape[1] && y < img_a->shape[0]);
+            RCRE_CV_Point p_dst = {(float)x, (float)y};
+            RCRE_CV_Point p_b = homo_project_point_h(Hinv, p_dst);
+            bool has_b = (p_b.x >= 0.0f && p_b.x < (float)img_b->shape[1] &&
+                          p_b.y >= 0.0f && p_b.y < (float)img_b->shape[0]);
+
+            for (size_t c = 0; c < out_c; ++c) {
+                float val_a = has_a ? homo_sample_bilinear_src(img_a, (float)x, (float)y, c) : 0.0f;
+                float val_b = has_b ? homo_sample_bilinear_src(img_b, p_b.x, p_b.y, c) : 0.0f;
+
+                if (has_a && has_b) {
+                    dst_data[y * dst_sy + x * dst_sx + c] = 0.5f * (val_a + val_b);
+                } else if (has_a) {
+                    dst_data[y * dst_sy + x * dst_sx + c] = val_a;
+                } else if (has_b) {
+                    dst_data[y * dst_sy + x * dst_sx + c] = val_b;
+                } else {
+                    dst_data[y * dst_sy + x * dst_sx + c] = 0.0f;
+                }
+            }
+        }
+    }
+
+    rcre_arena_temp_end(scratch);
+    return RCRE_OK;
+}
+
+/* --- Source: optical_flow.c --- */
+/**
+ * @file optical_flow.c
+ * @brief Integral Images and Lucas-Kanade Optical Flow
+ *
+ * Implements Summed-Area Tables (O(1) box queries), spatiotemporal derivative tensors,
+ * and Lucas-Kanade velocity field estimation with flow vector visualization.
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define TWOPI 6.283185307179586476925286766559005f
+
+RCRE_NODISCARD int rcre_cv_integral_image(const RCRE_Tensor* src, RCRE_Tensor* dst_integral) {
+    if (!src || !src->data || !dst_integral || !dst_integral->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || dst_integral->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t height = src->shape[0];
+    size_t width = src->shape[1];
+    size_t channels = (src->ndim == 3) ? src->shape[2] : 1;
+
+    if (dst_integral->shape[0] != height || dst_integral->shape[1] != width) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    const float* in = (const float*)src->data;
+    float* out = (float*)dst_integral->data;
+
+    int src_sy = (src->ndim == 3) ? (int)src->strides[0] : (int)src->strides[0];
+    int src_sx = (src->ndim == 3) ? (int)src->strides[1] : 1;
+    int dst_sy = (dst_integral->ndim == 3) ? (int)dst_integral->strides[0] : (int)dst_integral->strides[0];
+    int dst_sx = (dst_integral->ndim == 3) ? (int)dst_integral->strides[1] : 1;
+
+    for (size_t c = 0; c < channels; ++c) {
+        for (size_t y = 0; y < height; ++y) {
+            for (size_t x = 0; x < width; ++x) {
+                float val = in[y * src_sy + x * src_sx + c];
+                float left = (x > 0) ? out[y * dst_sy + (x - 1) * dst_sx + c] : 0.0f;
+                float top  = (y > 0) ? out[(y - 1) * dst_sy + x * dst_sx + c] : 0.0f;
+                float diag = (x > 0 && y > 0) ? out[(y - 1) * dst_sy + (x - 1) * dst_sx + c] : 0.0f;
+
+                out[y * dst_sy + x * dst_sx + c] = val + left + top - diag;
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_box_filter_integral(const RCRE_Tensor* integral, RCRE_Tensor* dst,
+                                              int box_radius) {
+    if (!integral || !integral->data || !dst || !dst->data || box_radius < 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (integral->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t height = integral->shape[0];
+    size_t width = integral->shape[1];
+    size_t channels = (integral->ndim == 3) ? integral->shape[2] : 1;
+
+    if (dst->shape[0] != height || dst->shape[1] != width) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    const float* in = (const float*)integral->data;
+    float* out = (float*)dst->data;
+
+    int int_sy = (integral->ndim == 3) ? (int)integral->strides[0] : (int)integral->strides[0];
+    int int_sx = (integral->ndim == 3) ? (int)integral->strides[1] : 1;
+    int dst_sy = (dst->ndim == 3) ? (int)dst->strides[0] : (int)dst->strides[0];
+    int dst_sx = (dst->ndim == 3) ? (int)dst->strides[1] : 1;
+
+    int r = box_radius;
+
+    for (size_t c = 0; c < channels; ++c) {
+        for (size_t y = 0; y < height; ++y) {
+            for (size_t x = 0; x < width; ++x) {
+                int x1 = (int)x - r;
+                int x2 = (int)x + r;
+                int y1 = (int)y - r;
+                int y2 = (int)y + r;
+
+                if (x1 < 0) x1 = 0;
+                if (x2 >= (int)width) x2 = (int)width - 1;
+                if (y1 < 0) y1 = 0;
+                if (y2 >= (int)height) y2 = (int)height - 1;
+
+                float a = in[y2 * int_sy + x2 * int_sx + c];
+                float b = (x1 > 0) ? in[y2 * int_sy + (x1 - 1) * int_sx + c] : 0.0f;
+                float d = (y1 > 0) ? in[(y1 - 1) * int_sy + x2 * int_sx + c] : 0.0f;
+                float diag = (x1 > 0 && y1 > 0) ? in[(y1 - 1) * int_sy + (x1 - 1) * int_sx + c] : 0.0f;
+
+                float sum = a - b - d + diag;
+                float area = (float)((x2 - x1 + 1) * (y2 - y1 + 1));
+                out[y * dst_sy + x * dst_sx + c] = sum / area;
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_optical_flow_lk(const RCRE_Tensor* curr, const RCRE_Tensor* prev,
+                                          RCRE_Tensor* dst_velocity, int window_size,
+                                          int stride, float max_v, RCRE_Arena* arena) {
+    if (!curr || !curr->data || !prev || !prev->data || !dst_velocity || !dst_velocity->data || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (curr->dtype != RCRE_DTYPE_F32 || prev->dtype != RCRE_DTYPE_F32 || dst_velocity->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t height = curr->shape[0];
+    size_t width = curr->shape[1];
+
+    if (prev->shape[0] != height || prev->shape[1] != width) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    int eff_stride = (stride < 1) ? 1 : stride;
+    size_t v_h = height / (size_t)eff_stride;
+    size_t v_w = width / (size_t)eff_stride;
+
+    if (dst_velocity->shape[0] != v_h || dst_velocity->shape[1] != v_w || dst_velocity->shape[2] < 2) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    RCRE_ArenaTemp scratch = rcre_arena_temp_begin(arena);
+
+    /* Grayscale conversion */
+    size_t shape_2d[2] = {height, width};
+    RCRE_Tensor curr_gray = rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    RCRE_Tensor prev_gray = rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!curr_gray.data || !prev_gray.data) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    if (curr->ndim == 3 && curr->shape[2] >= 3) {
+        (void)rcre_cv_rgb_to_gray(curr, &curr_gray);
+    } else {
+        memcpy(curr_gray.data, curr->data, height * width * sizeof(float));
+    }
+
+    if (prev->ndim == 3 && prev->shape[2] >= 3) {
+        (void)rcre_cv_rgb_to_gray(prev, &prev_gray);
+    } else {
+        memcpy(prev_gray.data, prev->data, height * width * sizeof(float));
+    }
+
+    /* Spatial gradients Ix, Iy on curr */
+    RCRE_Tensor gx = rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    RCRE_Tensor gy = rcre_tensor_create(shape_2d, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!gx.data || !gy.data) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    (void)rcre_cv_sobel(&curr_gray, &gx, &gy, arena);
+
+    /* Construct 5-channel spatiotemporal tensor: [Ixx, Iyy, Ixy, Ixt, Iyt] */
+    size_t shape_5d[3] = {height, width, 5};
+    RCRE_Tensor S_raw = rcre_tensor_create(shape_5d, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!S_raw.data) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    const float* cg = (const float*)curr_gray.data;
+    const float* pg = (const float*)prev_gray.data;
+    const float* gx_d = (const float*)gx.data;
+    const float* gy_d = (const float*)gy.data;
+    float* s_data = (float*)S_raw.data;
+
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            size_t idx = y * width + x;
+            float ix = gx_d[idx];
+            float iy = gy_d[idx];
+            float it = cg[idx] - pg[idx];
+
+            size_t s_idx = idx * 5;
+            s_data[s_idx + 0] = ix * ix; /* Ixx */
+            s_data[s_idx + 1] = iy * iy; /* Iyy */
+            s_data[s_idx + 2] = ix * iy; /* Ixy */
+            s_data[s_idx + 3] = ix * it; /* Ixt */
+            s_data[s_idx + 4] = iy * it; /* Iyt */
+        }
+    }
+
+    /* Box filter spatiotemporal tensor via integral image */
+    RCRE_Tensor S_integ = rcre_tensor_create(shape_5d, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    RCRE_Tensor S_smooth = rcre_tensor_create(shape_5d, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!S_integ.data || !S_smooth.data) {
+        rcre_arena_temp_end(scratch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    (void)rcre_cv_integral_image(&S_raw, &S_integ);
+    int r = (window_size <= 0) ? 7 : (window_size / 2);
+    (void)rcre_cv_box_filter_integral(&S_integ, &S_smooth, r);
+
+    /* Invert 2x2 structure tensor at each strided sample */
+    const float* sm_d = (const float*)S_smooth.data;
+    float* v_out = (float*)dst_velocity->data;
+    int v_sy = (int)dst_velocity->strides[0];
+    int v_sx = (int)dst_velocity->strides[1];
+    float clamp_limit = (max_v <= 0.0f) ? 10.0f : max_v;
+
+    for (size_t vj = 0; vj < v_h; ++vj) {
+        size_t y = vj * (size_t)eff_stride + (size_t)(eff_stride / 2);
+        if (y >= height) y = height - 1;
+
+        for (size_t vi = 0; vi < v_w; ++vi) {
+            size_t x = vi * (size_t)eff_stride + (size_t)(eff_stride / 2);
+            if (x >= width) x = width - 1;
+
+            size_t s_idx = (y * width + x) * 5;
+            float Ixx = sm_d[s_idx + 0];
+            float Iyy = sm_d[s_idx + 1];
+            float Ixy = sm_d[s_idx + 2];
+            float Ixt = sm_d[s_idx + 3];
+            float Iyt = sm_d[s_idx + 4];
+
+            float det = Ixx * Iyy - Ixy * Ixy;
+            float vx = 0.0f;
+            float vy = 0.0f;
+
+            if (fabsf(det) > 1e-7f) {
+                vx = -(Iyy * Ixt - Ixy * Iyt) / det;
+                vy = -(Ixx * Iyt - Ixy * Ixt) / det;
+            }
+
+            if (vx < -clamp_limit) vx = -clamp_limit;
+            if (vx > clamp_limit)  vx = clamp_limit;
+            if (vy < -clamp_limit) vy = -clamp_limit;
+            if (vy > clamp_limit)  vy = clamp_limit;
+
+            v_out[vj * v_sy + vi * v_sx + 0] = vx;
+            v_out[vj * v_sy + vi * v_sx + 1] = vy;
+            if (dst_velocity->shape[2] >= 3) {
+                v_out[vj * v_sy + vi * v_sx + 2] = 0.0f;
+            }
+        }
+    }
+
+    rcre_arena_temp_end(scratch);
+    return RCRE_OK;
+}
+
+void rcre_cv_draw_flow(RCRE_Tensor* canvas, const RCRE_Tensor* velocity, int stride, float scale) {
+    if (!canvas || !canvas->data || !velocity || !velocity->data) return;
+    if (canvas->dtype != RCRE_DTYPE_F32 || canvas->ndim < 2) return;
+
+    size_t c_h = canvas->shape[0];
+    size_t c_w = canvas->shape[1];
+    size_t c_c = (canvas->ndim == 3) ? canvas->shape[2] : 1;
+
+    size_t v_h = velocity->shape[0];
+    size_t v_w = velocity->shape[1];
+
+    int eff_stride = (stride <= 0) ? (int)(c_w / v_w) : stride;
+    float eff_scale = (scale <= 0.0f) ? 5.0f : scale;
+
+    const float* v_data = (const float*)velocity->data;
+    float* out = (float*)canvas->data;
+    int v_sy = (int)velocity->strides[0];
+    int v_sx = (int)velocity->strides[1];
+    int c_sy = (int)canvas->strides[0];
+    int c_sx = (int)canvas->strides[1];
+
+    for (size_t j = 0; j < v_h; ++j) {
+        int cy = (int)(j * (size_t)eff_stride + (size_t)(eff_stride / 2));
+        if (cy >= (int)c_h) continue;
+
+        for (size_t i = 0; i < v_w; ++i) {
+            int cx = (int)(i * (size_t)eff_stride + (size_t)(eff_stride / 2));
+            if (cx >= (int)c_w) continue;
+
+            float vx = v_data[j * v_sy + i * v_sx + 0] * eff_scale;
+            float vy = v_data[j * v_sy + i * v_sx + 1] * eff_scale;
+
+            float d = sqrtf(vx * vx + vy * vy);
+            if (d < 0.5f) continue;
+
+            /* Draw line segment using DDA */
+            int steps = (int)ceilf(d);
+            for (int s = 0; s <= steps; ++s) {
+                float t = (float)s / (float)steps;
+                int px = (int)roundf((float)cx + vx * t);
+                int py = (int)roundf((float)cy + vy * t);
+
+                if (px >= 0 && px < (int)c_w && py >= 0 && py < (int)c_h) {
+                    if (c_c >= 3) {
+                        out[py * c_sy + px * c_sx + 0] = 0.0f; /* Red */
+                        out[py * c_sy + px * c_sx + 1] = 1.0f; /* Green */
+                        out[py * c_sy + px * c_sx + 2] = 0.0f; /* Blue */
+                    } else {
+                        out[py * c_sy + px * c_sx] = 1.0f;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /* --- Source: nn.c --- */

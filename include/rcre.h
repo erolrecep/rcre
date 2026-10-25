@@ -306,7 +306,7 @@ void rcre_threadpool_parallel_for_2d(RCRE_ThreadPool* pool, size_t height, size_
 void rcre_threadpool_destroy(RCRE_ThreadPool* pool);
 
 /* ========================================================================= */
-/* Computer Vision Reference Primitives (CV-REQ-01 to CV-REQ-03)             */
+/* Computer Vision Reference Primitives (CV-REQ-01 to CV-REQ-07)             */
 /* ========================================================================= */
 
 /**
@@ -320,6 +320,41 @@ RCRE_NODISCARD int rcre_cv_rgb_to_gray(const RCRE_Tensor* src, RCRE_Tensor* dst)
 RCRE_NODISCARD int rcre_cv_bgr_to_rgb(const RCRE_Tensor* src, RCRE_Tensor* dst);
 
 /**
+ * @brief Converts 3-channel RGB [0, 1] image to HSV [H in [0, 1), S in [0, 1], V in [0, 1]].
+ */
+RCRE_NODISCARD int rcre_cv_rgb_to_hsv(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
+ * @brief Converts 3-channel HSV image back to RGB [0, 1].
+ */
+RCRE_NODISCARD int rcre_cv_hsv_to_rgb(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
+ * @brief Scales a single channel in an image by a multiplier factor.
+ */
+RCRE_NODISCARD int rcre_cv_scale_channel(RCRE_Tensor* tensor, size_t channel_idx, float scale);
+
+/**
+ * @brief Shifts a single channel in an image by a constant offset.
+ */
+RCRE_NODISCARD int rcre_cv_shift_channel(RCRE_Tensor* tensor, size_t channel_idx, float shift);
+
+/**
+ * @brief Clamps tensor values in-place into [min_val, max_val].
+ */
+RCRE_NODISCARD int rcre_cv_clamp(RCRE_Tensor* tensor, float min_val, float max_val);
+
+/**
+ * @brief Resizes an image using Nearest-Neighbor interpolation with continuous subpixel coordinates.
+ */
+RCRE_NODISCARD int rcre_cv_resize_nn(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
+ * @brief Resizes an image using 4-point Bilinear interpolation with continuous subpixel coordinates.
+ */
+RCRE_NODISCARD int rcre_cv_resize_bilinear(const RCRE_Tensor* src, RCRE_Tensor* dst);
+
+/**
  * @brief Separable 2D Gaussian blur with reflection padding.
  */
 RCRE_NODISCARD int rcre_cv_gaussian_blur(const RCRE_Tensor* src, RCRE_Tensor* dst, 
@@ -330,6 +365,148 @@ RCRE_NODISCARD int rcre_cv_gaussian_blur(const RCRE_Tensor* src, RCRE_Tensor* ds
  */
 RCRE_NODISCARD int rcre_cv_sobel(const RCRE_Tensor* src, RCRE_Tensor* dst_dx, 
                                  RCRE_Tensor* dst_dy, RCRE_Arena* arena);
+
+/**
+ * @brief General 2D spatial convolution across channels with edge clamping.
+ */
+RCRE_NODISCARD int rcre_cv_convolve_2d(const RCRE_Tensor* src, const RCRE_Tensor* kernel,
+                                      RCRE_Tensor* dst, bool preserve_channels, RCRE_Arena* arena);
+
+/**
+ * @brief Constructs a 2D Box blur filter kernel tensor of size [size, size, 1].
+ */
+RCRE_NODISCARD int rcre_cv_filter_box(RCRE_Tensor* kernel, int size, RCRE_Arena* arena);
+
+/**
+ * @brief Constructs a 3x3 Sharpen filter kernel tensor.
+ */
+RCRE_NODISCARD int rcre_cv_filter_sharpen(RCRE_Tensor* kernel, RCRE_Arena* arena);
+
+/**
+ * @brief Constructs a 3x3 Emboss filter kernel tensor.
+ */
+RCRE_NODISCARD int rcre_cv_filter_emboss(RCRE_Tensor* kernel, RCRE_Arena* arena);
+
+/**
+ * @brief Constructs a 3x3 High-Pass filter kernel tensor.
+ */
+RCRE_NODISCARD int rcre_cv_filter_highpass(RCRE_Tensor* kernel, RCRE_Arena* arena);
+
+/* --- Feature Detection, Descriptors & Matching --- */
+
+typedef struct RCRE_CV_Point {
+    float x;
+    float y;
+} RCRE_CV_Point;
+
+typedef struct RCRE_CV_Descriptor {
+    RCRE_CV_Point pt;
+    int len;
+    float* data;
+} RCRE_CV_Descriptor;
+
+typedef struct RCRE_CV_Match {
+    RCRE_CV_Point p;
+    RCRE_CV_Point q;
+    int idx_a;
+    int idx_b;
+    float distance;
+} RCRE_CV_Match;
+
+/**
+ * @brief Computes Harris cornerness response matrix R = det(S) - k * trace(S)^2.
+ */
+RCRE_NODISCARD int rcre_cv_harris_response(const RCRE_Tensor* src, RCRE_Tensor* dst_r,
+                                          float sigma, float k, RCRE_Arena* arena);
+
+/**
+ * @brief Performs 2D Non-Maximum Suppression (NMS) over a window radius.
+ */
+RCRE_NODISCARD int rcre_cv_nms_2d(const RCRE_Tensor* src, RCRE_Tensor* dst,
+                                 int window_radius, float threshold);
+
+/**
+ * @brief Detects Harris corners and extracts local gradient patch descriptors.
+ */
+RCRE_NODISCARD int rcre_cv_harris_detect(const RCRE_Tensor* src, float sigma, float threshold,
+                                        int nms_radius, RCRE_CV_Descriptor** out_desc,
+                                        int* out_count, RCRE_Arena* arena);
+
+/**
+ * @brief Matches feature descriptors using Lowe's ratio test and mutual uniqueness.
+ */
+RCRE_NODISCARD int rcre_cv_match_descriptors(const RCRE_CV_Descriptor* a, int na,
+                                            const RCRE_CV_Descriptor* b, int nb,
+                                            float ratio_thresh, RCRE_CV_Match** out_matches,
+                                            int* out_count, RCRE_Arena* arena);
+
+/**
+ * @brief Draws crosshair markers on an image for detected keypoints.
+ */
+void rcre_cv_draw_markers(RCRE_Tensor* image, const RCRE_CV_Point* points, int count,
+                          float r, float g, float b);
+
+/* --- Homography, RANSAC & Panorama Stitching --- */
+
+/**
+ * @brief Computes 3x3 projective homography matrix H via Direct Linear Transformation (DLT).
+ */
+RCRE_NODISCARD int rcre_cv_compute_homography_dlt(const RCRE_CV_Match* matches, int n,
+                                                 float H[3][3], RCRE_Arena* arena);
+
+/**
+ * @brief Computes optimal robust homography using RANSAC inlier consensus.
+ */
+RCRE_NODISCARD int rcre_cv_find_homography_ransac(RCRE_CV_Match* matches, int n,
+                                                 float inlier_thresh, int iters, int cutoff,
+                                                 float out_H[3][3], int* out_inliers,
+                                                 RCRE_Arena* arena);
+
+/**
+ * @brief Warps an image using backward projective mapping with bilinear interpolation.
+ */
+RCRE_NODISCARD int rcre_cv_warp_perspective(const RCRE_Tensor* src, const float H[3][3],
+                                           RCRE_Tensor* dst, RCRE_Arena* arena);
+
+/**
+ * @brief Projects an image onto a cylinder with focal length f.
+ */
+RCRE_NODISCARD int rcre_cv_cylindrical_project(const RCRE_Tensor* src, float f,
+                                              RCRE_Tensor* dst, RCRE_Arena* arena);
+
+/**
+ * @brief End-to-end two-image panorama stitching pipeline.
+ */
+RCRE_NODISCARD int rcre_cv_stitch_panorama(const RCRE_Tensor* a, const RCRE_Tensor* b,
+                                          float f_cylindrical, float sigma, float thresh,
+                                          int nms, float inlier_thresh, int iters,
+                                          RCRE_Tensor* dst, RCRE_Arena* arena);
+
+/* --- Integral Images & Lucas-Kanade Optical Flow --- */
+
+/**
+ * @brief Computes 2D Summed-Area Table (Integral Image) for O(1) box queries.
+ */
+RCRE_NODISCARD int rcre_cv_integral_image(const RCRE_Tensor* src, RCRE_Tensor* dst_integral);
+
+/**
+ * @brief Applies constant-time box filter on an image using its precomputed integral table.
+ */
+RCRE_NODISCARD int rcre_cv_box_filter_integral(const RCRE_Tensor* integral, RCRE_Tensor* dst,
+                                              int box_radius);
+
+/**
+ * @brief Computes Lucas-Kanade dense/strided optical flow velocity field [H/s, W/s, 2].
+ */
+RCRE_NODISCARD int rcre_cv_optical_flow_lk(const RCRE_Tensor* curr, const RCRE_Tensor* prev,
+                                          RCRE_Tensor* dst_velocity, int window_size,
+                                          int stride, float max_v, RCRE_Arena* arena);
+
+/**
+ * @brief Overlays optical flow velocity vectors onto an image.
+ */
+void rcre_cv_draw_flow(RCRE_Tensor* canvas, const RCRE_Tensor* velocity, int stride, float scale);
+
 
 /* ========================================================================= */
 /* Fast Fourier Transform & Spectral Image Processing (FFT-REQ-01 to 04)     */

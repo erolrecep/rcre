@@ -99,6 +99,12 @@ def load_rcre():
 
     rcre.rcre_cv_sobel.restype = ctypes.c_int
 
+    rcre.rcre_cv_resize_bilinear.argtypes = [ctypes.POINTER(RCRE_Tensor), ctypes.POINTER(RCRE_Tensor)]
+    rcre.rcre_cv_resize_bilinear.restype = ctypes.c_int
+
+    rcre.rcre_cv_integral_image.argtypes = [ctypes.POINTER(RCRE_Tensor), ctypes.POINTER(RCRE_Tensor)]
+    rcre.rcre_cv_integral_image.restype = ctypes.c_int
+
     # FFT primitives
     rcre.rcre_fft_2d.argtypes = [
         ctypes.POINTER(RCRE_Tensor),
@@ -566,6 +572,61 @@ def test_cnn_parity(rcre):
     rcre.rcre_arena_destroy(arena)
     print("     ✓ CNN operators (Conv2D, ReLU6, Softmax) parity verified against NumPy (epsilon <= 1e-4)")
 
+def test_integral_image_parity(rcre):
+    print("🔬 [Parity 10/11] Testing Integral Image against OpenCV cv2.integral...")
+    arena = rcre.rcre_arena_create(8 * 1024 * 1024)
+    np.random.seed(42)
+    H, W = 64, 48
+    img = np.random.uniform(0.0, 1.0, (H, W)).astype(np.float32)
+
+    # OpenCV integral image (H+1, W+1)
+    cv_integ = cv2.integral(img)[1:, 1:]
+
+    # RCRE integral image
+    t_src = wrap_numpy_tensor(img, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, rcre, arena)
+    out_shape = (ctypes.c_size_t * 2)(H, W)
+    t_dst = rcre.rcre_tensor_create(out_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena)
+
+    status = rcre.rcre_cv_integral_image(ctypes.byref(t_src), ctypes.byref(t_dst))
+    assert status == 0, f"rcre_cv_integral_image failed with status {status}"
+
+    rcre_integ = np.ctypeslib.as_array(ctypes.cast(t_dst.data, ctypes.POINTER(ctypes.c_float)), shape=(H, W))
+    diff = np.max(np.abs(rcre_integ - cv_integ))
+    max_val = np.max(cv_integ)
+    rel_diff = diff / max_val
+    print(f"     Max abs diff vs OpenCV integral: {diff:.6e} (max val: {max_val:.1f}, rel diff: {rel_diff:.2e})")
+    assert np.allclose(rcre_integ, cv_integ, rtol=1e-5, atol=5e-3), f"Integral image diverged from OpenCV: {diff}"
+
+    rcre.rcre_arena_destroy(arena)
+    print("     ✓ Integral image parity verified against OpenCV (rtol <= 1e-5, atol <= 5e-3)")
+
+def test_resize_bilinear_parity(rcre):
+    print("🔬 [Parity 11/11] Testing Bilinear Resize against OpenCV cv2.resize...")
+    arena = rcre.rcre_arena_create(8 * 1024 * 1024)
+    np.random.seed(42)
+    H, W = 32, 24
+    out_h, out_w = 64, 48
+    img = np.random.uniform(0.0, 1.0, (H, W)).astype(np.float32)
+
+    # OpenCV resize
+    cv_resized = cv2.resize(img, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+
+    # RCRE resize bilinear
+    t_src = wrap_numpy_tensor(img, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, rcre, arena)
+    out_shape = (ctypes.c_size_t * 2)(out_h, out_w)
+    t_dst = rcre.rcre_tensor_create(out_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena)
+
+    status = rcre.rcre_cv_resize_bilinear(ctypes.byref(t_src), ctypes.byref(t_dst))
+    assert status == 0, f"rcre_cv_resize_bilinear failed with status {status}"
+
+    rcre_resized = np.ctypeslib.as_array(ctypes.cast(t_dst.data, ctypes.POINTER(ctypes.c_float)), shape=(out_h, out_w))
+    diff = np.max(np.abs(rcre_resized - cv_resized))
+    print(f"     Max abs diff vs OpenCV cv2.resize INTER_LINEAR: {diff:.6e}")
+    assert diff < 1e-3, f"Bilinear resize diverged from OpenCV: {diff}"
+
+    rcre.rcre_arena_destroy(arena)
+    print("     ✓ Bilinear resize parity verified against OpenCV (epsilon <= 1e-3)")
+
 # ---------------------------------------------------------------------------
 # Main Runner
 # ---------------------------------------------------------------------------
@@ -585,6 +646,8 @@ def main():
     test_dbscan_parity(rcre)
     test_fft_parity(rcre)
     test_cnn_parity(rcre)
+    test_integral_image_parity(rcre)
+    test_resize_bilinear_parity(rcre)
 
     print("=" * 70)
     print("🎉 ALL LAYER 3 NUMERICAL PARITY GATES PASSED (OpenCV & Scikit-Learn)!")

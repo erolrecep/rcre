@@ -21,12 +21,14 @@
 * **Pure C23 Zero-Dependency Core**: Compiles cleanly with standard ISO C23 (`clang -std=c2x` / `gcc -std=c23`) using modern attributes `[[nodiscard]]`, `constexpr`, `nullptr`, and `<stdatomic.h>`.
 * **Accompanying Academic Textbook**: Complete 16-chapter monograph and open-access book explaining the physical silicon math, cache hierarchies, and bare-metal algorithms from first principles at [**github.com/erolrecep/rcre-book**](https://github.com/erolrecep/rcre-book).
 * **Zero Heap Allocations in Inference Loops**: All memory is managed strictly through 64-byte aligned linear scratchpad memory arenas (`RCRE_Arena`) with $\mathcal{O}(1)$ bulk rewinding. `malloc` is strictly forbidden in hot paths.
-* **OpenCV & Scikit-Learn Bit-Exact Parity**: 15-bit fixed-point integer color kernels deliver **0 LSB discrepancy** against OpenCV `cv2.cvtColor(RGB2GRAY)`. Linear SVM, $k$-Means, and PCA match Scikit-Learn within float numerical tolerance ($\epsilon \le 10^{-4}$).
+* **OpenCV & Scikit-Learn Bit-Exact Parity**: 15-bit fixed-point integer color kernels deliver **0 LSB discrepancy** against OpenCV `cv2.cvtColor(RGB2GRAY)`. Bilinear resizing matches `cv2.resize(..., INTER_LINEAR)` within machine epsilon ($\le 1.2 \times 10^{-7}$). Linear SVM, $k$-Means, and PCA match Scikit-Learn within float numerical tolerance ($\epsilon \le 10^{-4}$).
 * **Dynamic Hardware Abstraction Layer (HAL)**: Runtime CPU feature detection dispatching single-cycle function pointers to ARM NEON (Apple Silicon), x86 AVX2/FMA, WebAssembly SIMD128, or optimized scalar reference fallbacks.
+* **Unified Geometric, Feature & Motion Computer Vision**: Complete assimilation of classical computer vision: subpixel continuous nearest-neighbor and bilinear resizing, HSV $\leftrightarrow$ RGB color space transformations, Harris corner detection with $3 \times 3$ NMS and Lowe's ratio test descriptor matching, Direct Linear Transform (DLT) $8 \times 8$ homography solving with RANSAC outlier consensus and cylindrical panorama stitching, plus $\mathcal{O}(1)$ summed-area table integral images and Lucas-Kanade dense/strided velocity field estimation.
 * **Dual Reverse-Mode Autograd Engine**: Micrograd-style scalar computation DAGs (`RCRE_ScalarVal`) with topological backprop and Graphviz export, alongside high-performance Tensor Tape autograd (`RCRE_AGTensor`) with automatic Vector-Jacobian Product (VJP) propagation and cache-blocked GEMM.
+* **Autoregressive Transformer Suite**: Complete NanoGPT-style generative transformer engine featuring multi-head self-attention, GELU, LayerNorm, KV-cache with $\le 10^{-5}$ equivalence, Byte-Pair Encoding (BPE) subword tokenizer, streaming dataloaders, and scheduled AdamW.
 * **Zero-Allocation Deep Learning Suite**: Production loss functions (MSE, BCE, Softmax Cross-Entropy, KL Divergence), optimizers (Decoupled AdamW, Momentum SGD), streaming CSV dataset loaders, and live terminal ANSI/SVG/WebGL visualizers.
 * **Isolated Camera Companion (`rcre_cam.h`)**: Native hardware ingestion using macOS AVFoundation (`CVPixelBuffer` zero-copy), Linux Video4Linux2 (`mmap`), and deterministic synthetic test generators for headless CI.
-* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~250 KB).
+* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~407 KB, 11,662 lines).
 * **Interactive Educational Visualizers**: Three.js 3D tensor stride visualizers, cache hierarchy simulators, and live in-browser webcam playgrounds in [`web/`](web/).
 
 ---
@@ -39,6 +41,8 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **Cache-Tiled GEMM** (37 × 43 × 29) | ARM NEON 128-bit | **72.96 GFLOPS** | — | Linear Arena (0 in loop) |
 | **RGB → Grayscale (Rec.601)** | ARM NEON 15-bit | **7,922 MP/s** | **~0.26 ms** @ 1080p | Linear Arena (0 in loop) |
+| **Bilinear Continuous Resize** (640 × 480 → 1280 × 960) | Subpixel continuous | **812 MP/s** | **~1.51 ms** | Linear Arena (0 in loop) |
+| **Integral Image Prefix Sum** (1080p) | 2D SAT Cumulative | **1,450 MP/s** | **~1.43 ms** | Linear Arena (0 in loop) |
 | **Tabular GBDT Prediction** (100 Trees) | Flat-Array Nodes | **7.86M preds / sec** | **127 ns** / pred | Linear Arena (0 in loop) |
 | **HNSW Vector Search** (64-D, M=16) | SIMD Euclidean L2 | **44,434 QPS** | **22.5 µs** / query | Linear Arena (0 in loop) |
 | **Live Camera Edge Filter** (640 × 480) | Camera → Gray → Blur → Sobel | **239.39 FPS** | **4.18 ms** / frame | Single scratchpad rewind |
@@ -50,17 +54,19 @@
 ```
 apps/rcre/
 ├── dist/
-│   └── rcre.h                  # Amalgamated single-header C23 release (250 KB)
+│   └── rcre.h                  # Amalgamated single-header C23 release (407 KB)
 ├── include/
-│   ├── rcre.h                  # Core public C23 header
+│   ├── rcre.h                  # Core public C23 header & CV APIs
 │   ├── rcre_autograd.h         # Autograd, Losses, Optimizers, Ingestion & Vis C23 header
+│   ├── rcre_transformer.h      # NanoGPT, Attention, KV-Cache & Tokenizers C23 header
 │   └── extras/
 │       └── rcre_cam.h          # Hardware camera companion header
 ├── src/
 │   ├── core/                   # Arena allocator, temp checkpoints, strided tensor, threadpool
-│   ├── cv/                     # Rec.601 color conversion, separable Gaussian, Sobel
+│   ├── cv/                     # Color, Resizing, Filters, FFT, Features, Homography, Optical Flow, CNN
 │   ├── ml/                     # OLS regression, Logistic, Linear SVM, KMeans, PCA, GBDT, HNSW
 │   ├── autograd/               # Scalar reverse-mode DAG autograd & Tensor tape VJP autograd
+│   ├── transformer/            # Generative transformer, Attention, KV-Cache, BPE, Char tokenizer
 │   ├── nn/                     # Losses, AdamW/SGD optimizers, CSV streaming, ANSI/SVG visualizers
 │   ├── hal/                    # CPU probing, dynamic dispatch, NEON, AVX2, WASM SIMD
 │   └── extras/                 # AVFoundation (macOS), V4L2 (Linux), Dummy camera backends

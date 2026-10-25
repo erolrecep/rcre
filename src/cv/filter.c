@@ -180,3 +180,171 @@ RCRE_NODISCARD int rcre_cv_sobel(const RCRE_Tensor* src, RCRE_Tensor* dst_dx,
 
     return RCRE_OK;
 }
+
+static inline int filter_clamp_coord(int p, int max_val) {
+    if (p < 0) return 0;
+    if (p >= max_val) return max_val - 1;
+    return p;
+}
+
+RCRE_NODISCARD int rcre_cv_convolve_2d(const RCRE_Tensor* src, const RCRE_Tensor* kernel,
+                                      RCRE_Tensor* dst, bool preserve_channels, RCRE_Arena* arena) {
+    (void)arena;
+    if (!src || !src->data || !kernel || !kernel->data || !dst || !dst->data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype != RCRE_DTYPE_F32 || kernel->dtype != RCRE_DTYPE_F32 || dst->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t in_h = src->shape[0];
+    size_t in_w = src->shape[1];
+    size_t in_c = (src->ndim == 3) ? src->shape[2] : 1;
+
+    size_t kh = kernel->shape[0];
+    size_t kw = kernel->shape[1];
+    size_t kc = (kernel->ndim == 3) ? kernel->shape[2] : 1;
+
+    if (kh == 0 || kw == 0 || (kh % 2 == 0) || (kw % 2 == 0)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t out_h = dst->shape[0];
+    size_t out_w = dst->shape[1];
+    size_t out_c = (dst->ndim == 3) ? dst->shape[2] : 1;
+
+    if (out_h != in_h || out_w != in_w) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    if (preserve_channels) {
+        if (out_c != in_c) return RCRE_ERR_SHAPE_MISMATCH;
+    } else {
+        if (out_c != 1) return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    const float* in = (const float*)src->data;
+    const float* k_data = (const float*)kernel->data;
+    float* out = (float*)dst->data;
+
+    int r_y = (int)(kh / 2);
+    int r_x = (int)(kw / 2);
+
+    int src_sy = (src->ndim == 3) ? (int)src->strides[0] : (int)src->strides[0];
+    int src_sx = (src->ndim == 3) ? (int)src->strides[1] : 1;
+    int dst_sy = (dst->ndim == 3) ? (int)dst->strides[0] : (int)dst->strides[0];
+    int dst_sx = (dst->ndim == 3) ? (int)dst->strides[1] : 1;
+
+    if (preserve_channels) {
+        for (size_t y = 0; y < in_h; ++y) {
+            for (size_t x = 0; x < in_w; ++x) {
+                for (size_t c = 0; c < in_c; ++c) {
+                    size_t k_channel = (kc == in_c) ? c : 0;
+                    float sum = 0.0f;
+
+                    for (int dy = -r_y; dy <= r_y; ++dy) {
+                        int sy_coord = filter_clamp_coord((int)y + dy, (int)in_h);
+                        for (int dx = -r_x; dx <= r_x; ++dx) {
+                            int sx_coord = filter_clamp_coord((int)x + dx, (int)in_w);
+
+                            float pixel_val = in[sy_coord * src_sy + sx_coord * src_sx + c];
+                            size_t k_idx = ((size_t)(dy + r_y) * kw + (size_t)(dx + r_x)) * kc + k_channel;
+                            sum += pixel_val * k_data[k_idx];
+                        }
+                    }
+                    if (dst->ndim == 3) {
+                        out[y * dst_sy + x * dst_sx + c] = sum;
+                    } else {
+                        out[y * dst_sy + x * dst_sx] = sum;
+                    }
+                }
+            }
+        }
+    } else {
+        /* Merge / collapse across channels */
+        for (size_t y = 0; y < in_h; ++y) {
+            for (size_t x = 0; x < in_w; ++x) {
+                float total_sum = 0.0f;
+                for (size_t c = 0; c < in_c; ++c) {
+                    size_t k_channel = (kc == in_c) ? c : 0;
+                    for (int dy = -r_y; dy <= r_y; ++dy) {
+                        int sy_coord = filter_clamp_coord((int)y + dy, (int)in_h);
+                        for (int dx = -r_x; dx <= r_x; ++dx) {
+                            int sx_coord = filter_clamp_coord((int)x + dx, (int)in_w);
+
+                            float pixel_val = in[sy_coord * src_sy + sx_coord * src_sx + c];
+                            size_t k_idx = ((size_t)(dy + r_y) * kw + (size_t)(dx + r_x)) * kc + k_channel;
+                            total_sum += pixel_val * k_data[k_idx];
+                        }
+                    }
+                }
+                out[y * dst_sy + x * dst_sx] = total_sum;
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_filter_box(RCRE_Tensor* kernel, int size, RCRE_Arena* arena) {
+    if (!kernel || size <= 0 || (size % 2 == 0) || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    size_t shape[3] = {(size_t)size, (size_t)size, 1};
+    *kernel = rcre_tensor_create(shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!kernel->data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    float val = 1.0f / (float)(size * size);
+    float* data = (float*)kernel->data;
+    size_t total = (size_t)(size * size);
+    for (size_t i = 0; i < total; ++i) {
+        data[i] = val;
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_filter_sharpen(RCRE_Tensor* kernel, RCRE_Arena* arena) {
+    if (!kernel || !arena) return RCRE_ERR_INVALID_ARG;
+    size_t shape[3] = {3, 3, 1};
+    *kernel = rcre_tensor_create(shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!kernel->data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    float weights[9] = {
+        0.0f, -1.0f,  0.0f,
+       -1.0f,  5.0f, -1.0f,
+        0.0f, -1.0f,  0.0f
+    };
+    memcpy(kernel->data, weights, sizeof(weights));
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_filter_emboss(RCRE_Tensor* kernel, RCRE_Arena* arena) {
+    if (!kernel || !arena) return RCRE_ERR_INVALID_ARG;
+    size_t shape[3] = {3, 3, 1};
+    *kernel = rcre_tensor_create(shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!kernel->data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    float weights[9] = {
+       -2.0f, -1.0f, 0.0f,
+       -1.0f,  1.0f, 1.0f,
+        0.0f,  1.0f, 2.0f
+    };
+    memcpy(kernel->data, weights, sizeof(weights));
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_filter_highpass(RCRE_Tensor* kernel, RCRE_Arena* arena) {
+    if (!kernel || !arena) return RCRE_ERR_INVALID_ARG;
+    size_t shape[3] = {3, 3, 1};
+    *kernel = rcre_tensor_create(shape, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_HWC, arena);
+    if (!kernel->data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    float weights[9] = {
+        0.0f, -1.0f,  0.0f,
+       -1.0f,  4.0f, -1.0f,
+        0.0f, -1.0f,  0.0f
+    };
+    memcpy(kernel->data, weights, sizeof(weights));
+    return RCRE_OK;
+}
+
