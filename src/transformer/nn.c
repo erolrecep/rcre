@@ -408,7 +408,16 @@ float rcre_transformer_cross_entropy_forward(float *probs, const float *logits, 
     float total_loss = 0.0f;
     for (int n = 0; n < N; n++) {
         int target = targets[n];
-        assert(target >= 0 && target < V);
+        if (target < 0 || target >= V) {
+            /* v0.2.2-style clamp policy: clamp instead of crash; callers
+             * with invalid labels get a warning under RCRE_DEBUG. */
+#ifdef RCRE_DEBUG
+            {
+                fprintf(stderr, "[rcre][warn] cross_entropy: target %d out of [0,%d); clamped\n", target, V);
+            }
+#endif
+            target = (target < 0) ? 0 : V - 1;
+        }
         float p = probs[n * V + target];
         total_loss += -logf(p + 1e-12f);
     }

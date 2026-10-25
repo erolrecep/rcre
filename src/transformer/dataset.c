@@ -6,6 +6,9 @@
 #include "transformer_internal.h"
 
 RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_CharTokenizer *tok, int batch_size, int seq_len) {
+    if (!tok || tok->vocab_size <= 0 || batch_size <= 0 || seq_len < 2) {
+        return nullptr;
+    }
     FILE *f = fopen(filepath, "rb");
     if (!f) {
         return nullptr;
@@ -45,7 +48,7 @@ RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_
         return nullptr;
     }
 
-    int valid_tokens = rcre_char_tokenizer_encode(tok, raw_text, read_bytes, loader->tokens);
+    int valid_tokens = rcre_char_tokenizer_encode(tok, raw_text, read_bytes, loader->tokens, (int)read_bytes);
     free(raw_text);
 
     loader->num_tokens = (size_t)valid_tokens;
@@ -59,14 +62,14 @@ RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_
 }
 
 void rcre_gpt_dataloader_next_batch_random(RCRE_GPTDataLoader *loader, int *x_batch, int *y_batch, uint64_t *rng_state) {
+    if (!loader || !x_batch || !y_batch) return;
+    /* Deterministic internal fallback so rng_state == NULL is reproducible
+     * (unified-RNG policy: no libc rand()). */
+    static uint64_t fallback_rng_state = 0x1234567890ABCDEFULL;
+    uint64_t *rng = rng_state ? rng_state : &fallback_rng_state;
     size_t max_start = loader->num_tokens - (size_t)loader->seq_len - 1;
     for (int b = 0; b < loader->batch_size; b++) {
-        size_t start;
-        if (rng_state != nullptr) {
-            start = (size_t)(rcre_rng_next(rng_state) % max_start);
-        } else {
-            start = (((size_t)rand() << 32) | (size_t)rand()) % max_start;
-        }
+        size_t start = (size_t)(rcre_rng_next(rng) % max_start);
         for (int t = 0; t < loader->seq_len; t++) {
             x_batch[b * loader->seq_len + t] = loader->tokens[start + t];
             y_batch[b * loader->seq_len + t] = loader->tokens[start + t + 1];
@@ -75,6 +78,7 @@ void rcre_gpt_dataloader_next_batch_random(RCRE_GPTDataLoader *loader, int *x_ba
 }
 
 void rcre_gpt_dataloader_next_batch_sequential(RCRE_GPTDataLoader *loader, int *x_batch, int *y_batch) {
+    if (!loader || !x_batch || !y_batch) return;
     size_t max_start = loader->num_tokens - (size_t)loader->seq_len - 1;
     for (int b = 0; b < loader->batch_size; b++) {
         if (loader->current_idx >= max_start) {

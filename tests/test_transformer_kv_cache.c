@@ -59,7 +59,7 @@ static void test_kv_cache_equivalence(void) {
 
     free(kv_logits);
     rcre_kv_cache_free(cache);
-    rcre_gpt_acts_free(acts, cfg.num_layers);
+    rcre_gpt_acts_free(acts);
     rcre_gpt_free(model);
 }
 

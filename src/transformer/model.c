@@ -34,7 +34,18 @@ static void map_block_pointers(RCRE_GPTBlockWeights *block, float *base, const R
     block->fc2_b = base + *offset; *offset += C;
 }
 
+/* Structural invariants required by every kernel in this file. */
+bool rcre_gpt_config_valid(const RCRE_GPTConfig *cfg) {
+    return cfg &&
+           cfg->vocab_size > 0 && cfg->seq_len > 0 &&
+           cfg->embed_dim > 0 && cfg->num_heads > 0 &&
+           cfg->num_layers > 0 && cfg->mlp_dim > 0 &&
+           (cfg->embed_dim % cfg->num_heads) == 0;
+}
+
 RCRE_GPTModel* rcre_gpt_create(RCRE_GPTConfig config, RCRE_Arena *arena) {
+    if (!rcre_gpt_config_valid(&config)) return nullptr;
+    config.head_dim = config.embed_dim / config.num_heads; /* normalize */
     bool owns_heap = (arena == nullptr);
     RCRE_GPTModel *model = (RCRE_GPTModel*)rcre_transformer_alloc_mem(arena, sizeof(RCRE_GPTModel), alignof(RCRE_GPTModel));
     if (!model) return nullptr;
@@ -99,7 +110,10 @@ RCRE_GPTModel* rcre_gpt_create(RCRE_GPTConfig config, RCRE_Arena *arena) {
     model->ln_f_b = model->params + offset; offset += C;
     model->head_w = model->params + offset; offset += (size_t)C * V;
 
-    assert(offset == count);
+    if (offset != count) { /* internal invariant; cannot happen */
+        rcre_gpt_free(model);
+        return nullptr;
+    }
     return model;
 }
 
@@ -175,6 +189,7 @@ RCRE_GPTActs* rcre_gpt_acts_create(RCRE_GPTConfig config, int B, int T, RCRE_Are
 
     acts->arena = arena;
     acts->owns_heap = owns_heap;
+    acts->num_layers = config.num_layers;
 
     int C = config.embed_dim;
     int H = config.num_heads;
@@ -191,8 +206,9 @@ RCRE_GPTActs* rcre_gpt_acts_create(RCRE_GPTConfig config, int B, int T, RCRE_Are
     acts->probs     = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * V, 64);
 
     acts->blocks = (RCRE_GPTBlockActs*)rcre_transformer_alloc_mem(arena, sizeof(RCRE_GPTBlockActs) * L, alignof(RCRE_GPTBlockActs));
-    if (!acts->blocks) {
-        rcre_gpt_acts_free(acts, L);
+    if (!acts->emb_out || !acts->ln_f_out || !acts->ln_f_mean || !acts->ln_f_rstd ||
+        !acts->logits || !acts->probs || !acts->blocks) {
+        rcre_gpt_acts_free(acts);
         return nullptr;
     }
 
@@ -216,12 +232,21 @@ RCRE_GPTActs* rcre_gpt_acts_create(RCRE_GPTConfig config, int B, int T, RCRE_Are
         ba->gelu_out   = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * M, 64);
         ba->fc2_out    = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
         ba->resid2_out = (float*)rcre_transformer_alloc_mem(arena, sizeof(float) * BT * C, 64);
+
+        if (!ba->ln1_out || !ba->ln1_mean || !ba->ln1_rstd || !ba->q || !ba->k ||
+            !ba->v || !ba->att_scores || !ba->att_out || !ba->proj_out || !ba->resid1_out ||
+            !ba->ln2_out || !ba->ln2_mean || !ba->ln2_rstd || !ba->fc1_out || !ba->gelu_out ||
+            !ba->fc2_out || !ba->resid2_out) {
+            rcre_gpt_acts_free(acts);
+            return nullptr;
+        }
     }
     return acts;
 }
 
-void rcre_gpt_acts_free(RCRE_GPTActs *acts, int num_layers) {
+void rcre_gpt_acts_free(RCRE_GPTActs *acts) {
     if (!acts) return;
+    const int num_layers = acts->num_layers;
     if (acts->owns_heap) {
         if (acts->emb_out)   free(acts->emb_out);
         if (acts->ln_f_out)  free(acts->ln_f_out);
@@ -266,11 +291,18 @@ float rcre_gpt_forward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inpu
     int V = cfg->vocab_size;
     int BT = B * T;
 
+    if (inputs && targets && B > 0 && T > 0) {
+        for (int i = 0; i < BT; i++) {
+            if (inputs[i] < 0 || inputs[i] >= V || targets[i] < 0 || targets[i] >= V) {
+                return -1.0f; /* invalid token id: unambiguous sentinel */
+            }
+        }
+    }
+
     /* 1. Embedding: emb_out = wte[token] + wpe[t] */
     for (int b = 0; b < B; b++) {
         for (int t = 0; t < T; t++) {
             int token = inputs[b * T + t];
-            assert(token >= 0 && token < V);
             const float *wte_row = model->wte + token * C;
             const float *wpe_row = model->wpe + t * C;
             float *out_row = acts->emb_out + IDX3(b, t, 0, T, C);
@@ -336,26 +368,40 @@ void rcre_gpt_backward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inpu
     int V = cfg->vocab_size;
     int BT = B * T;
 
-    /* Temporary scratch buffers for backpropagation */
-    float *d_logits = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * V, 64);
-    float *d_ln_f   = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
-    float *d_x      = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
-    float *d_ln_out = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
-    float *d_fc1    = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * M, 64);
-    float *d_gelu   = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * M, 64);
-    float *d_att    = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
-    float *dq       = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
-    float *dk       = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
-    float *dv       = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
-    float *datt_sc  = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * B * H * T * T, 64);
-    float *d_qkv_in = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
-    float *d_resid1 = (float*)rcre_transformer_alloc_mem(nullptr, sizeof(float) * BT * C, 64);
+    /*
+     * Temporary scratch for backprop. Arena-resident models checkpoint the
+     * model's arena (zero steady-state heap, one bump per step); heap models
+     * fall back to checked malloc/free. No VLAs: the per-block gradient
+     * descriptor array is heap/arena scratch for arbitrary layer counts.
+     */
+    GPTScratch scratch;
+    gpt_scratch_begin(&scratch, model->arena);
+
+    float *d_logits  = gpt_scratch_alloc(&scratch, sizeof(float) * BT * V);
+    float *d_ln_f    = gpt_scratch_alloc(&scratch, sizeof(float) * BT * C);
+    float *d_x       = gpt_scratch_alloc(&scratch, sizeof(float) * BT * C);
+    float *d_ln_out  = gpt_scratch_alloc(&scratch, sizeof(float) * BT * C);
+    float *d_fc1     = gpt_scratch_alloc(&scratch, sizeof(float) * BT * M);
+    float *d_gelu    = gpt_scratch_alloc(&scratch, sizeof(float) * BT * M);
+    float *d_att     = gpt_scratch_alloc(&scratch, sizeof(float) * BT * C);
+    float *dq        = gpt_scratch_alloc(&scratch, sizeof(float) * BT * C);
+    float *dk        = gpt_scratch_alloc(&scratch, sizeof(float) * BT * C);
+    float *dv        = gpt_scratch_alloc(&scratch, sizeof(float) * BT * C);
+    float *datt_sc   = gpt_scratch_alloc(&scratch, sizeof(float) * B * H * T * T);
+    float *d_qkv_in  = gpt_scratch_alloc(&scratch, sizeof(float) * BT * C);
+    float *d_resid1  = gpt_scratch_alloc(&scratch, sizeof(float) * BT * C);
+    RCRE_GPTBlockWeights *d_blocks = (RCRE_GPTBlockWeights*)gpt_scratch_alloc(&scratch, sizeof(RCRE_GPTBlockWeights) * (size_t)L);
+
+    if (!d_logits || !d_ln_f || !d_x || !d_ln_out || !d_fc1 || !d_gelu || !d_att ||
+        !dq || !dk || !dv || !datt_sc || !d_qkv_in || !d_resid1 || !d_blocks) {
+        gpt_scratch_end(&scratch);
+        return; /* OOM: leave grads untouched rather than crash */
+    }
 
     size_t offset = 0;
     float *d_wte = model->grads + offset; offset += (size_t)V * C;
     float *d_wpe = model->grads + offset; offset += (size_t)T * C;
 
-    RCRE_GPTBlockWeights d_blocks[L];
     for (int l = 0; l < L; l++) {
         map_block_pointers(&d_blocks[l], model->grads, cfg, &offset);
     }
@@ -425,18 +471,6 @@ void rcre_gpt_backward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inpu
         }
     }
 
-    /* Free temporary scratch buffers */
-    free(d_logits);
-    free(d_ln_f);
-    free(d_x);
-    free(d_ln_out);
-    free(d_fc1);
-    free(d_gelu);
-    free(d_att);
-    free(dq);
-    free(dk);
-    free(dv);
-    free(datt_sc);
-    free(d_qkv_in);
-    free(d_resid1);
+    /* Release scratch (arena rollback or heap frees) */
+    gpt_scratch_end(&scratch);
 }

@@ -74,7 +74,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -242,6 +242,7 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@bin/test_transformer_nn
 	@bin/test_transformer_kv_cache
 	@bin/test_transformer_bpe
+	@bin/test_transformer_merge
 	@bin/test_cv_geom
 	@bin/test_cv_features
 	@bin/test_cv_homography
@@ -297,6 +298,8 @@ endif
 	@bin/test_transformer_kv_cache_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_transformer_bpe.c -lm -lpthread -o bin/test_transformer_bpe_asan
 	@bin/test_transformer_bpe_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_transformer_merge.c -lm -lpthread -o bin/test_transformer_merge_asan
+	@bin/test_transformer_merge_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cv_geom.c -lm -lpthread -o bin/test_cv_geom_asan
 	@bin/test_cv_geom_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cv_features.c -lm -lpthread -o bin/test_cv_features_asan

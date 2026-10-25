@@ -18,7 +18,7 @@ static void test_char_tokenizer(void) {
 
     const char *test_str = "Hello world! 123";
     int tokens[64];
-    int n = rcre_char_tokenizer_encode(&tok, test_str, strlen(test_str), tokens);
+    int n = rcre_char_tokenizer_encode(&tok, test_str, strlen(test_str), tokens, 64);
     ASSERT_TRUE(n > 0);
 
     char decoded[64];

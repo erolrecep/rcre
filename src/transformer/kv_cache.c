@@ -6,6 +6,14 @@
 #include "transformer_internal.h"
 
 RCRE_KVCache* rcre_kv_cache_create(RCRE_GPTConfig config, RCRE_Arena *arena) {
+    /* The cache layout must match what the attention kernels index with
+     * (d_k = embed_dim / num_heads); a mismatched head_dim here would cause
+     * out-of-bounds cache writes during forward_token. */
+    if (config.num_layers <= 0 || config.num_heads <= 0 || config.seq_len <= 0 ||
+        config.embed_dim <= 0 || (config.embed_dim % config.num_heads) != 0 ||
+        config.head_dim != config.embed_dim / config.num_heads) {
+        return nullptr;
+    }
     bool owns_heap = (arena == nullptr);
     RCRE_KVCache *cache = (RCRE_KVCache*)rcre_transformer_alloc_mem(arena, sizeof(RCRE_KVCache), alignof(RCRE_KVCache));
     if (!cache) return nullptr;
@@ -47,13 +55,14 @@ void rcre_kv_cache_free(RCRE_KVCache *cache) {
     }
 }
 
-void rcre_gpt_forward_token(
+bool rcre_gpt_forward_token(
     RCRE_GPTModel *model,
     RCRE_KVCache *cache,
     int token,
     int pos,
     float *out_logits
 ) {
+    if (!model || !cache || !out_logits) return false;
     const RCRE_GPTConfig *cfg = &model->config;
     int C = cfg->embed_dim;
     int H = cfg->num_heads;
@@ -64,21 +73,30 @@ void rcre_gpt_forward_token(
     int d_k = cfg->head_dim;
     float scale = 1.0f / sqrtf((float)d_k);
 
-    assert(pos < max_T);
-    assert(token >= 0 && token < V);
+    if (pos < 0 || pos >= max_T || token < 0 || token >= V) return false;
 
-    /* Allocate local buffers dynamically to avoid VLA stack limits */
-    float *x        = (float*)malloc(sizeof(float) * C);
-    float *x_norm   = (float*)malloc(sizeof(float) * C);
-    float *q        = (float*)malloc(sizeof(float) * C);
-    float *k        = (float*)malloc(sizeof(float) * C);
-    float *v        = (float*)malloc(sizeof(float) * C);
-    float *att_out  = (float*)malloc(sizeof(float) * C);
-    float *proj_out = (float*)malloc(sizeof(float) * C);
-    float *fc1_out  = (float*)malloc(sizeof(float) * M);
-    float *gelu_out = (float*)malloc(sizeof(float) * M);
-    float *fc2_out  = (float*)malloc(sizeof(float) * C);
-    float *scores   = (float*)malloc(sizeof(float) * (pos + 1));
+    /*
+     * Local buffers via the scratch pool: arena-resident models bump the
+     * model's arena (rolled back per token); heap models malloc with checks.
+     */
+    GPTScratch scratch;
+    gpt_scratch_begin(&scratch, model->arena);
+    float *x        = gpt_scratch_alloc(&scratch, sizeof(float) * C);
+    float *x_norm   = gpt_scratch_alloc(&scratch, sizeof(float) * C);
+    float *q        = gpt_scratch_alloc(&scratch, sizeof(float) * C);
+    float *k        = gpt_scratch_alloc(&scratch, sizeof(float) * C);
+    float *v        = gpt_scratch_alloc(&scratch, sizeof(float) * C);
+    float *att_out  = gpt_scratch_alloc(&scratch, sizeof(float) * C);
+    float *proj_out = gpt_scratch_alloc(&scratch, sizeof(float) * C);
+    float *fc1_out  = gpt_scratch_alloc(&scratch, sizeof(float) * M);
+    float *gelu_out = gpt_scratch_alloc(&scratch, sizeof(float) * M);
+    float *fc2_out  = gpt_scratch_alloc(&scratch, sizeof(float) * C);
+    float *scores   = gpt_scratch_alloc(&scratch, sizeof(float) * (size_t)(pos + 1));
+    if (!x || !x_norm || !q || !k || !v || !att_out || !proj_out ||
+        !fc1_out || !gelu_out || !fc2_out || !scores) {
+        gpt_scratch_end(&scratch);
+        return false;
+    }
     float mean = 0.0f, rstd = 0.0f;
 
     /* 1. Embedding: wte[token] + wpe[pos] */
@@ -164,15 +182,7 @@ void rcre_gpt_forward_token(
     /* 4. LM Head Projection */
     rcre_transformer_linear_forward(out_logits, x_norm, model->head_w, nullptr, 1, C, V);
 
-    free(x);
-    free(x_norm);
-    free(q);
-    free(k);
-    free(v);
-    free(att_out);
-    free(proj_out);
-    free(fc1_out);
-    free(gelu_out);
-    free(fc2_out);
-    free(scores);
+    gpt_scratch_end(&scratch);
+    cache->current_pos = pos + 1;
+    return true;
 }

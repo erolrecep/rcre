@@ -5,7 +5,26 @@
 
 #include "transformer_internal.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+bool rcre_gpt_adamw_config_valid(const RCRE_GPTAdamWConfig *cfg) {
+    return cfg != nullptr &&
+           isfinite(cfg->lr_max) && cfg->lr_max > 0.0f &&
+           isfinite(cfg->lr_min) && cfg->lr_min >= 0.0f && cfg->lr_min <= cfg->lr_max &&
+           isfinite(cfg->beta1) && cfg->beta1 >= 0.0f && cfg->beta1 < 1.0f &&
+           isfinite(cfg->beta2) && cfg->beta2 >= 0.0f && cfg->beta2 < 1.0f &&
+           isfinite(cfg->eps) && cfg->eps > 0.0f &&
+           isfinite(cfg->weight_decay) &&
+           isfinite(cfg->grad_clip) && cfg->grad_clip >= 0.0f &&
+           cfg->warmup_steps >= 0 && cfg->max_steps > cfg->warmup_steps;
+}
+
 float rcre_gpt_get_scheduled_lr(const RCRE_GPTAdamWConfig *cfg, int step) {
+    if (cfg->max_steps <= cfg->warmup_steps) {
+        return cfg->lr_min; /* degenerate schedule: hold the floor */
+    }
     if (step < cfg->warmup_steps) {
         return cfg->lr_max * ((float)(step + 1) / (float)cfg->warmup_steps);
     }
@@ -34,6 +53,18 @@ float rcre_gpt_clip_gradients(float *grads, size_t num_params, float max_norm) {
 }
 
 void rcre_gpt_adamw_step(RCRE_GPTModel *model, RCRE_GPTAdamWConfig *cfg) {
+    if (!model || !cfg) return;
+    if (!rcre_gpt_adamw_config_valid(cfg)) {
+        /*
+         * Invalid hyperparameters (e.g. beta1 == 1.0) would divide by zero in
+         * the bias correction and turn every parameter NaN. Refuse the step
+         * instead of corrupting the model.
+         */
+#ifdef RCRE_DEBUG
+        fprintf(stderr, "[rcre][warn] rcre_gpt_adamw_step: invalid config; step skipped\n");
+#endif
+        return;
+    }
     cfg->current_step++;
     int t = cfg->current_step;
     float lr = rcre_gpt_get_scheduled_lr(cfg, t);

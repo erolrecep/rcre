@@ -46,41 +46,53 @@ bool rcre_char_tokenizer_train_from_file(RCRE_CharTokenizer *tok, const char *fi
 }
 
 bool rcre_char_tokenizer_save(const RCRE_CharTokenizer *tok, const char *filepath) {
+    if (tok->vocab_size < 0 || tok->vocab_size > 256) return false;
     FILE *f = fopen(filepath, "wb");
     if (!f) return false;
-    if (fwrite(&tok->vocab_size, sizeof(int), 1, f) != 1) { fclose(f); return false; }
-    if (fwrite(tok->id_to_char, sizeof(unsigned char), (size_t)tok->vocab_size, f) != (size_t)tok->vocab_size) {
-        fclose(f);
-        return false;
-    }
+    const uint32_t magic = 0x31434352u; /* "RCC1" */
+    const uint8_t version = RCRE_CHAR_TOK_FORMAT_VERSION;
+    bool ok = (fwrite(&magic, sizeof(magic), 1, f) == 1) &&
+              (fwrite(&version, sizeof(version), 1, f) == 1) &&
+              (fwrite(&tok->vocab_size, sizeof(int), 1, f) == 1) &&
+              (fwrite(tok->id_to_char, sizeof(unsigned char), (size_t)tok->vocab_size, f) == (size_t)tok->vocab_size);
     fclose(f);
-    return true;
+    return ok;
 }
 
 bool rcre_char_tokenizer_load(RCRE_CharTokenizer *tok, const char *filepath) {
+    /* id_to_char is a fixed 256-entry member: the file's vocab_size is
+     * validated against it BEFORE any byte is read into the array. */
     rcre_char_tokenizer_init(tok);
     FILE *f = fopen(filepath, "rb");
     if (!f) return false;
-    if (fread(&tok->vocab_size, sizeof(int), 1, f) != 1) {
-        fclose(f);
-        return false;
+    uint32_t magic = 0;
+    uint8_t version = 0;
+    int vocab_size = 0;
+    bool ok = (fread(&magic, sizeof(magic), 1, f) == 1) &&
+              (fread(&version, sizeof(version), 1, f) == 1) &&
+              (fread(&vocab_size, sizeof(int), 1, f) == 1);
+    if (ok) {
+        ok = (magic == 0x31434352u) && (version == RCRE_CHAR_TOK_FORMAT_VERSION) &&
+             (vocab_size >= 0) && (vocab_size <= 256);
     }
-    if (fread(tok->id_to_char, sizeof(unsigned char), (size_t)tok->vocab_size, f) != (size_t)tok->vocab_size) {
-        fclose(f);
-        return false;
+    char buf[256];
+    if (ok) {
+        ok = (fread(buf, sizeof(unsigned char), (size_t)vocab_size, f) == (size_t)vocab_size);
     }
     fclose(f);
-
-    for (int i = 0; i < tok->vocab_size; i++) {
-        unsigned char ch = tok->id_to_char[i];
+    if (!ok) return false;
+    for (int i = 0; i < vocab_size; i++) {
+        unsigned char ch = (unsigned char)buf[i];
+        tok->id_to_char[i] = (char)ch;
         tok->char_to_id[ch] = i;
     }
+    tok->vocab_size = vocab_size;
     return true;
 }
 
-int rcre_char_tokenizer_encode(const RCRE_CharTokenizer *tok, const char *text, size_t len, int *out_tokens) {
+int rcre_char_tokenizer_encode(const RCRE_CharTokenizer *tok, const char *text, size_t len, int *out_tokens, int max_tokens) {
     int count = 0;
-    for (size_t i = 0; i < len; i++) {
+    for (size_t i = 0; i < len && count < max_tokens; i++) {
         unsigned char ch = (unsigned char)text[i];
         int id = tok->char_to_id[ch];
         if (id != -1) {
@@ -178,8 +190,13 @@ bool rcre_bpe_train_from_file(RCRE_BPETokenizer *tok, const char *filepath, int 
     free(raw_bytes);
 
     int max_merges = target_vocab_size - 256;
-    tok->rules = (RCRE_BPEMergeRule*)malloc(sizeof(RCRE_BPEMergeRule) * max_merges);
+    /* Retrain: release previously merged strings. The 256 base byte strings
+     * (entries 0..255) are owned by rcre_bpe_create() and survive. */
+    if (tok->rules) { free(tok->rules); tok->rules = NULL; }
+    for (int i = 256; i < tok->vocab_size; i++) { free(tok->id_to_token_str[i]); tok->id_to_token_str[i] = nullptr; }
+    tok->rules = (RCRE_BPEMergeRule*)malloc(sizeof(RCRE_BPEMergeRule) * (size_t)max_merges);
     tok->num_rules = 0;
+    if (!tok->rules) { free(tokens); return false; }
 
     int current_vocab = 256;
 
@@ -245,43 +262,93 @@ bool rcre_bpe_train_from_file(RCRE_BPETokenizer *tok, const char *filepath, int 
 }
 
 bool rcre_bpe_save(const RCRE_BPETokenizer *tok, const char *filepath) {
+    if (!tok->id_to_token_str) return false;
     FILE *f = fopen(filepath, "wb");
     if (!f) return false;
-    fwrite(&tok->vocab_size, sizeof(int), 1, f);
-    fwrite(&tok->num_rules, sizeof(int), 1, f);
-    fwrite(tok->rules, sizeof(RCRE_BPEMergeRule), tok->num_rules, f);
-
-    for (int i = 0; i < tok->vocab_size; i++) {
-        size_t len = strlen(tok->id_to_token_str[i]);
-        fwrite(&len, sizeof(size_t), 1, f);
-        fwrite(tok->id_to_token_str[i], 1, len, f);
+    const uint32_t magic = 0x31455052u; /* "RPE1" */
+    const uint8_t version = RCRE_BPE_FORMAT_VERSION;
+    bool ok = (fwrite(&magic, sizeof(magic), 1, f) == 1) &&
+              (fwrite(&version, sizeof(version), 1, f) == 1) &&
+              (fwrite(&tok->vocab_size, sizeof(int), 1, f) == 1) &&
+              (fwrite(&tok->num_rules, sizeof(int), 1, f) == 1) &&
+              (tok->num_rules == 0 ||
+               fwrite(tok->rules, sizeof(RCRE_BPEMergeRule), (size_t)tok->num_rules, f) == (size_t)tok->num_rules);
+    for (int i = 0; ok && i < tok->vocab_size; i++) {
+        const char *str = tok->id_to_token_str[i];
+        size_t len = str ? strlen(str) : 0;
+        ok = (fwrite(&len, sizeof(size_t), 1, f) == 1);
+        if (ok && len > 0) ok = (fwrite(str, 1, len, f) == len);
     }
     fclose(f);
-    return true;
+    return ok;
 }
 
 bool rcre_bpe_load(RCRE_BPETokenizer *tok, const char *filepath) {
+    /* Requires a bpe_create()d tokenizer (id_to_token_str is sized for the
+     * 2048-vocab ceiling). Rejects unknown magic/version and out-of-range
+     * sizes; a trained tokenizer always has vocab_size == 256 + num_rules.
+     * Nothing is committed to `tok` unless the whole file is valid. */
+    if (!tok || !tok->id_to_token_str) return false;
     FILE *f = fopen(filepath, "rb");
     if (!f) return false;
 
-    if (fread(&tok->vocab_size, sizeof(int), 1, f) != 1) { fclose(f); return false; }
-    if (fread(&tok->num_rules, sizeof(int), 1, f) != 1) { fclose(f); return false; }
-
-    tok->rules = (RCRE_BPEMergeRule*)malloc(sizeof(RCRE_BPEMergeRule) * tok->num_rules);
-    if (fread(tok->rules, sizeof(RCRE_BPEMergeRule), tok->num_rules, f) != (size_t)tok->num_rules) {
-        fclose(f);
-        return false;
+    uint32_t magic = 0;
+    uint8_t version = 0;
+    int vocab_size = 0;
+    int num_rules = 0;
+    bool ok = (fread(&magic, sizeof(magic), 1, f) == 1) &&
+              (fread(&version, sizeof(version), 1, f) == 1) &&
+              (fread(&vocab_size, sizeof(int), 1, f) == 1) &&
+              (fread(&num_rules, sizeof(int), 1, f) == 1);
+    if (ok) {
+        ok = (magic == 0x31455052u) && (version == RCRE_BPE_FORMAT_VERSION) &&
+             (vocab_size > 256) && (vocab_size <= 2048) &&
+             (num_rules >= 0) && (num_rules == vocab_size - 256);
     }
 
-    for (int i = 0; i < tok->vocab_size; i++) {
-        if (tok->id_to_token_str[i]) free(tok->id_to_token_str[i]);
-        size_t len = 0;
-        if (fread(&len, sizeof(size_t), 1, f) != 1) { fclose(f); return false; }
-        tok->id_to_token_str[i] = (char*)malloc(len + 1);
-        if (fread(tok->id_to_token_str[i], 1, len, f) != len) { fclose(f); return false; }
-        tok->id_to_token_str[i][len] = '\0';
+    RCRE_BPEMergeRule *rules = NULL;
+    char **strings = NULL;
+    if (ok) {
+        if (num_rules > 0) {
+            rules = (RCRE_BPEMergeRule*)malloc(sizeof(RCRE_BPEMergeRule) * (size_t)num_rules);
+            ok = rules != NULL &&
+                 (fread(rules, sizeof(RCRE_BPEMergeRule), (size_t)num_rules, f) == (size_t)num_rules);
+            if (!ok) { free(rules); rules = NULL; }
+        }
+    }
+    if (ok) {
+        strings = (char**)calloc((size_t)vocab_size, sizeof(char*));
+        ok = (strings != NULL);
+        for (int i = 0; ok && i < vocab_size; i++) {
+            size_t len = 0;
+            ok = (fread(&len, sizeof(size_t), 1, f) == 1) && (len <= 512);
+            if (!ok) break;
+            char *str = (char*)malloc(len + 1);
+            ok = (str != NULL);
+            if (ok && len > 0) ok = (fread(str, 1, len, f) == len);
+            if (!ok) { free(str); break; }
+            str[len] = '\0';
+            strings[i] = str;
+        }
+        if (!ok) {
+            for (int i = 0; i < vocab_size; i++) free(strings[i]);
+            free(strings);
+            free(rules);
+            strings = NULL;
+            rules = NULL;
+        }
     }
     fclose(f);
+    if (!ok) return false;
+
+    /* Commit: base strings 0..255 stay create()d; swap the merged range. */
+    if (tok->rules) free(tok->rules);
+    for (int i = 256; i < tok->vocab_size; i++) { free(tok->id_to_token_str[i]); tok->id_to_token_str[i] = nullptr; }
+    tok->rules = rules;
+    tok->num_rules = num_rules;
+    tok->vocab_size = vocab_size;
+    for (int i = 256; i < vocab_size; i++) tok->id_to_token_str[i] = strings[i];
+    for (int i = 0; i < 256; i++) free(strings[i]); /* base copies read from file */
     return true;
 }
 
@@ -365,7 +432,10 @@ void rcre_bpe_free(RCRE_BPETokenizer *tok) {
     if (tok) {
         if (tok->rules) free(tok->rules);
         if (tok->id_to_token_str) {
-            for (int i = 0; i < tok->vocab_size; i++) {
+            /* Full scan: entries beyond vocab_size are expected to be
+             * nullptr, but freeing non-NULL stragglers keeps failed edge
+             * cases leak-free. */
+            for (int i = 0; i < 2048; i++) {
                 if (tok->id_to_token_str[i]) free(tok->id_to_token_str[i]);
             }
             free(tok->id_to_token_str);

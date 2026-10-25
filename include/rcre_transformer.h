@@ -106,6 +106,7 @@ typedef struct {
     float *ln_f_rstd;
     float *logits;
     float *probs;
+    int num_layers; /* set at creation; used by rcre_gpt_acts_free */
     RCRE_Arena *arena;
     bool owns_heap;
 } RCRE_GPTActs;
@@ -133,6 +134,15 @@ typedef struct {
     float grad_clip;
     int current_step;
 } RCRE_GPTAdamWConfig;
+
+/*
+ * Validates an AdamW config: lr_max > 0, 0 <= lr_min <= lr_max,
+ * 0 <= beta1 < 1 and 0 <= beta2 < 1 (beta == 1 divides by zero in the bias
+ * correction and would NaN every parameter), eps > 0, warmup_steps >= 0,
+ * max_steps > warmup_steps. rcre_gpt_adamw_step() no-ops (with a warning
+ * under RCRE_DEBUG) on invalid configs instead of corrupting the model.
+ */
+bool rcre_gpt_adamw_config_valid(const RCRE_GPTAdamWConfig *cfg);
 
 /* Generation & Sampling Configuration */
 typedef struct {
@@ -172,6 +182,19 @@ typedef struct {
 } RCRE_GPTDataLoader;
 
 /* ========================================================================= */
+/*
+ * Binary serialization formats (all files start with a 4-byte magic and a
+ * uint8 version, followed by size fields):
+ *   char vocab:  "RCC1" | RCRE_CHAR_TOK_FORMAT_VERSION
+ *   BPE:         "RPE1" | RCRE_BPE_FORMAT_VERSION
+ *   checkpoint:  "GPT1" | RCRE_GPT_CKPT_FORMAT_VERSION
+ * Loaders reject unknown magic/version and out-of-range sizes (a corrupt or
+ * truncated file must never cause an out-of-bounds allocation/write).
+ */
+#define RCRE_CHAR_TOK_FORMAT_VERSION 1
+#define RCRE_BPE_FORMAT_VERSION      1
+#define RCRE_GPT_CKPT_FORMAT_VERSION 1
+
 /* Core Neural Network Forward and Backward Kernels                          */
 /* ========================================================================= */
 
@@ -221,8 +244,11 @@ void rcre_gpt_zero_grads(RCRE_GPTModel *model);
 void rcre_gpt_free(RCRE_GPTModel *model);
 
 RCRE_NODISCARD RCRE_GPTActs* rcre_gpt_acts_create(RCRE_GPTConfig config, int B, int T, RCRE_Arena *arena);
-void rcre_gpt_acts_free(RCRE_GPTActs *acts, int num_layers);
+/* num_layers is stored in the struct itself; no need to remember it. */
+void rcre_gpt_acts_free(RCRE_GPTActs *acts);
 
+/* Returns -1.0f when any input/target token is outside [0, vocab_size)
+ * (unambiguous sentinel instead of an out-of-bounds read). */
 float rcre_gpt_forward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inputs, const int *targets, int B, int T);
 void rcre_gpt_backward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inputs, const int *targets, int B, int T);
 
@@ -230,7 +256,9 @@ void rcre_gpt_backward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inpu
 RCRE_NODISCARD RCRE_KVCache* rcre_kv_cache_create(RCRE_GPTConfig config, RCRE_Arena *arena);
 void rcre_kv_cache_reset(RCRE_KVCache *cache);
 void rcre_kv_cache_free(RCRE_KVCache *cache);
-void rcre_gpt_forward_token(RCRE_GPTModel *model, RCRE_KVCache *cache, int token, int pos, float *out_logits);
+/* Returns false on invalid pos/token or allocation failure (out_logits
+ * left unchanged). */
+bool rcre_gpt_forward_token(RCRE_GPTModel *model, RCRE_KVCache *cache, int token, int pos, float *out_logits);
 
 /* ========================================================================= */
 /* Tokenization Subsystems                                                   */
@@ -241,11 +269,15 @@ void rcre_char_tokenizer_init(RCRE_CharTokenizer *tok);
 bool rcre_char_tokenizer_train_from_file(RCRE_CharTokenizer *tok, const char *filepath);
 bool rcre_char_tokenizer_save(const RCRE_CharTokenizer *tok, const char *filepath);
 bool rcre_char_tokenizer_load(RCRE_CharTokenizer *tok, const char *filepath);
-int rcre_char_tokenizer_encode(const RCRE_CharTokenizer *tok, const char *text, size_t len, int *out_tokens);
+/* Writes at most max_tokens ids (truncates longer texts); unknown characters
+ * are skipped. Returns the number of ids written. */
+int rcre_char_tokenizer_encode(const RCRE_CharTokenizer *tok, const char *text, size_t len, int *out_tokens, int max_tokens);
 size_t rcre_char_tokenizer_decode(const RCRE_CharTokenizer *tok, const int *tokens, size_t num_tokens, char *out_text, size_t max_out_len);
 void rcre_char_tokenizer_print_info(const RCRE_CharTokenizer *tok);
 
 /* Byte-Pair Encoding (BPE) Tokenizer */
+/* Heap-owned (malloc); the only transformer object without an arena mode.
+ * id_to_token_str is sized for the 2048-vocab ceiling enforced by train/load. */
 RCRE_NODISCARD RCRE_BPETokenizer* rcre_bpe_create(void);
 bool rcre_bpe_train_from_file(RCRE_BPETokenizer *tok, const char *filepath, int target_vocab_size);
 bool rcre_bpe_save(const RCRE_BPETokenizer *tok, const char *filepath);
@@ -273,8 +305,15 @@ RCRE_NODISCARD float rcre_gpt_get_scheduled_lr(const RCRE_GPTAdamWConfig *cfg, i
 float rcre_gpt_clip_gradients(float *grads, size_t num_params, float max_norm);
 void rcre_gpt_adamw_step(RCRE_GPTModel *model, RCRE_GPTAdamWConfig *cfg);
 
+/* Returns a token in [0, vocab_size), or -1 on allocation failure. */
 int rcre_gpt_sample_token(const float *logits, int vocab_size, float temperature, int top_k, uint64_t *rng_state);
-void rcre_gpt_generate(
+/*
+ * Convenience demo driver: encodes `prompt` with the CHARACTER tokenizer,
+ * prints the generated text to stdout, and returns the number of new tokens
+ * generated (0 on setup failure). For programmatic use (or BPE models),
+ * drive rcre_gpt_forward_token + rcre_gpt_sample_token directly.
+ */
+int rcre_gpt_generate(
     RCRE_GPTModel *model,
     const RCRE_CharTokenizer *tok,
     const char *prompt,

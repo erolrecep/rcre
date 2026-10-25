@@ -28,7 +28,8 @@ jobs:
       - name: Upload Web Artifacts
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "web"
+          # Monorepo layout: the web suite lives in apps/rcre/web
+          path: "apps/rcre/web"
 
       - name: Deploy to GitHub Pages
         id: deployment

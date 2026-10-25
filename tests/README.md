@@ -56,7 +56,8 @@ tests/
 ├── Generative AI & Autoregressive Transformers
 │   ├── test_transformer_nn.c        # Finite-difference gradient checks (Linear, GELU, LayerNorm, Attention, CE)
 │   ├── test_transformer_kv_cache.c   # KV-cache vs full sequence logit equivalence (<= 1e-5), arena residency
-│   └── test_transformer_bpe.c        # Byte-Pair Encoding (BPE) subword tokenizer, compression & exact decode roundtrip
+│   ├── test_transformer_bpe.c        # Byte-Pair Encoding (BPE) subword tokenizer, compression & exact decode roundtrip
+│   └── test_transformer_merge.c      # Merger regression: corrupt-file rejection, validation contracts, full-model FD grads, learning gate
 │
 ├── Merger Hardening & Gap-Pinning
 │   └── test_merger_report.c         # 11 adversarial regression locks & contract-pinning tests from merger review

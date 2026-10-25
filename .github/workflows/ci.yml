@@ -10,6 +10,10 @@ jobs:
   build-and-test:
     name: Build & Sanitize (${{ matrix.os }} - ${{ matrix.compiler }})
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Monorepo layout: the RCRE project lives in apps/rcre
+        working-directory: apps/rcre
     strategy:
       fail-fast: false
       matrix:
