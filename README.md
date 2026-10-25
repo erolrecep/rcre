@@ -28,7 +28,7 @@
 * **Autoregressive Transformer Suite**: Complete NanoGPT-style generative transformer engine featuring multi-head self-attention, GELU, LayerNorm, KV-cache with $\le 10^{-5}$ equivalence, Byte-Pair Encoding (BPE) subword tokenizer, streaming dataloaders, and scheduled AdamW.
 * **Zero-Allocation Deep Learning Suite**: Production loss functions (MSE, BCE, Softmax Cross-Entropy, KL Divergence), optimizers (Decoupled AdamW, Momentum SGD), streaming CSV dataset loaders, and live terminal ANSI/SVG/WebGL visualizers.
 * **Isolated Camera Companion (`rcre_cam.h`)**: Native hardware ingestion using macOS AVFoundation (`CVPixelBuffer` zero-copy), Linux Video4Linux2 (`mmap`), and deterministic synthetic test generators for headless CI.
-* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~407 KB, 11,662 lines).
+* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~420 KB, 11,931 lines).
 * **Interactive Educational Visualizers**: Three.js 3D tensor stride visualizers, cache hierarchy simulators, and live in-browser webcam playgrounds in [`web/`](web/).
 
 ---
@@ -54,7 +54,7 @@
 ```
 apps/rcre/
 ├── dist/
-│   └── rcre.h                  # Amalgamated single-header C23 release (407 KB)
+│   └── rcre.h                  # Amalgamated single-header C23 release (420 KB)
 ├── include/
 │   ├── rcre.h                  # Core public C23 header & CV APIs
 │   ├── rcre_autograd.h         # Autograd, Losses, Optimizers, Ingestion & Vis C23 header
@@ -79,7 +79,7 @@ apps/rcre/
 ├── bindings/
 │   ├── python/                 # Python FFI bindings (ctypes + NumPy interop)
 │   └── rust/                   # Safe Rust FFI bindings crate
-├── tests/                      # 17 Unit tests, sanitizer tests, Python parity suite
+├── tests/                      # 26 Unit test suites, ASan/UBSan targets, 11 OpenCV/Sklearn parity gates
 ├── benchmarks/                 # Micro-benchmarks for HAL kernels and GEMM
 ├── web/                        # Interactive Three.js 3D visualizers and webcam playground
 └── Makefile                    # Unified, self-contained, zero-dependency build system
