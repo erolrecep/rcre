@@ -40,6 +40,12 @@ extern "C" {
   #endif
 #endif
 
+#ifndef constexpr
+  #if !defined(__cpp_constexpr) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L)
+    #define constexpr static const
+  #endif
+#endif
+
 /* ========================================================================= */
 /* Debug Hooks                                                               */
 /* ========================================================================= */

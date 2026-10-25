@@ -45,6 +45,12 @@ extern "C" {
   #endif
 #endif
 
+#ifndef constexpr
+  #if !defined(__cpp_constexpr) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L)
+    #define constexpr static const
+  #endif
+#endif
+
 /* ========================================================================= */
 /* Debug Hooks                                                               */
 /* ========================================================================= */
@@ -10096,8 +10102,8 @@ void rcre_transformer_linear_backward(float *dx, float *dw, float *db, const flo
 /* 2. GELU Non-Linearity                                                     */
 /* ========================================================================= */
 
-constexpr float SQRT_2_OVER_PI = 0.7978845608028654f;
-constexpr float GELU_COEF = 0.044715f;
+static const float SQRT_2_OVER_PI = 0.7978845608028654f;
+static const float GELU_COEF = 0.044715f;
 
 float rcre_transformer_gelu_scalar(float x) {
     float cube = x * x * x;
@@ -10131,7 +10137,7 @@ void rcre_transformer_gelu_backward(float *dx, const float *x, const float *dout
 /* 3. Layer Normalization                                                    */
 /* ========================================================================= */
 
-constexpr float LN_EPS = 1e-5f;
+static const float LN_EPS = 1e-5f;
 
 void rcre_transformer_layernorm_forward(float *out, float *mean, float *rstd, const float *x, const float *weight, const float *bias, int N, int C) {
     for (int n = 0; n < N; n++) {
