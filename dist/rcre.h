@@ -11427,6 +11427,7 @@ bool rcre_bpe_load(RCRE_BPETokenizer *tok, const char *filepath) {
     tok->vocab_size = vocab_size;
     for (int i = 256; i < vocab_size; i++) tok->id_to_token_str[i] = strings[i];
     for (int i = 0; i < 256; i++) free(strings[i]); /* base copies read from file */
+    free(strings);
     return true;
 }
 
