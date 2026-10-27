@@ -15,6 +15,8 @@ void rcre_scalar_gemm_f32(size_t M, size_t N, size_t K, float alpha,
                           float beta, float* C, size_t ldc);
 void rcre_scalar_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
 
+static int rcre_bench_gate_failed = 0;
+
 static double get_time_sec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -46,16 +48,36 @@ static void bench_gemm(void) {
     double gflops_scalar = gflops_per_run / t_scalar;
     printf("   • Scalar Reference:   %7.2f ms | %6.2f GFLOPS\n", t_scalar * 1000.0, gflops_scalar);
 
-    /* 2. Active HAL Backend */
-    t0 = get_time_sec();
-    for (size_t r = 0; r < num_runs; ++r) {
-        rcre_hal.gemm_f32(N, N, N, 1.0f, A, N, B, N, 0.0f, C, N);
+    /* 2. Active HAL Backend — median of 3 outer runs (P3: CI perf gate) */
+    double hal_run_gflops[3];
+    for (int m = 0; m < 3; m++) {
+        double tm0 = get_time_sec();
+        for (size_t r = 0; r < num_runs; r++) {
+            rcre_hal.gemm_f32(N, N, N, 1.0f, A, N, B, N, 0.0f, C, N);
+        }
+        hal_run_gflops[m] = gflops_per_run * num_runs / (get_time_sec() - tm0);
     }
-    double t_simd = (get_time_sec() - t0) / num_runs;
-    double gflops_simd = gflops_per_run / t_simd;
+    /* median of 3 via sort network */
+    double a = hal_run_gflops[0], b = hal_run_gflops[1], c = hal_run_gflops[2];
+    if (a > b) { double t=a; a=b; b=t; }
+    if (b > c) { double t=b; b=c; c=t; }
+    if (a > b) { double t=a; a=b; b=t; }
+    double gflops_simd = b; /* median */
+    double t_simd = gflops_per_run / gflops_simd; /* per-run time (matches t_scalar) */
     double speedup = t_scalar / t_simd;
-    printf("   • Active HAL (%s): %7.2f ms | %6.2f GFLOPS (Speedup: %.2fx)\n", 
+    printf("   \u2022 Active HAL (%s): %7.2f ms | %6.2f GFLOPS (Speedup: %.2fx) [median of 3]\n",
            rcre_hal.backend_name, t_simd * 1000.0, gflops_simd, speedup);
+
+    /* P3 CI gate: absolute floor (env-overridable). */
+    double floor = 50.0;
+    const char* env_floor = getenv("RCRE_GEMM_MIN_GFLOPS");
+    if (env_floor && env_floor[0]) floor = atof(env_floor);
+    if (gflops_simd < floor) {
+        printf("   \u274c GEMM PERF GATE FAILED: %.2f GFLOPS < floor %.2f GFLOPS\n", gflops_simd, floor);
+        rcre_bench_gate_failed = 1;
+    } else {
+        printf("   \u2705 GEMM gate passed (>= %.2f GFLOPS floor)\n", floor);
+    }
 
     free(A);
     free(B);
@@ -114,5 +136,9 @@ int main(void) {
     printf("======================================================================\n");
     printf("🏁 Benchmark Run Completed Successfully!\n");
     printf("======================================================================\n");
+    if (rcre_bench_gate_failed) {
+        fprintf(stderr, "❌ CI perf gate failed\n");
+        return 1;
+    }
     return 0;
 }

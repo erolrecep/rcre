@@ -29,6 +29,7 @@
 * **Zero-Allocation Deep Learning Suite**: Production loss functions (MSE, BCE, Softmax Cross-Entropy, KL Divergence), optimizers (Decoupled AdamW, Momentum SGD), streaming CSV dataset loaders, and live terminal ANSI/SVG/WebGL visualizers.
 * **Isolated Camera Companion (`rcre_cam.h`)**: Native hardware ingestion using macOS AVFoundation (`CVPixelBuffer` zero-copy), Linux Video4Linux2 (`mmap`), and deterministic synthetic test generators for headless CI.
 * **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~420 KB, 11,931 lines).
+* **Native Hardware Profiling & Telemetry (`rcre_prof`)**: Microsecond-accurate cycle tracing (< 7 ns overhead per scope) on ARM64 (`cntvct_el0`) and x86 (`rdtsc`), tracking dual-layer RAM (Arena watermarks vs OS RSS), CPU time, engine storage I/O, and zero-dependency Chrome Tracing/Perfetto JSON and standalone HTML exports. See [**rcre_profiling.md**](rcre_profiling.md).
 * **Interactive Educational Visualizers**: Three.js 3D tensor stride visualizers, cache hierarchy simulators, and live in-browser webcam playgrounds in [`web/`](web/).
 
 ---
@@ -39,6 +40,7 @@
 
 | Workload / Kernel | Hardware Path | Throughput | Latency | Memory Allocation |
 | :--- | :--- | :--- | :--- | :--- |
+| **Profiler Scope Overhead** | ARM64 `mrs cntvct_el0` | **~232M scopes / sec** | **4.30 ns** / scope | Zero in hot path (Ring buffer) |
 | **Cache-Tiled GEMM** (37 × 43 × 29) | ARM NEON 128-bit | **72.96 GFLOPS** | — | Linear Arena (0 in loop) |
 | **RGB → Grayscale (Rec.601)** | ARM NEON 15-bit | **7,922 MP/s** | **~0.26 ms** @ 1080p | Linear Arena (0 in loop) |
 | **Bilinear Continuous Resize** (640 × 480 → 1280 × 960) | Subpixel continuous | **812 MP/s** | **~1.51 ms** | Linear Arena (0 in loop) |
@@ -57,12 +59,13 @@ apps/rcre/
 │   └── rcre.h                  # Amalgamated single-header C23 release (420 KB)
 ├── include/
 │   ├── rcre.h                  # Core public C23 header & CV APIs
+│   ├── rcre_prof.h             # High-frequency hardware profiler & telemetry header
 │   ├── rcre_autograd.h         # Autograd, Losses, Optimizers, Ingestion & Vis C23 header
 │   ├── rcre_transformer.h      # NanoGPT, Attention, KV-Cache & Tokenizers C23 header
 │   └── extras/
 │       └── rcre_cam.h          # Hardware camera companion header
 ├── src/
-│   ├── core/                   # Arena allocator, temp checkpoints, strided tensor, threadpool
+│   ├── core/                   # Arena allocator, profiler engine (prof.c), tensor, threadpool
 │   ├── cv/                     # Color, Resizing, Filters, FFT, Features, Homography, Optical Flow, CNN
 │   ├── ml/                     # OLS regression, Logistic, Linear SVM, KMeans, PCA, GBDT, HNSW
 │   ├── autograd/               # Scalar reverse-mode DAG autograd & Tensor tape VJP autograd
@@ -79,8 +82,10 @@ apps/rcre/
 ├── bindings/
 │   ├── python/                 # Python FFI bindings (ctypes + NumPy interop)
 │   └── rust/                   # Safe Rust FFI bindings crate
-├── tests/                      # 26 Unit test suites, ASan/UBSan targets, 11 OpenCV/Sklearn parity gates
-├── benchmarks/                 # Micro-benchmarks for HAL kernels and GEMM
+├── tests/                      # 27 Unit test suites (including test_profiler), ASan/UBSan targets
+├── benchmarks/                 # Micro-benchmarks for HAL kernels, GEMM, and bench_prof
+├── prof/                       # Profiling trace artifacts (Perfetto JSON & HTML reports)
+├── rcre_profiling.md           # Standalone guide for hardware profiling and Perfetto usage
 ├── web/                        # Interactive Three.js 3D visualizers and webcam playground
 └── Makefile                    # Unified, self-contained, zero-dependency build system
 ```
@@ -178,7 +183,34 @@ make test-all
 
 # 📊 Run the hardware acceleration GEMM benchmark
 make bench
+
+# 🔬 Run the hardware telemetry profiler (CPU, RAM RSS, Arena HWM, Storage, Perfetto trace)
+make profile
+
+# 🔒 Verify standalone portability of single-header dist/rcre.h in a clean sandbox
+make test-portable
 ```
+
+---
+
+## 🔬 Native Hardware Profiling & Telemetry (`rcre_prof`)
+
+RCRE includes a zero-dependency, sub-7ns C23 profiling engine built directly into the kernel:
+* **Hardware Cycle Counter**: Sub-nanosecond reads via ARM64 `mrs cntvct_el0` (Apple Silicon) and x86 `rdtsc`.
+* **Dual-Layer Memory Telemetry**: Captures exact byte watermarks inside `RCRE_Arena` across rewind cycles without kernel syscalls, alongside OS-level physical RSS.
+* **Storage I/O & CPU Accounting**: Tracks exact checkpoint byte rates and user+sys CPU time.
+* **Zero-Dependency Exporters**: Produces ANSI terminal summaries with colored bar charts, Chrome Tracing / Perfetto JSON timelines (`prof/rcre_profile.json`), and standalone HTML dashboards (`prof/rcre_profile.html`).
+
+```bash
+# Run the complete profiling workload
+make profile
+
+# View the generated HTML dashboard
+open prof/rcre_profile.html  # On macOS (or xdg-open on Linux)
+
+# Drag prof/rcre_profile.json into https://ui.perfetto.dev for interactive timeline exploration!
+```
+📖 For detailed architectural derivations and C23 API integration instructions, see [**rcre_profiling.md**](rcre_profiling.md).
 
 ---
 

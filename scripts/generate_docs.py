@@ -76,6 +76,12 @@ def parse_header(header_path):
             category = "Vector Search (HNSW)"
         elif name.startswith("rcre_camera"):
             category = "Camera Hardware"
+        elif name.startswith("rcre_prof"):
+            category = "Profiling & Telemetry"
+        elif name.startswith("rcre_ag") or name.startswith("rcre_scalar") or name.startswith("rcre_loss") or name.startswith("rcre_optim"):
+            category = "Autograd & Optimization"
+        elif name.startswith("rcre_gpt") or name.startswith("rcre_kv") or name.startswith("rcre_bpe") or name.startswith("rcre_char") or name.startswith("rcre_transformer"):
+            category = "Generative Transformers"
         elif name.startswith("rcre_hal") or name.startswith("rcre_cpu"):
             category = "Hardware Acceleration"
 
@@ -94,13 +100,15 @@ def parse_header(header_path):
 def main():
     root = Path(__file__).resolve().parent.parent
     rcre_h = root / "include" / "rcre.h"
+    rcre_prof_h = root / "include" / "rcre_prof.h"
+    rcre_autograd_h = root / "include" / "rcre_autograd.h"
+    rcre_transformer_h = root / "include" / "rcre_transformer.h"
     rcre_cam_h = root / "include" / "extras" / "rcre_cam.h"
 
     all_funcs = []
-    if rcre_h.exists():
-        all_funcs.extend(parse_header(rcre_h))
-    if rcre_cam_h.exists():
-        all_funcs.extend(parse_header(rcre_cam_h))
+    for h in [rcre_h, rcre_prof_h, rcre_autograd_h, rcre_transformer_h, rcre_cam_h]:
+        if h.exists():
+            all_funcs.extend(parse_header(h))
 
     out_file = root / "web" / "docs" / "api_data.json"
     out_file.parent.mkdir(parents=True, exist_ok=True)

@@ -4,10 +4,50 @@
  */
 
 #include "transformer_internal.h"
+#ifdef RCRE_ENABLE_PROFILING
+#include "rcre_prof.h"
+#endif
+
+/* --------------------------------------------------------------------- */
+/* Sampling scratch (P1 fix): steady-state zero-heap sampling.            */
+/* Buffers grow via realloc only when vocab_size increases; once sized,   */
+/* the per-token hot path performs no heap allocations at all.            */
+/* --------------------------------------------------------------------- */
+static float*   s_sample_scratch1 = NULL; /* scaled logits   */
+static size_t   s_sample_cap1 = 0;
+static float*   s_sample_scratch2 = NULL; /* softmax probs   */
+static size_t   s_sample_cap2 = 0;
+static uint8_t* s_sample_used = NULL;     /* top-k mask      */
+static size_t   s_sample_used_cap = 0;
+
+static float* sample_ensure_float(float** buf, size_t* cap, size_t need) {
+    if (*cap < need) {
+        size_t ncap = *cap ? *cap : 1024;
+        while (ncap < need) ncap <<= 1;
+        float* nb = (float*)realloc(*buf, ncap * sizeof(float));
+        if (!nb) return NULL;
+        *buf = nb;
+        *cap = ncap;
+    }
+    return *buf;
+}
+
+static uint8_t* sample_ensure_used(size_t need) {
+    if (s_sample_used_cap < need) {
+        size_t ncap = s_sample_used_cap ? s_sample_used_cap : 1024;
+        while (ncap < need) ncap <<= 1;
+        uint8_t* nb = (uint8_t*)realloc(s_sample_used, ncap);
+        if (!nb) return NULL;
+        s_sample_used = nb;
+        s_sample_used_cap = ncap;
+    }
+    return s_sample_used;
+}
 
 int rcre_gpt_sample_token(const float *logits, int vocab_size, float temperature, int top_k, uint64_t *rng_state) {
     if (vocab_size <= 0) return -1;
-    float *scaled = (float*)malloc(sizeof(float) * vocab_size);
+
+    float* scaled = sample_ensure_float(&s_sample_scratch1, &s_sample_cap1, (size_t)vocab_size);
     if (!scaled) return -1;
 
     float temp = (temperature > 0.0f) ? temperature : 1.0f;
@@ -15,36 +55,37 @@ int rcre_gpt_sample_token(const float *logits, int vocab_size, float temperature
         scaled[v] = logits[v] / temp;
     }
 
-    /* Top-K filtering */
+    /* Top-K filtering: k-pass max selection (no full copy, no sort buffer). */
     if (top_k > 0 && top_k < vocab_size) {
-        float *sorted = (float*)malloc(sizeof(float) * vocab_size);
-        if (sorted) {
-            memcpy(sorted, scaled, sizeof(float) * vocab_size);
-            for (int i = 0; i < top_k; i++) {
-                for (int j = i + 1; j < vocab_size; j++) {
-                    if (sorted[j] > sorted[i]) {
-                        float tmp = sorted[i];
-                        sorted[i] = sorted[j];
-                        sorted[j] = tmp;
+        uint8_t* used = sample_ensure_used((size_t)vocab_size);
+        if (used) {
+            memset(used, 0, (size_t)vocab_size);
+            int k = top_k;
+            float threshold = -1e30f;
+            for (int i = 0; i < k; i++) {
+                float best = -1e30f;
+                int bi = -1;
+                for (int v = 0; v < vocab_size; v++) {
+                    if (!used[v] && scaled[v] > best) {
+                        best = scaled[v];
+                        bi = v;
                     }
                 }
+                if (bi < 0) break;
+                used[bi] = 1;
+                threshold = best; /* after k passes: the k-th largest value */
             }
-            float threshold = sorted[top_k - 1];
             for (int v = 0; v < vocab_size; v++) {
                 if (scaled[v] < threshold) {
                     scaled[v] = -1e9f;
                 }
             }
-            free(sorted);
         }
     }
 
     /* Softmax */
-    float *probs = (float*)malloc(sizeof(float) * vocab_size);
-    if (!probs) {
-        free(scaled);
-        return -1;
-    }
+    float* probs = sample_ensure_float(&s_sample_scratch2, &s_sample_cap2, (size_t)vocab_size);
+    if (!probs) return -1;
     rcre_transformer_softmax_forward(probs, scaled, 1, vocab_size);
 
     /* Cumulative sampling */
@@ -66,8 +107,6 @@ int rcre_gpt_sample_token(const float *logits, int vocab_size, float temperature
         }
     }
 
-    free(scaled);
-    free(probs);
     return selected;
 }
 
@@ -147,23 +186,65 @@ int rcre_gpt_generate(
 
 bool rcre_gpt_save_checkpoint(const RCRE_GPTModel *model, const char *filepath) {
     if (!model) return false;
+#ifdef RCRE_ENABLE_PROFILING
+    RCRE_ProfScope prof_z = rcre_prof_scope_begin(rcre_prof_global(), "gpt_save_checkpoint");
+#endif
     FILE *f = fopen(filepath, "wb");
-    if (!f) return false;
+    if (!f) {
+#ifdef RCRE_ENABLE_PROFILING
+        rcre_prof_scope_end(&prof_z);
+#endif
+        return false;
+    }
     const uint32_t magic = 0x31505447u; /* "GPT1" */
     const uint8_t version = RCRE_GPT_CKPT_FORMAT_VERSION;
-    if (fwrite(&magic, sizeof(magic), 1, f) != 1) { fclose(f); return false; }
-    if (fwrite(&version, sizeof(version), 1, f) != 1) { fclose(f); return false; }
-    if (fwrite(&model->config, sizeof(RCRE_GPTConfig), 1, f) != 1) { fclose(f); return false; }
-    if (fwrite(&model->num_params, sizeof(size_t), 1, f) != 1) { fclose(f); return false; }
-    if (fwrite(model->params, sizeof(float), model->num_params, f) != model->num_params) { fclose(f); return false; }
+    if (fwrite(&magic, sizeof(magic), 1, f) != 1) { fclose(f);
+#ifdef RCRE_ENABLE_PROFILING
+    rcre_prof_scope_end(&prof_z);
+#endif
+    return false; }
+    if (fwrite(&version, sizeof(version), 1, f) != 1) { fclose(f);
+#ifdef RCRE_ENABLE_PROFILING
+    rcre_prof_scope_end(&prof_z);
+#endif
+    return false; }
+    if (fwrite(&model->config, sizeof(RCRE_GPTConfig), 1, f) != 1) { fclose(f);
+#ifdef RCRE_ENABLE_PROFILING
+    rcre_prof_scope_end(&prof_z);
+#endif
+    return false; }
+    if (fwrite(&model->num_params, sizeof(size_t), 1, f) != 1) { fclose(f);
+#ifdef RCRE_ENABLE_PROFILING
+    rcre_prof_scope_end(&prof_z);
+#endif
+    return false; }
+    if (fwrite(model->params, sizeof(float), model->num_params, f) != model->num_params) { fclose(f);
+#ifdef RCRE_ENABLE_PROFILING
+    rcre_prof_scope_end(&prof_z);
+#endif
+    return false; }
     fclose(f);
+#ifdef RCRE_ENABLE_PROFILING
+    rcre_prof_io_record(rcre_prof_global(), true,
+                        (sizeof(magic) + sizeof(version) + sizeof(RCRE_GPTConfig) + sizeof(size_t)) +
+                        (size_t)model->num_params * sizeof(float));
+    rcre_prof_scope_end(&prof_z);
+#endif
     return true;
 }
 
 bool rcre_gpt_load_checkpoint(RCRE_GPTModel *model, const char *filepath) {
     if (!model) return false;
+#ifdef RCRE_ENABLE_PROFILING
+    RCRE_ProfScope prof_z = rcre_prof_scope_begin(rcre_prof_global(), "gpt_load_checkpoint");
+#endif
     FILE *f = fopen(filepath, "rb");
-    if (!f) return false;
+    if (!f) {
+#ifdef RCRE_ENABLE_PROFILING
+        rcre_prof_scope_end(&prof_z);
+#endif
+        return false;
+    }
     uint32_t magic = 0;
     uint8_t version = 0;
     RCRE_GPTConfig cfg;
@@ -185,5 +266,11 @@ bool rcre_gpt_load_checkpoint(RCRE_GPTModel *model, const char *filepath) {
     if (ok) ok = (fread(&count, sizeof(size_t), 1, f) == 1) && (count == model->num_params);
     if (ok) ok = (fread(model->params, sizeof(float), count, f) == count);
     fclose(f);
+#ifdef RCRE_ENABLE_PROFILING
+    if (ok) rcre_prof_io_record(rcre_prof_global(), false,
+                                (sizeof(uint32_t) + sizeof(uint8_t) + sizeof(RCRE_GPTConfig) + sizeof(size_t)) +
+                                (size_t)model->num_params * sizeof(float));
+    rcre_prof_scope_end(&prof_z);
+#endif
     return ok;
 }

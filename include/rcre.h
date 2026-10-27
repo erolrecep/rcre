@@ -98,6 +98,10 @@ typedef struct RCRE_Arena {
     uint8_t* buffer;
     size_t   capacity;
     size_t   offset;
+    /* --- profiling telemetry (appended at end; zero-initialized) --- */
+    size_t   high_watermark; /* peak offset reached since creation */
+    size_t   alloc_count;    /* sub-allocations served */
+    size_t   rewind_count;   /* scoped rewinds (temp_end/reset) executed */
 } RCRE_Arena;
 
 typedef struct {

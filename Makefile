@@ -36,6 +36,7 @@ SRCS = src/core/arena.c \
        src/core/tensor.c \
        src/core/adapt.c \
        src/core/threadpool.c \
+       src/core/prof.c \
        src/cv/color.c \
        src/cv/geom.c \
        src/cv/filter.c \
@@ -74,7 +75,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -83,7 +84,7 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help all clean test test-sanitizers test-parity test-all bench examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo
+.PHONY: default help all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo
 
 default: help
 
@@ -216,6 +217,28 @@ bench: bin/bench_hal
 	@bin/bench_hal
 
 # =============================================================================
+# Profiling & Telemetry (rcre_prof) — CI threshold gate + trace export
+# =============================================================================
+PROF_DIR := prof
+profile:
+	@mkdir -p $(PROF_DIR) bin
+	@echo "🔬 Building profiling workload with engine instrumentation (-DRCRE_ENABLE_PROFILING)..."
+	$(CC) $(CFLAGS) -DRCRE_ENABLE_PROFILING $(SRCS) benchmarks/bench_prof.c $(CAM_LDFLAGS) -lm -lpthread -o bin/bench_prof
+	@echo "🔬 Running RCRE profiling workload..."
+	@bin/bench_prof $(PROF_DIR)/rcre_profile.json $(PROF_DIR)/rcre_profile.html
+
+# P4: verify the amalgamated header compiles STANDALONE (no src/ tree).
+# Catches relative includes that leak into dist/rcre.h (e.g. ../core/rcre_rng.h).
+test-portable: $(AMALGAMATED_HEADER)
+	@echo "🔒 Verifying dist/rcre.h compiles in a clean directory (no src/ tree)..."
+	@tmpdir=$$(mktemp -d); \
+	 cp $(AMALGAMATED_HEADER) $$tmpdir/rcre.h; \
+	 printf '#define RCRE_IMPLEMENTATION\n#include "rcre.h"\nint main(void){RCRE_ProfContext*p=rcre_prof_init(64);rcre_hal_init();RCRE_Arena*a=rcre_arena_create(4096);RCRE_PROFILE_SCOPE(p,"boot",z);void*buf=rcre_arena_alloc(a,16,64);if(!buf)return 1;RCRE_PROFILE_END(z);rcre_prof_sample_arena(p,a);rcre_prof_free(p);rcre_arena_destroy(a);return 0;}\n' > $$tmpdir/probe.c; \
+	 $(CC) $(CFLAGS) -I$$tmpdir $$tmpdir/probe.c -lm -lpthread -o $$tmpdir/probe && \
+	 $$tmpdir/probe && echo "✅ dist/rcre.h is portable (compiles + runs standalone)"; \
+	 rc=$$?; rm -rf $$tmpdir; exit $$rc
+
+# =============================================================================
 # Verification & Testing Suites
 # =============================================================================
 
@@ -247,6 +270,7 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@bin/test_cv_features
 	@bin/test_cv_homography
 	@bin/test_cv_optical_flow
+	@bin/test_profiler
 	@echo "🎉 All RCRE Unit Tests Passed!"
 
 test-sanitizers: $(AMALGAMATED_HEADER)
@@ -308,6 +332,8 @@ endif
 	@bin/test_cv_homography_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cv_optical_flow.c -lm -lpthread -o bin/test_cv_optical_flow_asan
 	@bin/test_cv_optical_flow_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_profiler.c -lm -lpthread -o bin/test_profiler_asan
+	@bin/test_profiler_asan
 	@echo "🎉 Zero Memory Leaks & Zero Undefined Behavior Detected!"
 
 test-parity: $(DYLIB)
@@ -371,10 +397,12 @@ help:
 	@echo "  make sync_blog          Sync web suite & docs to erolrecep.github.io via Hugo"
 	@echo "  make examples           Compile all standalone examples into bin/"
 	@echo "  make bench              Run hardware acceleration GEMM benchmark"
+	@echo "  make profile            Run telemetry profiler workload (CPU, RAM, storage, Perfetto trace)"
 	@echo "  make clean              Remove all build artifacts and libraries"
 	@echo ""
 	@echo "Verification & Quality Gates:"
-	@echo "  make test               Run full 12-test unit test suite"
+	@echo "  make test               Run full 27-test unit test suite"
+	@echo "  make test-portable      Verify amalgamated dist/rcre.h standalone portability"
 	@echo "  make test-sanitizers    Run AddressSanitizer & UndefinedBehaviorSanitizer"
 	@echo "  make test-parity        Run Python OpenCV/Scikit-Learn parity tests"
 	@echo "  make test-all           Run all test suites & verification gates"

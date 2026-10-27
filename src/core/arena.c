@@ -47,6 +47,9 @@ RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity) {
     arena->buffer = (uint8_t*)buffer;
     arena->capacity = capacity;
     arena->offset = 0;
+    arena->high_watermark = 0;
+    arena->alloc_count = 0;
+    arena->rewind_count = 0;
 
     return arena;
 }
@@ -74,12 +77,17 @@ RCRE_NODISCARD void* rcre_arena_alloc(RCRE_Arena* arena, size_t size, size_t ali
     }
 
     arena->offset += padding + size;
+    if (arena->offset > arena->high_watermark) {
+        arena->high_watermark = arena->offset;
+    }
+    arena->alloc_count++;
     return (void*)aligned_ptr;
 }
 
 void rcre_arena_reset(RCRE_Arena* arena) {
     if (arena) {
         arena->offset = 0;
+        arena->rewind_count++;
     }
 }
 
@@ -108,6 +116,7 @@ RCRE_NODISCARD RCRE_ArenaTemp rcre_arena_temp_begin(RCRE_Arena* arena) {
 void rcre_arena_temp_end(RCRE_ArenaTemp temp) {
     if (temp.arena && temp.saved_offset <= temp.arena->capacity) {
         temp.arena->offset = temp.saved_offset;
+        temp.arena->rewind_count++;
     }
 }
 

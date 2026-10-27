@@ -4,6 +4,9 @@
  */
 
 #include "transformer_internal.h"
+#ifdef RCRE_ENABLE_PROFILING
+#include "rcre_prof.h"
+#endif
 
 RCRE_KVCache* rcre_kv_cache_create(RCRE_GPTConfig config, RCRE_Arena *arena) {
     /* The cache layout must match what the attention kernels index with
@@ -63,6 +66,9 @@ bool rcre_gpt_forward_token(
     float *out_logits
 ) {
     if (!model || !cache || !out_logits) return false;
+#ifdef RCRE_ENABLE_PROFILING
+    RCRE_ProfScope prof_z = rcre_prof_scope_begin(rcre_prof_global(), "gpt_forward_token");
+#endif
     const RCRE_GPTConfig *cfg = &model->config;
     int C = cfg->embed_dim;
     int H = cfg->num_heads;
@@ -73,7 +79,12 @@ bool rcre_gpt_forward_token(
     int d_k = cfg->head_dim;
     float scale = 1.0f / sqrtf((float)d_k);
 
-    if (pos < 0 || pos >= max_T || token < 0 || token >= V) return false;
+    if (pos < 0 || pos >= max_T || token < 0 || token >= V) {
+#ifdef RCRE_ENABLE_PROFILING
+        rcre_prof_scope_end(&prof_z);
+#endif
+        return false;
+    }
 
     /*
      * Local buffers via the scratch pool: arena-resident models bump the
@@ -95,6 +106,9 @@ bool rcre_gpt_forward_token(
     if (!x || !x_norm || !q || !k || !v || !att_out || !proj_out ||
         !fc1_out || !gelu_out || !fc2_out || !scores) {
         gpt_scratch_end(&scratch);
+#ifdef RCRE_ENABLE_PROFILING
+        rcre_prof_scope_end(&prof_z);
+#endif
         return false;
     }
     float mean = 0.0f, rstd = 0.0f;
@@ -184,5 +198,8 @@ bool rcre_gpt_forward_token(
 
     gpt_scratch_end(&scratch);
     cache->current_pos = pos + 1;
+#ifdef RCRE_ENABLE_PROFILING
+    rcre_prof_scope_end(&prof_z);
+#endif
     return true;
 }
