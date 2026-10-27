@@ -14,6 +14,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-facex`** | [`facial_expression_analysis/`](facial_expression_analysis/) | Real-time face detection, 13-point landmarks, FACS Action Units & emotion classification | Skin SAT Integral Image, Valley Tracking, FACS Biomechanics, Softmax |
 | **`rcre-mobilenet`** | [`cifar100_mobilenet/`](cifar100_mobilenet/) | Sub-4ms MobileNet CNN training and zero-heap inference on CIFAR-100 | Depthwise Separable Conv, Edge BN Folding, SIMD axpy, Softmax |
 | **`rcre-pca`** | [`pca_compression/`](pca_compression/) | Zero-dependency spatial PCA image compression & 8-bit quantization codec | Power Iteration, Deflation, 8-bit Uniform Quant, Web Playground Studio |
+| **`rcre-perf`** | [`c_performance/`](c_performance/) | Systems microarchitecture, cache hierarchy, strided view & SIMD benchmark suite | Memory Arenas, ShapeTracker Views, HAL SIMD Dispatch, Perfetto Telemetry |
 
 ---
 
@@ -111,5 +112,31 @@ make -C projects/pca_compression all
 ```
 
 For complete CLI documentation, mathematical formulas, and benchmark tables, see [`projects/pca_compression/README.md`](pca_compression/README.md).
+
+---
+
+## 5. `rcre-perf` (Hardware Architecture & Systems Performance Suite)
+
+A turnkey, zero-dependency systems benchmarking suite exploring how CPU microarchitectures, cache hierarchies, tensor strides, and SIMD vector execution directly dictate real-world latency.
+
+### Key Capabilities
+* **Cache Locality & Streaming**: Quantifies spatial prefetching on Apple Silicon (128-byte cache lines) and x86 (64-byte), demonstrating **6.5x speedups** for row-major vs column-major thrashing.
+* **ShapeTracker Strided Views**: Evaluates $\mathcal{O}(1)$ zero-copy transposition view creation (0 ns, 0 bytes memory allocated) vs contiguous memory repacking.
+* **SIMD Hardware Acceleration**: Evaluates dynamic HAL micro-kernels (NEON / AVX2 axpy, dot, gemm) delivering **25.6x speedups** and **66+ GFLOPS**.
+* **Integrated Profiling Telemetry**: Emits full hardware cycle counts, memory RSS delta, and Chrome Tracing JSON traces for [Perfetto UI](https://ui.perfetto.dev).
+
+### Quick Start
+```bash
+# Run the live demonstration from the RCRE root:
+make project_perf_demo
+
+# Run the test suite:
+make project_perf_test
+
+# Run full benchmark with Perfetto trace and interactive HTML export:
+make project_perf_bench
+```
+
+For complete CLI documentation, architectural deep-dive, and hardware tables, see [`projects/c_performance/README.md`](c_performance/README.md).
 
 

@@ -1,4 +1,4 @@
-# RCRE — Recep's Code Run Everywhere
+<h1 align="center">RCRE — Recep's Code Run Everywhere</h1>
 
 <p align="center">
   <strong>A single-header, zero-dependency C23 engine unifying modern Computer Vision and Classical Machine Learning across Edge, HPC, and WebAssembly.</strong>
@@ -28,7 +28,7 @@
 * **Autoregressive Transformer Suite**: Complete NanoGPT-style generative transformer engine featuring multi-head self-attention, GELU, LayerNorm, KV-cache with $\le 10^{-5}$ equivalence, Byte-Pair Encoding (BPE) subword tokenizer, streaming dataloaders, and scheduled AdamW.
 * **Zero-Allocation Deep Learning Suite**: Production loss functions (MSE, BCE, Softmax Cross-Entropy, KL Divergence), optimizers (Decoupled AdamW, Momentum SGD), streaming CSV dataset loaders, and live terminal ANSI/SVG/WebGL visualizers.
 * **Isolated Camera Companion (`rcre_cam.h`)**: Native hardware ingestion using macOS AVFoundation (`CVPixelBuffer` zero-copy), Linux Video4Linux2 (`mmap`), and deterministic synthetic test generators for headless CI.
-* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~420 KB, 11,931 lines).
+* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~456 KB, 12,805 lines).
 * **Native Hardware Profiling & Telemetry (`rcre_prof`)**: Microsecond-accurate cycle tracing (< 7 ns overhead per scope) on ARM64 (`cntvct_el0`) and x86 (`rdtsc`), tracking dual-layer RAM (Arena watermarks vs OS RSS), CPU time, engine storage I/O, and zero-dependency Chrome Tracing/Perfetto JSON and standalone HTML exports. See [**rcre_profiling.md**](rcre_profiling.md).
 * **Interactive Educational Visualizers**: Three.js 3D tensor stride visualizers, cache hierarchy simulators, and live in-browser webcam playgrounds in [`web/`](web/).
 
@@ -48,6 +48,25 @@
 | **Tabular GBDT Prediction** (100 Trees) | Flat-Array Nodes | **7.86M preds / sec** | **127 ns** / pred | Linear Arena (0 in loop) |
 | **HNSW Vector Search** (64-D, M=16) | SIMD Euclidean L2 | **44,434 QPS** | **22.5 µs** / query | Linear Arena (0 in loop) |
 | **Live Camera Edge Filter** (640 × 480) | Camera → Gray → Blur → Sobel | **239.39 FPS** | **4.18 ms** / frame | Single scratchpad rewind |
+| **Cache-Tiled GEMM (512 × 512)** | ARM NEON 128-bit | **71.56 GFLOPS** | **3.75 ms** | Linear Arena (25.0x speedup vs scalar) |
+| **Cache Streaming vs Thrashing** (4096 × 4096) | Sequential Row-Major | **7.33 GB/s** | **8.96 ms** | 6.5x faster than column-major |
+| **ShapeTracker Zero-Copy Transpose** | O(1) Stride Swap | **Instantaneous** | **0 ns** | 0 bytes memory allocated |
+
+---
+
+## 🛠️ Turnkey Production Projects (`projects/`)
+
+In addition to modular core kernels and unit benchmarks, RCRE includes five self-contained, turnkey production applications built 100% on RCRE and ISO C23:
+
+| Project | Directory | Purpose | Core RCRE Technologies | Live Launch |
+| :--- | :--- | :--- | :--- | :--- |
+| **`rcre-lens`** | [`projects/reverse_image_search/`](projects/reverse_image_search/) | High-speed reverse image search engine & visual database indexing | Spatial Pyramid Descriptors, Sobel Contours, HNSW Graph Index | `make project_lens_demo` |
+| **`rcre-facex`** | [`projects/facial_expression_analysis/`](projects/facial_expression_analysis/) | Real-time face detection, 13-point landmarks, FACS Action Units & emotion classifier | Skin SAT Integral Image, Valley Tracking, FACS Biomechanics, Softmax | `make project_facex_demo` |
+| **`rcre-mobilenet`** | [`projects/cifar100_mobilenet/`](projects/cifar100_mobilenet/) | Sub-4ms MobileNet CNN training and zero-heap inference on CIFAR-100 | Depthwise Separable Conv, Edge BN Folding, SIMD axpy, Softmax | `make project_mobilenet_demo` |
+| **`rcre-pca`** | [`projects/pca_compression/`](projects/pca_compression/) | Zero-dependency spatial PCA image compression & 8-bit quantization codec | Power Iteration, Deflation, 8-bit Uniform Quant, Web Studio | `make -C projects/pca_compression demo` |
+| **`rcre-perf`** | [`projects/c_performance/`](projects/c_performance/) | Systems microarchitecture, cache hierarchy, strided view & SIMD benchmark suite | Memory Arenas, ShapeTracker Views, HAL SIMD Dispatch, Perfetto Telemetry | `make project_perf_demo` |
+
+📖 *For complete CLI documentation and architectural guides, see [`projects/README.md`](projects/README.md).*
 
 ---
 
@@ -56,7 +75,7 @@
 ```
 apps/rcre/
 ├── dist/
-│   └── rcre.h                  # Amalgamated single-header C23 release (420 KB)
+│   └── rcre.h                  # Amalgamated single-header C23 release (456 KB, 12,805 lines)
 ├── include/
 │   ├── rcre.h                  # Core public C23 header & CV APIs
 │   ├── rcre_prof.h             # High-frequency hardware profiler & telemetry header
@@ -64,6 +83,13 @@ apps/rcre/
 │   ├── rcre_transformer.h      # NanoGPT, Attention, KV-Cache & Tokenizers C23 header
 │   └── extras/
 │       └── rcre_cam.h          # Hardware camera companion header
+├── projects/                   # Turnkey production applications built on RCRE
+│   ├── reverse_image_search/   # rcre-lens: Spatial pyramid + HNSW visual search engine
+│   ├── facial_expression_analysis/ # rcre-facex: Real-time FACS landmarks & emotion classifier
+│   ├── cifar100_mobilenet/     # rcre-mobilenet: Sub-4ms MobileNet inference on CIFAR-100
+│   ├── pca_compression/       # rcre-pca: Spatial PCA image compression & 8-bit codec
+│   ├── c_performance/         # rcre-perf: Hardware microarchitecture & SIMD benchmark suite
+│   └── README.md               # Production Projects Hub guide
 ├── src/
 │   ├── core/                   # Arena allocator, profiler engine (prof.c), tensor, threadpool
 │   ├── cv/                     # Color, Resizing, Filters, FFT, Features, Homography, Optical Flow, CNN
@@ -166,10 +192,18 @@ make gbdt_test
 # 🔍 Run HNSW vector similarity search benchmark (64-D embeddings)
 make hnsw_test
 
+# 🛠️ Run Production Projects Demos
+make project_lens_demo       # Reverse Image Search (rcre-lens)
+make project_facex_demo      # Facial Expression & Landmarks (rcre-facex)
+make project_mobilenet_demo  # CIFAR-100 MobileNet Inference (rcre-mobilenet)
+make project_perf_demo       # Systems Performance & Cache Benchmarks (rcre-perf)
+make project_perf_test       # Systems Performance Verification Suite
+make project_perf_bench      # Full Benchmark with Perfetto & HTML Export
+
 # 🚀 Build librcre.a, librcre.dylib, dist/rcre.h, and all example binaries
 make all
 
-# 🧪 Run full 12-test unit test suite
+# 🧪 Run full 27-test unit test suite
 make test
 
 # 🛡️ Run AddressSanitizer & UndefinedBehaviorSanitizer memory safety checks

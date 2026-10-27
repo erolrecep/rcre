@@ -84,7 +84,7 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo
+.PHONY: default help all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench
 
 default: help
 
@@ -208,6 +208,15 @@ project_mobilenet_test: $(LIB)
 
 project_mobilenet_demo: $(LIB)
 	@$(MAKE) -C projects/cifar100_mobilenet demo
+
+project_perf_test: $(LIB)
+	@$(MAKE) -C projects/c_performance test
+
+project_perf_demo: $(LIB)
+	@$(MAKE) -C projects/c_performance demo
+
+project_perf_bench: $(LIB)
+	@$(MAKE) -C projects/c_performance bench
 
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
@@ -389,6 +398,8 @@ help:
 	@echo "  make project_lens_demo     Run Reverse Image Search (rcre-lens) live demo"
 	@echo "  make project_facex_test    Run Facial Expression (rcre-facex) verification suite"
 	@echo "  make project_facex_demo    Run Facial Expression (rcre-facex) archetype demo"
+	@echo "  make project_perf_test     Run Hardware Benchmark (rcre-perf) verification suite"
+	@echo "  make project_perf_demo     Run Hardware Benchmark (rcre-perf) live demo"
 	@echo ""
 	@echo "Build & Documentation Targets:"
 	@echo "  make all                Build static/shared libraries, dist header & examples"
