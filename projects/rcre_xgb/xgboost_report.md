@@ -1,6 +1,6 @@
 # RCRE-XGB — XGBoost-style Gradient Boosted Trees on RCRE
 
-**Location:** `~/Developer/codebase/apps/rcre-xgb`
+**Location:** `~/Developer/codebase/apps/rcre/projects/rcre_xgb`
 **Host:** Apple M5 Max (18-core), macOS, Apple clang, C23 (`-std=c2x`), `-O3 -Wall -Wextra`
 **Status:** complete — 55/55 test checks, clean under ASan + UBSan, benchmarks green.
 
