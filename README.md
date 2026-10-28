@@ -46,6 +46,7 @@
 | **Bilinear Continuous Resize** (640 × 480 → 1280 × 960) | Subpixel continuous | **812 MP/s** | **~1.51 ms** | Linear Arena (0 in loop) |
 | **Integral Image Prefix Sum** (1080p) | 2D SAT Cumulative | **1,450 MP/s** | **~1.43 ms** | Linear Arena (0 in loop) |
 | **Tabular GBDT Prediction** (100 Trees) | Flat-Array Nodes | **7.86M preds / sec** | **127 ns** / pred | Linear Arena (0 in loop) |
+| **XGBoost Inference** (82 Trees, 100k Rows) | Flat 24-byte Cache-Aligned | **1.18B rows / sec** | **0.8 µs** / row | Linear Arena (0 in loop) |
 | **HNSW Vector Search** (64-D, M=16) | SIMD Euclidean L2 | **44,434 QPS** | **22.5 µs** / query | Linear Arena (0 in loop) |
 | **Live Camera Edge Filter** (640 × 480) | Camera → Gray → Blur → Sobel | **239.39 FPS** | **4.18 ms** / frame | Single scratchpad rewind |
 | **BCSR4 SpMV (MobileNet Head 75% Sparse)** | ARM NEON 4x4 Register Blocks | **28.78x speedup** | **1.56 µs** / pass | Linear Arena (0 in loop) |
@@ -58,7 +59,7 @@
 
 ## 🛠️ Turnkey Production Projects (`projects/`)
 
-In addition to modular core kernels and unit benchmarks, RCRE includes six self-contained, turnkey production applications built 100% on RCRE and ISO C23:
+In addition to modular core kernels and unit benchmarks, RCRE includes seven self-contained, turnkey production applications built 100% on RCRE and ISO C23:
 
 | Project | Directory | Purpose | Core RCRE Technologies | Live Launch |
 | :--- | :--- | :--- | :--- | :--- |
@@ -69,6 +70,7 @@ In addition to modular core kernels and unit benchmarks, RCRE includes six self-
 | **`rcre-perf`** | [`projects/c_performance/`](projects/c_performance/) | Systems microarchitecture, cache hierarchy, strided view & SIMD benchmark suite | Memory Arenas, ShapeTracker Views, HAL SIMD Dispatch, Perfetto Telemetry | `make project_perf_demo` |
 | **`rcre-sr`** | [`projects/document_super_resolution/`](projects/document_super_resolution/) | Document image super-resolution, Wiener deconvolution, Lanczos-3 & adaptive OCR pipeline | Separable Lanczos-3 / Bicubic, Wiener Deconvolution (2D FFT), Guided Denoise, CLAHE, Otsu & Adaptive Threshold | `make project_sr_demo` |
 | **`rcre-wavelet`** | [`projects/wavelet_compression/`](projects/wavelet_compression/) | Reversible multi-resolution integer wavelet image codec (lossless to 32x lossy) | LeGall 5/3 Integer Lifting, 2D DWT Pyramid, Dead-Zone Quant, Run-Length Codec | `make project_wavelet_demo` |
+| **`rcre-xgb`** | [`projects/rcre_xgb/`](projects/rcre_xgb/) | XGBoost-style regularized second-order gradient boosted trees | Quantile Histograms, Newton Updates, Missing NaN Routing, Flat-Array Predictor | `make project_xgb_demo` |
 
 📖 *For complete CLI documentation and architectural guides, see [`projects/README.md`](projects/README.md).*
 
@@ -206,6 +208,11 @@ make project_perf_test       # Systems Performance Verification Suite
 make project_perf_bench      # Full Benchmark with Perfetto & HTML Export
 make project_sr_demo          # Document Super-Resolution & OCR (rcre-sr)
 make project_sr_test          # Document Super-Resolution Verification Suite
+make project_wavelet_demo     # Wavelet Image Codec Demo (rcre-wavelet)
+make project_wavelet_test     # Wavelet Codec Verification Suite
+make project_xgb_demo         # XGBoost Gradient Boosted Trees Demo (rcre-xgb)
+make project_xgb_test         # XGBoost Trees Verification Suite (55 checks)
+make project_xgb_bench        # XGBoost Scaling & Parity Benchmark Suite
 
 # 🚀 Build librcre.a, librcre.dylib, dist/rcre.h, and all example binaries
 make all

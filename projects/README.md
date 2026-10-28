@@ -17,6 +17,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-perf`** | [`c_performance/`](c_performance/) | Systems microarchitecture, cache hierarchy, strided view & SIMD benchmark suite | Memory Arenas, ShapeTracker Views, HAL SIMD Dispatch, Perfetto Telemetry |
 | **`rcre-sr`** | [`document_super_resolution/`](document_super_resolution/) | Document image super-resolution, Wiener deconvolution, Lanczos-3 & adaptive OCR pipeline | Separable Lanczos-3 / Bicubic, Wiener Deconvolution (2D FFT), Guided Denoise, CLAHE, Otsu & Adaptive Threshold |
 | **`rcre-wavelet`** | [`wavelet_compression/`](wavelet_compression/) | Reversible multi-resolution integer wavelet image codec (lossless to 32x lossy) | LeGall 5/3 Integer Lifting, 2D DWT Pyramid, Dead-Zone Quant, Run-Length Codec |
+| **`rcre-xgb`** | [`rcre_xgb/`](rcre_xgb/) | XGBoost-style regularized second-order gradient boosted decision trees | Quantile Histograms, Newton Updates, Missing NaN Routing, Flat-Array Predictor |
 
 ---
 
@@ -195,6 +196,42 @@ make -C projects/wavelet_compression demo
 ```
 
 For complete CLI documentation, mathematical formulas, and benchmark tables, see [`projects/wavelet_compression/README.md`](wavelet_compression/README.md).
+
+---
+
+## 8. `rcre-xgb` (XGBoost-Style Gradient Boosted Decision Trees)
+
+A pure C23, zero-dependency second-order gradient boosted decision tree engine implementing regularized Newton updates, histogram-based split finding, missing value default direction learning, and flat-array zero-allocation inference.
+
+### Key Capabilities
+* **Second-Order Newton Updates**: Computes analytical gradients and Hessians for squared-error regression, binary logistic classification, and multi-class softmax.
+* **Exact $L_1$ and $L_2$ Leaf Regularization**: Analytical soft-thresholding via $\alpha$ and shrinkage via $\lambda$, with $\gamma$ split penalization.
+* **Optimal Missing-Value Default Routing**: Evaluates left vs. right gain candidates to learn the optimal default direction for missing values (`NaN`).
+* **Subsampling & Early Stopping**: Row and column subsampling with deterministic SplitMix64 PRNG, and automated model truncation at the validation loss minimum.
+* **Blistering Flat-Array Inference**: Achieves **1.18 Billion rows/s** ($0.8\,\mu\text{s}$ per row across 82 trees) with $1.79 \times 10^{-7}$ numerical parity against RCRE's native `rcre_ml_gbdt_predict`.
+* **Zero Runtime Heap Allocation**: Dataset binning, tree growth, and boosting loop execute within a single linear memory arena (`RCRE_Arena`).
+* **Bit-Exact Binary Model Persistence**: 32-byte header `"RCXG"` format storing 24-byte cache-aligned node structs.
+
+### Quick Start
+```bash
+# Compile library, CLI, tests, and benchmarks:
+make -C projects/rcre_xgb all
+
+# Run complete 55-check verification suite:
+make project_xgb_test
+
+# Run synthetic regression + binary classification demo:
+make project_xgb_demo
+
+# Run scaling, per-stage timing, and RCRE parity benchmarks:
+make project_xgb_bench
+
+# Train on a custom CSV dataset:
+./projects/rcre_xgb/bin/xgb_cli train data.csv --task binary --label 3 --rounds 50 --depth 4 --eta 0.3 --out model.rcxg
+```
+
+For complete design documents, benchmark tables, and CLI guides, see [`projects/rcre_xgb/xgboost_report.md`](rcre_xgb/xgboost_report.md).
+
 
 
 
