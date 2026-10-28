@@ -15,6 +15,8 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-mobilenet`** | [`cifar100_mobilenet/`](cifar100_mobilenet/) | Sub-4ms MobileNet CNN training and zero-heap inference on CIFAR-100 | Depthwise Separable Conv, Edge BN Folding, SIMD axpy, Softmax |
 | **`rcre-pca`** | [`pca_compression/`](pca_compression/) | Zero-dependency spatial PCA image compression & 8-bit quantization codec | Power Iteration, Deflation, 8-bit Uniform Quant, Web Playground Studio |
 | **`rcre-perf`** | [`c_performance/`](c_performance/) | Systems microarchitecture, cache hierarchy, strided view & SIMD benchmark suite | Memory Arenas, ShapeTracker Views, HAL SIMD Dispatch, Perfetto Telemetry |
+| **`rcre-sr`** | [`document_super_resolution/`](document_super_resolution/) | Document image super-resolution, Wiener deconvolution, Lanczos-3 & adaptive OCR pipeline | Separable Lanczos-3 / Bicubic, Wiener Deconvolution (2D FFT), Guided Denoise, CLAHE, Otsu & Adaptive Threshold |
+| **`rcre-wavelet`** | [`wavelet_compression/`](wavelet_compression/) | Reversible multi-resolution integer wavelet image codec (lossless to 32x lossy) | LeGall 5/3 Integer Lifting, 2D DWT Pyramid, Dead-Zone Quant, Run-Length Codec |
 
 ---
 
@@ -138,5 +140,61 @@ make project_perf_bench
 ```
 
 For complete CLI documentation, architectural deep-dive, and hardware tables, see [`projects/c_performance/README.md`](c_performance/README.md).
+
+---
+
+## 6. `rcre-sr` (Document Image Super-Resolution & OCR Restoration Pipeline)
+
+A zero-dependency ISO C23 document enhancement and arbitrary-scale super-resolution pipeline designed to transform degraded, blurry, or low-resolution document captures into high-contrast, OCR-ready images at 70+ MPix/s.
+
+### Key Capabilities
+* **Arbitrary-Scale Separable Resampling**: Implements document-imaging standard Lanczos-3 and Catmull-Rom Bicubic interpolation with precomputed weight tables and zero per-pixel transcendental calls.
+* **FFT-Accelerated Wiener Deblurring**: Frequency-domain deconvolution using RCRE's 2D FFT, zero-padded to power-of-two with configurable PSF models (Gaussian camera blur or motion blur).
+* **Linear-Time Guided Filtering**: $\mathcal{O}(N)$ edge-preserving denoising via 4 integral images per channel with zero runtime heap allocation.
+* **Gated Document Enhancement**: Multi-scale CLAHE, Otsu thresholding, Bradley-Roth adaptive binarization, binary morphology (open/close), and projection-profile deskewing ($\pm 15^\circ$).
+* **Gated Execution Policy**: Stages only fire when automated input quality assessment detects blur ($\text{Laplacian variance} < 60$), noise ($\sigma > 3.0$), or low contrast ($\text{range} < 0.55$), ensuring clean documents are never over-processed.
+* **High Quality & Test Coverage**: >91% line coverage across all modules, 100% clean under AddressSanitizer and UndefinedBehaviorSanitizer, and verified +3.1% OCR CER improvement on Tesseract.
+
+### Quick Start
+```bash
+# Run the complete test suite (84 unit & integration checks):
+make project_sr_test
+
+# Run the automated end-to-end demo (generate degraded document -> restore -> OCR report):
+make project_sr_demo
+
+# Run the arbitrary-scale CLI tool:
+./projects/document_super_resolution/bin/sr_cli enhance input.pgm output.pgm --scale 2 --style auto
+```
+
+For complete CLI documentation, architecture diagrams, and benchmark tables, see [`projects/document_super_resolution/README.md`](document_super_resolution/README.md).
+
+---
+
+## 7. `rcre-wavelet` (Multi-Resolution Integer Wavelet Image Codec)
+
+A pure C23, zero-dependency reversible image codec implementing the Biorthogonal LeGall 5/3 lifting scheme across multi-scale 2D DWT subband pyramids.
+
+### Key Capabilities
+* **100% Bit-Exact Reversible Lossless Mode**: When quantization step $\Delta = 1$, delivers mathematical bit-exact reconstruction ($\text{MSE} = 0.0000, \text{PSNR} = 99.0\text{ dB}$).
+* **High Rate-Distortion Lossy Compression**: Up to $32\times$ compression with $> 54\text{ dB}$ PSNR on natural textures without blocking artifacts.
+* **Zero Runtime Heap Allocation**: Entire forward/inverse pyramid transforms execute in-place using scratchpad memory arenas (`RCRE_Arena`).
+* **Microcontroller-Ready Pure Integer Math**: Eliminates floating-point drift and runs identically on ARM Cortex-M microcontrollers.
+* **Standalone Binary Bitstream (`.rdwt`)**: Self-contained 32-byte header with variable-length run-length entropy stream.
+
+### Quick Start
+```bash
+# Compile standalone CLI tool:
+make -C projects/wavelet_compression all
+
+# Run automated end-to-end demo (Lossless vs Lossy verification):
+make -C projects/wavelet_compression demo
+
+# Run rate-distortion benchmark on an image:
+./projects/wavelet_compression/bin/rcre-wavelet --benchmark [image.bmp]
+```
+
+For complete CLI documentation, mathematical formulas, and benchmark tables, see [`projects/wavelet_compression/README.md`](wavelet_compression/README.md).
+
 
 

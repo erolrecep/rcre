@@ -30,6 +30,7 @@ C_FILES = [
     SRC_DIR / "core" / "adapt.c",
     SRC_DIR / "core" / "threadpool.c",
     SRC_DIR / "core" / "prof.c",
+    SRC_DIR / "core" / "sparse.c",
     SRC_DIR / "cv" / "color.c",
     SRC_DIR / "cv" / "geom.c",
     SRC_DIR / "cv" / "filter.c",
@@ -63,7 +64,7 @@ def clean_file_content(content: str) -> str:
     for line in content.splitlines():
         # P4: also strip PATH-QUALIFIED local includes (e.g. "../core/rcre_rng.h")
         # that previously leaked into dist/rcre.h and broke out-of-tree builds.
-        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer)/)?(rcre\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h)[">]', line):
+        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer)/)?(rcre\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|rcre_sparse\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h)[">]', line):
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -99,6 +100,9 @@ def main():
 
     prof_header = (INCLUDE_DIR / "rcre_prof.h").read_text(encoding="utf-8")
     header_content = header_content + "\n" + "/* --- Profiling & Telemetry Subsystem (rcre_prof) --- */\n" + clean_file_content(prof_header) + "\n"
+
+    sparse_header = (INCLUDE_DIR / "rcre_sparse.h").read_text(encoding="utf-8")
+    header_content = header_content + "\n" + "/* --- Sparse Matrix & Pruning Engine (rcre_sparse) --- */\n" + clean_file_content(sparse_header) + "\n"
 
     hal_internal = (SRC_DIR / "hal" / "hal_internal.h").read_text(encoding="utf-8")
     ml_internal = (SRC_DIR / "ml" / "ml_internal.h").read_text(encoding="utf-8")

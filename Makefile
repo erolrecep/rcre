@@ -37,6 +37,7 @@ SRCS = src/core/arena.c \
        src/core/adapt.c \
        src/core/threadpool.c \
        src/core/prof.c \
+       src/core/sparse.c \
        src/cv/color.c \
        src/cv/geom.c \
        src/cv/filter.c \
@@ -75,16 +76,16 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler
+TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
-EXAMPLES = webcam_edge_filter tabular_gbdt_predict hnsw_vector_search mlp_autograd_train gpt_generate
+EXAMPLES = webcam_edge_filter tabular_gbdt_predict hnsw_vector_search mlp_autograd_train gpt_generate sparse_prune_bench
 EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench
+.PHONY: default help all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo
 
 default: help
 
@@ -191,6 +192,9 @@ mlp_train: bin/mlp_autograd_train
 gpt_demo: bin/gpt_generate
 	@bin/gpt_generate
 
+sparse_bench: bin/sparse_prune_bench
+	@bin/sparse_prune_bench
+
 project_lens_test: $(LIB)
 	@$(MAKE) -C projects/reverse_image_search test
 
@@ -217,6 +221,18 @@ project_perf_demo: $(LIB)
 
 project_perf_bench: $(LIB)
 	@$(MAKE) -C projects/c_performance bench
+
+project_sr_test: $(LIB)
+	@$(MAKE) -C projects/document_super_resolution test
+
+project_sr_demo: $(LIB)
+	@$(MAKE) -C projects/document_super_resolution demo
+
+project_wavelet_test: $(LIB)
+	@$(MAKE) -C projects/wavelet_compression test
+
+project_wavelet_demo: $(LIB)
+	@$(MAKE) -C projects/wavelet_compression demo
 
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
@@ -400,6 +416,8 @@ help:
 	@echo "  make project_facex_demo    Run Facial Expression (rcre-facex) archetype demo"
 	@echo "  make project_perf_test     Run Hardware Benchmark (rcre-perf) verification suite"
 	@echo "  make project_perf_demo     Run Hardware Benchmark (rcre-perf) live demo"
+	@echo "  make project_sr_test       Run Document Super-Resolution (rcre-sr) test suite"
+	@echo "  make project_sr_demo       Run Document Super-Resolution (rcre-sr) live demo"
 	@echo ""
 	@echo "Build & Documentation Targets:"
 	@echo "  make all                Build static/shared libraries, dist header & examples"

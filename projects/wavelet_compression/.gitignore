@@ -1,0 +1,4 @@
+bin/
+*.o
+*.rdwt
+wavelet_demo_*

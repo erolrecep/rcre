@@ -1,0 +1,6 @@
+obj/
+lib/
+bin/
+*.o
+*.pyc
+web/__pycache__/
