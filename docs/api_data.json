@@ -70,13 +70,93 @@
     "header": "rcre.h"
   },
   {
-    "name": "rcre_tensor_create",
-    "return_type": "RCRE_Tensor",
-    "brief": "Allocates a new contiguous tensor inside caller-supplied arena.",
+    "name": "rcre_arena_temp_begin",
+    "return_type": "RCRE_ArenaTemp",
+    "brief": "Saves current arena allocation offset for scoped scratchpad rewinding.",
+    "params": [
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Memory & Arenas",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_arena_temp_end",
+    "return_type": "void",
+    "brief": "Restores arena offset back to the checkpoint saved in temp.",
+    "params": [
+      {
+        "name": "temp",
+        "type": "RCRE_ArenaTemp",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Memory & Arenas",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_graph_ctx_create",
+    "return_type": "RCRE_GraphCtx*",
+    "brief": "Creates a dual-arena execution context (persistent weights + ephemeral tape).",
+    "params": [
+      {
+        "name": "persistent_cap",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "tape_cap",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_graph_ctx_reset_tape",
+    "return_type": "void",
+    "brief": "Resets the ephemeral tape arena back to zero offset.",
+    "params": [
+      {
+        "name": "ctx",
+        "type": "RCRE_GraphCtx*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_graph_ctx_destroy",
+    "return_type": "void",
+    "brief": "Destroys both arenas and frees the graph context.",
+    "params": [
+      {
+        "name": "ctx",
+        "type": "RCRE_GraphCtx*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_tensor_f32_data",
+    "return_type": "static inline float*",
+    "brief": "Typed accessor for F32 tensor data (single source of the float cast",
     "params": [
       {
         "name": "shape",
-        "type": "const size_t*",
+        "type": "const RCRE_Tensor* t) { return (float*)t->data; } /** * @brief Allocates a new contiguous tensor inside caller-supplied arena. */ RCRE_NODISCARD RCRE_Tensor rcre_tensor_create(const size_t*",
         "description": ""
       },
       {
@@ -470,6 +550,161 @@
     "header": "rcre.h"
   },
   {
+    "name": "rcre_cv_rgb_to_hsv",
+    "return_type": "int",
+    "brief": "Converts 3-channel RGB [0, 1] image to HSV [H in [0, 1), S in [0, 1], V in [0, 1]].",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_hsv_to_rgb",
+    "return_type": "int",
+    "brief": "Converts 3-channel HSV image back to RGB [0, 1].",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_scale_channel",
+    "return_type": "int",
+    "brief": "Scales a single channel in an image by a multiplier factor.",
+    "params": [
+      {
+        "name": "tensor",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "channel_idx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "scale",
+        "type": "float",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_shift_channel",
+    "return_type": "int",
+    "brief": "Shifts a single channel in an image by a constant offset.",
+    "params": [
+      {
+        "name": "tensor",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "channel_idx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "shift",
+        "type": "float",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_clamp",
+    "return_type": "int",
+    "brief": "Clamps tensor values in-place into [min_val, max_val].",
+    "params": [
+      {
+        "name": "tensor",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "min_val",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "max_val",
+        "type": "float",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_resize_nn",
+    "return_type": "int",
+    "brief": "Resizes an image using Nearest-Neighbor interpolation with continuous subpixel coordinates.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_resize_bilinear",
+    "return_type": "int",
+    "brief": "Resizes an image using 4-point Bilinear interpolation with continuous subpixel coordinates.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
     "name": "rcre_cv_gaussian_blur",
     "return_type": "int",
     "brief": "Separable 2D Gaussian blur with reflection padding.",
@@ -522,6 +757,646 @@
       {
         "name": "arena",
         "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_convolve_2d",
+    "return_type": "int",
+    "brief": "General 2D spatial convolution across channels with edge clamping.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "kernel",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "preserve_channels",
+        "type": "bool",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_filter_box",
+    "return_type": "int",
+    "brief": "Constructs a 2D Box blur filter kernel tensor of size [size, size, 1].",
+    "params": [
+      {
+        "name": "kernel",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "size",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_filter_sharpen",
+    "return_type": "int",
+    "brief": "Constructs a 3x3 Sharpen filter kernel tensor.",
+    "params": [
+      {
+        "name": "kernel",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_filter_emboss",
+    "return_type": "int",
+    "brief": "Constructs a 3x3 Emboss filter kernel tensor.",
+    "params": [
+      {
+        "name": "kernel",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_filter_highpass",
+    "return_type": "int",
+    "brief": "Constructs a 3x3 High-Pass filter kernel tensor.",
+    "params": [
+      {
+        "name": "kernel",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_harris_response",
+    "return_type": "int",
+    "brief": "Computes Harris cornerness response matrix R = det(S) - k * trace(S)^2.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst_r",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "sigma",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "k",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_nms_2d",
+    "return_type": "int",
+    "brief": "Performs 2D Non-Maximum Suppression (NMS) over a window radius.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "window_radius",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_harris_detect",
+    "return_type": "int",
+    "brief": "Detects Harris corners and extracts local gradient patch descriptors.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "sigma",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "nms_radius",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "out_desc",
+        "type": "RCRE_CV_Descriptor**",
+        "description": ""
+      },
+      {
+        "name": "out_count",
+        "type": "int*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_match_descriptors",
+    "return_type": "int",
+    "brief": "Matches feature descriptors using Lowe's ratio test and mutual uniqueness.",
+    "params": [
+      {
+        "name": "a",
+        "type": "const RCRE_CV_Descriptor*",
+        "description": ""
+      },
+      {
+        "name": "na",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "b",
+        "type": "const RCRE_CV_Descriptor*",
+        "description": ""
+      },
+      {
+        "name": "nb",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "ratio_thresh",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "out_matches",
+        "type": "RCRE_CV_Match**",
+        "description": ""
+      },
+      {
+        "name": "out_count",
+        "type": "int*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_draw_markers",
+    "return_type": "void",
+    "brief": "Draws crosshair markers on an image for detected keypoints.",
+    "params": [
+      {
+        "name": "image",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "points",
+        "type": "const RCRE_CV_Point*",
+        "description": ""
+      },
+      {
+        "name": "count",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "r",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "g",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "b",
+        "type": "float",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_compute_homography_dlt",
+    "return_type": "int",
+    "brief": "Computes 3x3 projective homography matrix H via Direct Linear Transformation (DLT).",
+    "params": [
+      {
+        "name": "matches",
+        "type": "const RCRE_CV_Match*",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "H[3][3]",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_find_homography_ransac",
+    "return_type": "int",
+    "brief": "Computes optimal robust homography using RANSAC inlier consensus.",
+    "params": [
+      {
+        "name": "matches",
+        "type": "RCRE_CV_Match*",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "inlier_thresh",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "iters",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "cutoff",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "out_H[3][3]",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "out_inliers",
+        "type": "int*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_warp_perspective",
+    "return_type": "int",
+    "brief": "Warps an image using backward projective mapping with bilinear interpolation.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "H[3][3]",
+        "type": "const float",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_cylindrical_project",
+    "return_type": "int",
+    "brief": "Projects an image onto a cylinder with focal length f.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_stitch_panorama",
+    "return_type": "int",
+    "brief": "End-to-end two-image panorama stitching pipeline.",
+    "params": [
+      {
+        "name": "a",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "b",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "f_cylindrical",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "sigma",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "thresh",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "nms",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "inlier_thresh",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "iters",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_integral_image",
+    "return_type": "int",
+    "brief": "Computes 2D Summed-Area Table (Integral Image) for O(1) box queries.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst_integral",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_box_filter_integral",
+    "return_type": "int",
+    "brief": "Applies constant-time box filter on an image using its precomputed integral table.",
+    "params": [
+      {
+        "name": "integral",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "box_radius",
+        "type": "int",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_optical_flow_lk",
+    "return_type": "int",
+    "brief": "Computes Lucas-Kanade dense/strided optical flow velocity field [H/s, W/s, 2].",
+    "params": [
+      {
+        "name": "curr",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "prev",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "dst_velocity",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "window_size",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "stride",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "max_v",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Computer Vision",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cv_draw_flow",
+    "return_type": "void",
+    "brief": "Overlays optical flow velocity vectors onto an image.",
+    "params": [
+      {
+        "name": "canvas",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "velocity",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "stride",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "scale",
+        "type": "float",
         "description": ""
       }
     ],
@@ -1555,6 +2430,55 @@
     "returns": "",
     "category": "Hardware Acceleration",
     "header": "rcre.h"
+  },
+  {
+    "name": "rcre_prof_now_ns",
+    "return_type": "uint64_t",
+    "brief": "RCRE Native Profiling & Telemetry Subsystem (ISO C23, zero-dependency)",
+    "params": [],
+    "returns": "",
+    "category": "Profiling & Telemetry",
+    "header": "rcre_prof.h"
+  },
+  {
+    "name": "rcre_scalar_val_new",
+    "return_type": "RCRE_ScalarVal*",
+    "brief": "RCRE Unified Automatic Differentiation & Deep Learning Engine",
+    "params": [
+      {
+        "name": "ctx",
+        "type": "RCRE_GraphCtx*",
+        "description": ""
+      },
+      {
+        "name": "data",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "label",
+        "type": "const char*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Autograd & Optimization",
+    "header": "rcre_autograd.h"
+  },
+  {
+    "name": "rcre_gpt_adamw_config_valid",
+    "return_type": "bool",
+    "brief": "RCRE Generative AI & Autoregressive Transformer Architecture (ISO C23)",
+    "params": [
+      {
+        "name": "cfg",
+        "type": "const RCRE_GPTAdamWConfig *",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Generative Transformers",
+    "header": "rcre_transformer.h"
   },
   {
     "name": "rcre_cam_default_config",
