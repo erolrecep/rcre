@@ -25,6 +25,7 @@ test_video/
 
 # Temporary indices, bitstreams & demo outputs
 *.rcre_idx
+*.rcre_lsh
 *.rpca
 *.rdwt
 projects/reverse_image_search/demo_gallery/

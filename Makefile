@@ -243,6 +243,15 @@ project_xgb_demo: $(LIB)
 project_xgb_bench: $(LIB)
 	@$(MAKE) -C projects/rcre_xgb bench
 
+project_omnisearch_test: $(LIB)
+	@$(MAKE) -C projects/omnisearch_hash test
+
+project_omnisearch_demo: $(LIB)
+	@$(MAKE) -C projects/omnisearch_hash demo
+
+project_omnisearch_bench: $(LIB)
+	@$(MAKE) -C projects/omnisearch_hash bench
+
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@

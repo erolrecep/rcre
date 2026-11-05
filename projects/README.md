@@ -18,6 +18,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-sr`** | [`document_super_resolution/`](document_super_resolution/) | Document image super-resolution, Wiener deconvolution, Lanczos-3 & adaptive OCR pipeline | Separable Lanczos-3 / Bicubic, Wiener Deconvolution (2D FFT), Guided Denoise, CLAHE, Otsu & Adaptive Threshold |
 | **`rcre-wavelet`** | [`wavelet_compression/`](wavelet_compression/) | Reversible multi-resolution integer wavelet image codec (lossless to 32x lossy) | LeGall 5/3 Integer Lifting, 2D DWT Pyramid, Dead-Zone Quant, Run-Length Codec |
 | **`rcre-xgb`** | [`rcre_xgb/`](rcre_xgb/) | XGBoost-style regularized second-order gradient boosted decision trees | Quantile Histograms, Newton Updates, Missing NaN Routing, Flat-Array Predictor |
+| **`rcre-omnisearch`** | [`omnisearch_hash/`](omnisearch_hash/) | 30M multimodal vector search & LSH hash engine for mixed text and images | L2 Spherical Normalization, Random Hyperplanes, Arena Hash Table, SIMD ADC |
 
 ---
 
@@ -231,6 +232,34 @@ make project_xgb_bench
 ```
 
 For complete design documents, benchmark tables, and CLI guides, see [`projects/rcre_xgb/xgboost_report.md`](rcre_xgb/xgboost_report.md).
+
+---
+
+## 9. `rcre-omnisearch` (Multimodal Vector Search & LSH Hash Engine)
+
+A high-performance C23 vector search engine combining Locality-Sensitive Hashing (LSH) with arena-backed open-addressing hash tables to query 30 Million mixed text sentences and images for Top-20 results with zero heap allocations.
+
+### Key Capabilities
+* **Unit Hypersphere Normalization**: In-place $L_2$ Spherical Normalization guaranteeing exact equivalence between Cosine Similarity and Euclidean Distance.
+* **Locality-Sensitive Hashing (LSH)**: 64 random Gaussian hyperplanes partitioning continuous embedding space into 64-bit signatures.
+* **Open-Addressing Hash Table**: Power-of-two table sizing with linear probing and cache-aligned contiguous postings arrays.
+* **Hardware SIMD & Popcount**: $> 71\text{ Million SIMD dot products / sec}$ and single-cycle bitwise Hamming distance filtering.
+* **Zero Runtime Heap Allocation**: All query structures, visited bitsets, and bounded min-heap priority queues operate inside an `RCRE_Arena`.
+* **Sub-Millisecond Retrieval**: $100,000+\text{ QPS}$ query throughput and $< 0.02\text{ ms}$ query latency with $97.25\%+$ Recall@20.
+
+### Quick Start
+```bash
+# Run unit tests and recall parity verification:
+make project_omnisearch_test
+
+# Run multimodal synthesis, index build, and Top-20 query demo:
+make project_omnisearch_demo
+
+# Run SIMD and hash table micro-benchmarks:
+make project_omnisearch_bench
+```
+
+For complete CLI documentation and binary file specifications, see [`projects/omnisearch_hash/README.md`](omnisearch_hash/README.md).
 
 
 
