@@ -48,6 +48,7 @@
 | **Tabular GBDT Prediction** (100 Trees) | Flat-Array Nodes | **7.86M preds / sec** | **127 ns** / pred | Linear Arena (0 in loop) |
 | **XGBoost Inference** (82 Trees, 100k Rows) | Flat 24-byte Cache-Aligned | **1.18B rows / sec** | **0.8 µs** / row | Linear Arena (0 in loop) |
 | **HNSW Vector Search** (64-D, M=16) | SIMD Euclidean L2 | **44,434 QPS** | **22.5 µs** / query | Linear Arena (0 in loop) |
+| **LSH Multimodal Vector Search (Top-20)** | Multi-Probe Hash + SIMD Re-rank | **113,392 QPS** | **8.82 µs** / query | Linear Arena (0 in loop) |
 | **Live Camera Edge Filter** (640 × 480) | Camera → Gray → Blur → Sobel | **239.39 FPS** | **4.18 ms** / frame | Single scratchpad rewind |
 | **BCSR4 SpMV (MobileNet Head 75% Sparse)** | ARM NEON 4x4 Register Blocks | **28.78x speedup** | **1.56 µs** / pass | Linear Arena (0 in loop) |
 | **Wavelet LeGall 5/3 (512 × 512, 31x Lossy)** | 2D Integer Lifting DWT | **54.63 dB PSNR** | **4.55 ms** enc / **4.16 ms** dec | Linear Arena (0 in loop) |
@@ -59,7 +60,7 @@
 
 ## 🛠️ Turnkey Production Projects (`projects/`)
 
-In addition to modular core kernels and unit benchmarks, RCRE includes seven self-contained, turnkey production applications built 100% on RCRE and ISO C23:
+In addition to modular core kernels and unit benchmarks, RCRE includes nine self-contained, turnkey production applications built 100% on RCRE and ISO C23:
 
 | Project | Directory | Purpose | Core RCRE Technologies | Live Launch |
 | :--- | :--- | :--- | :--- | :--- |
@@ -71,6 +72,7 @@ In addition to modular core kernels and unit benchmarks, RCRE includes seven sel
 | **`rcre-sr`** | [`projects/document_super_resolution/`](projects/document_super_resolution/) | Document image super-resolution, Wiener deconvolution, Lanczos-3 & adaptive OCR pipeline | Separable Lanczos-3 / Bicubic, Wiener Deconvolution (2D FFT), Guided Denoise, CLAHE, Otsu & Adaptive Threshold | `make project_sr_demo` |
 | **`rcre-wavelet`** | [`projects/wavelet_compression/`](projects/wavelet_compression/) | Reversible multi-resolution integer wavelet image codec (lossless to 32x lossy) | LeGall 5/3 Integer Lifting, 2D DWT Pyramid, Dead-Zone Quant, Run-Length Codec | `make project_wavelet_demo` |
 | **`rcre-xgb`** | [`projects/rcre_xgb/`](projects/rcre_xgb/) | XGBoost-style regularized second-order gradient boosted trees | Quantile Histograms, Newton Updates, Missing NaN Routing, Flat-Array Predictor | `make project_xgb_demo` |
+| **`rcre-omnisearch`** | [`projects/omnisearch_hash/`](projects/omnisearch_hash/) | 30M multimodal vector search & LSH hash engine for mixed text & images | L2 Spherical Normalization, Random Hyperplanes, Arena Hash Table, SIMD ADC | `make project_omnisearch_demo` |
 
 📖 *For complete CLI documentation and architectural guides, see [`projects/README.md`](projects/README.md).*
 
@@ -96,6 +98,7 @@ apps/rcre/
 │   ├── pca_compression/       # rcre-pca: Spatial PCA image compression & 8-bit codec
 │   ├── c_performance/         # rcre-perf: Hardware microarchitecture & SIMD benchmark suite
 │   ├── document_super_resolution/ # rcre-sr: Adaptive document super-resolution & OCR restoration
+│   ├── omnisearch_hash/        # rcre-omnisearch: 30M multimodal vector search & LSH hash engine
 │   └── README.md               # Production Projects Hub guide
 ├── src/
 │   ├── core/                   # Arena allocator, profiler engine (prof.c), tensor, threadpool
@@ -213,6 +216,9 @@ make project_wavelet_test     # Wavelet Codec Verification Suite
 make project_xgb_demo         # XGBoost Gradient Boosted Trees Demo (rcre-xgb)
 make project_xgb_test         # XGBoost Trees Verification Suite (55 checks)
 make project_xgb_bench        # XGBoost Scaling & Parity Benchmark Suite
+make project_omnisearch_demo  # Multimodal Vector Search & LSH Hash Demo (rcre-omnisearch)
+make project_omnisearch_test  # Vector Search Invariant & Recall Parity Verification
+make project_omnisearch_bench # SIMD & Hash Table Micro-Benchmarks
 
 # 🚀 Build librcre.a, librcre.dylib, dist/rcre.h, and all example binaries
 make all
