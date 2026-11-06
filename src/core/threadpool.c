@@ -35,6 +35,10 @@ struct RCRE_ThreadPool {
     pthread_cond_t  work_cond;
     pthread_cond_t  done_cond;
     RCRE_WorkBatch* current_batch;
+    RCRE_WorkBatch  batch;   /* Embedded (heap lifetime via the pool): workers may
+                                keep a pointer to it after rcre_threadpool_parallel_for
+                                returned; destroy() joins all workers before freeing
+                                the pool, so the batch can never dangle. */
     bool            stop;
 };
 
@@ -43,7 +47,7 @@ static void* worker_routine(void* arg) {
 
     while (true) {
         pthread_mutex_lock(&pool->lock);
-        while (!pool->stop && (!pool->current_batch || 
+        while (!pool->stop && (!pool->current_batch ||
                atomic_load(&pool->current_batch->next_task) >= pool->current_batch->total_tasks)) {
             pthread_cond_wait(&pool->work_cond, &pool->lock);
         }
@@ -53,25 +57,31 @@ static void* worker_routine(void* arg) {
             break;
         }
 
-        RCRE_WorkBatch* batch = pool->current_batch;
+        /* Dispatch under the lock: the batch is embedded in the pool (it outlives
+         * rcre_threadpool_parallel_for), so every field read here is valid, and
+         * the lock serializes this against a *new* parallel_for overwriting the
+         * batch's task_fn/arg/total — a worker always sees one consistent batch
+         * generation (no lost/duplicated task credits across generations).
+         * The pool is only freed in rcre_threadpool_destroy after all workers
+         * are joined, so the batch can never dangle. */
+        size_t task_id = atomic_fetch_add(&pool->batch.next_task, 1);
+        if (task_id >= pool->batch.total_tasks) {
+            /* No work left (overshoot): re-enter the wait loop. */
+            pthread_mutex_unlock(&pool->lock);
+            continue;
+        }
+        rcre_task_fn fn = pool->batch.task_fn;
+        void* batch_arg = pool->batch.arg;
         pthread_mutex_unlock(&pool->lock);
 
-        /* Work-stealing atomic loop */
-        while (true) {
-            size_t task_id = atomic_fetch_add(&batch->next_task, 1);
-            if (task_id >= batch->total_tasks) {
-                break;
-            }
+        fn(batch_arg, task_id);
 
-            batch->task_fn(batch->arg, task_id);
-            size_t completed = atomic_fetch_add(&batch->completed_tasks, 1) + 1;
-
-            if (completed == batch->total_tasks) {
-                pthread_mutex_lock(&pool->lock);
-                pthread_cond_broadcast(&pool->done_cond);
-                pthread_mutex_unlock(&pool->lock);
-            }
+        pthread_mutex_lock(&pool->lock);
+        size_t completed = atomic_fetch_add(&pool->batch.completed_tasks, 1) + 1;
+        if (completed == pool->batch.total_tasks) {
+            pthread_cond_broadcast(&pool->done_cond);
         }
+        pthread_mutex_unlock(&pool->lock);
     }
     return NULL;
 }
@@ -125,27 +135,27 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
         return;
     }
 
-    RCRE_WorkBatch batch;
-    batch.task_fn = task;
-    batch.arg = arg;
-    batch.total_tasks = count;
-    atomic_init(&batch.next_task, 0);
-    atomic_init(&batch.completed_tasks, 0);
-
+    RCRE_WorkBatch* batch = &pool->batch; /* embedded: lifetime >= pool */
     pthread_mutex_lock(&pool->lock);
-    pool->current_batch = &batch;
+    batch->task_fn = task;
+    batch->arg = arg;
+    batch->total_tasks = count;
+    atomic_init(&batch->next_task, 0);
+    atomic_init(&batch->completed_tasks, 0);
+    pool->current_batch = batch;
     pthread_cond_broadcast(&pool->work_cond);
 
-    /* Main thread participates in task execution */
+    /* Main thread participates in task execution (lock-free atomic dispatch;
+     * the main thread owns this batch for the duration of the call). */
     pthread_mutex_unlock(&pool->lock);
 
     while (true) {
-        size_t task_id = atomic_fetch_add(&batch.next_task, 1);
+        size_t task_id = atomic_fetch_add(&pool->batch.next_task, 1);
         if (task_id >= count) {
             break;
         }
         task(arg, task_id);
-        size_t completed = atomic_fetch_add(&batch.completed_tasks, 1) + 1;
+        size_t completed = atomic_fetch_add(&pool->batch.completed_tasks, 1) + 1;
         if (completed == count) {
             pthread_mutex_lock(&pool->lock);
             pthread_cond_broadcast(&pool->done_cond);
@@ -155,7 +165,7 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
 
     /* Wait for batch to finish */
     pthread_mutex_lock(&pool->lock);
-    while (atomic_load(&batch.completed_tasks) < count) {
+    while (atomic_load(&pool->batch.completed_tasks) < count) {
         pthread_cond_wait(&pool->done_cond, &pool->lock);
     }
     pool->current_batch = NULL;

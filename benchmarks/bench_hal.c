@@ -68,8 +68,12 @@ static void bench_gemm(void) {
     printf("   \u2022 Active HAL (%s): %7.2f ms | %6.2f GFLOPS (Speedup: %.2fx) [median of 3]\n",
            rcre_hal.backend_name, t_simd * 1000.0, gflops_simd, speedup);
 
-    /* P3 CI gate: absolute floor (env-overridable). */
-    double floor = 50.0;
+    /* P3 CI gate: absolute floor (env-overridable).
+     * 30.0 keeps a margin on GitHub-hosted runners: the M2 Pro (virtual)
+     * runner measured 45.5 GFLOPS (NEON 128-bit) yet dipped under 50 under
+     * load, while a scalar-fallback regression (~10-20 GFLOPS there) still
+     * fails the gate. */
+    double floor = 30.0;
     const char* env_floor = getenv("RCRE_GEMM_MIN_GFLOPS");
     if (env_floor && env_floor[0]) floor = atof(env_floor);
     if (gflops_simd < floor) {

@@ -5,7 +5,9 @@
  * Platform probes:
  *   - ARM64 (Apple Silicon / Linux ARM): mrs cntvct_el0 (EL0-accessible on both
  *     macOS and Linux; validated empirically on Apple M5).
- *   - x86-64: RDTSC.
+ *   - x86-64: RDTSC, with a one-shot calibration of the TSC frequency against
+ *     a ~20 ms CLOCK_MONOTONIC window (nanosleep), so no platform-specific
+ *     frequency is hard-coded.
  *   - Fallback: CLOCK_MONOTONIC for both timing sources.
  *   - RSS: macOS MACH_TASK_BASIC_INFO / Linux /proc/self/statm.
  *   - CPU time: getrusage (both platforms).
@@ -23,6 +25,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdatomic.h>
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -58,7 +61,41 @@ uint64_t rcre_prof_cycles(void) {
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
-uint64_t rcre_prof_cycles_freq(void) { return 0; } /* calibrate if needed */
+static atomic_uint_fast64_t s_tsc_freq_hz = 0;
+uint64_t rcre_prof_cycles_freq(void) {
+    uint64_t f = atomic_load_explicit(&s_tsc_freq_hz, memory_order_acquire);
+    if (f) return f;
+    /* One-shot TSC calibration: count TSC ticks over a ~20 ms monotonic
+     * window. The long window keeps scheduler/overhead noise well below
+     * 1% of the estimate; safe to re-enter (idempotent). */
+    uint64_t t0 = rcre_prof_now_ns();
+    uint64_t c0 = rcre_prof_cycles();
+#if defined(__linux__) || defined(__APPLE__)
+    struct timespec req = { 0, 20000000 }; /* 20 ms */
+    struct timespec rem = { 0, 0 };
+    if (nanosleep(&req, &rem) != 0 && (rem.tv_sec > 0 || rem.tv_nsec > 0)) {
+        struct timespec rq = { rem.tv_sec, rem.tv_nsec }; /* interrupted: sleep the rest */
+        (void)nanosleep(&rq, &rem);
+    }
+#else
+    uint64_t until = t0 + 20000000ULL; /* 20 ms busy-wait fallback */
+    while (rcre_prof_now_ns() < until) { }
+#endif
+    uint64_t el_ns = rcre_prof_now_ns() - t0;
+    uint64_t dc = rcre_prof_cycles() - c0;
+    uint64_t cal;
+    if (el_ns < 1000000ULL || dc < 1000000ULL) {
+        cal = 1000000000ULL; /* degenerate measurement: assume 1 GHz nominal */
+    } else {
+        cal = (uint64_t)((double)dc * 1e9 / (double)el_ns);
+        if (cal == 0) cal = 1000000000ULL;
+    }
+    uint64_t expected = f;
+    if (!atomic_compare_exchange_weak(&s_tsc_freq_hz, &expected, cal)) {
+        cal = expected; /* a concurrent calibrator published first */
+    }
+    return cal ? cal : 1000000000ULL;
+}
 #else
 uint64_t rcre_prof_cycles(void) { return rcre_prof_now_ns(); }
 uint64_t rcre_prof_cycles_freq(void) { return 1000000000ULL; }

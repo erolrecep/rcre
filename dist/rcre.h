@@ -3971,6 +3971,10 @@ struct RCRE_ThreadPool {
     pthread_cond_t  work_cond;
     pthread_cond_t  done_cond;
     RCRE_WorkBatch* current_batch;
+    RCRE_WorkBatch  batch;   /* Embedded (heap lifetime via the pool): workers may
+                                keep a pointer to it after rcre_threadpool_parallel_for
+                                returned; destroy() joins all workers before freeing
+                                the pool, so the batch can never dangle. */
     bool            stop;
 };
 
@@ -3979,7 +3983,7 @@ static void* worker_routine(void* arg) {
 
     while (true) {
         pthread_mutex_lock(&pool->lock);
-        while (!pool->stop && (!pool->current_batch || 
+        while (!pool->stop && (!pool->current_batch ||
                atomic_load(&pool->current_batch->next_task) >= pool->current_batch->total_tasks)) {
             pthread_cond_wait(&pool->work_cond, &pool->lock);
         }
@@ -3989,25 +3993,31 @@ static void* worker_routine(void* arg) {
             break;
         }
 
-        RCRE_WorkBatch* batch = pool->current_batch;
+        /* Dispatch under the lock: the batch is embedded in the pool (it outlives
+         * rcre_threadpool_parallel_for), so every field read here is valid, and
+         * the lock serializes this against a *new* parallel_for overwriting the
+         * batch's task_fn/arg/total — a worker always sees one consistent batch
+         * generation (no lost/duplicated task credits across generations).
+         * The pool is only freed in rcre_threadpool_destroy after all workers
+         * are joined, so the batch can never dangle. */
+        size_t task_id = atomic_fetch_add(&pool->batch.next_task, 1);
+        if (task_id >= pool->batch.total_tasks) {
+            /* No work left (overshoot): re-enter the wait loop. */
+            pthread_mutex_unlock(&pool->lock);
+            continue;
+        }
+        rcre_task_fn fn = pool->batch.task_fn;
+        void* batch_arg = pool->batch.arg;
         pthread_mutex_unlock(&pool->lock);
 
-        /* Work-stealing atomic loop */
-        while (true) {
-            size_t task_id = atomic_fetch_add(&batch->next_task, 1);
-            if (task_id >= batch->total_tasks) {
-                break;
-            }
+        fn(batch_arg, task_id);
 
-            batch->task_fn(batch->arg, task_id);
-            size_t completed = atomic_fetch_add(&batch->completed_tasks, 1) + 1;
-
-            if (completed == batch->total_tasks) {
-                pthread_mutex_lock(&pool->lock);
-                pthread_cond_broadcast(&pool->done_cond);
-                pthread_mutex_unlock(&pool->lock);
-            }
+        pthread_mutex_lock(&pool->lock);
+        size_t completed = atomic_fetch_add(&pool->batch.completed_tasks, 1) + 1;
+        if (completed == pool->batch.total_tasks) {
+            pthread_cond_broadcast(&pool->done_cond);
         }
+        pthread_mutex_unlock(&pool->lock);
     }
     return NULL;
 }
@@ -4061,27 +4071,27 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
         return;
     }
 
-    RCRE_WorkBatch batch;
-    batch.task_fn = task;
-    batch.arg = arg;
-    batch.total_tasks = count;
-    atomic_init(&batch.next_task, 0);
-    atomic_init(&batch.completed_tasks, 0);
-
+    RCRE_WorkBatch* batch = &pool->batch; /* embedded: lifetime >= pool */
     pthread_mutex_lock(&pool->lock);
-    pool->current_batch = &batch;
+    batch->task_fn = task;
+    batch->arg = arg;
+    batch->total_tasks = count;
+    atomic_init(&batch->next_task, 0);
+    atomic_init(&batch->completed_tasks, 0);
+    pool->current_batch = batch;
     pthread_cond_broadcast(&pool->work_cond);
 
-    /* Main thread participates in task execution */
+    /* Main thread participates in task execution (lock-free atomic dispatch;
+     * the main thread owns this batch for the duration of the call). */
     pthread_mutex_unlock(&pool->lock);
 
     while (true) {
-        size_t task_id = atomic_fetch_add(&batch.next_task, 1);
+        size_t task_id = atomic_fetch_add(&pool->batch.next_task, 1);
         if (task_id >= count) {
             break;
         }
         task(arg, task_id);
-        size_t completed = atomic_fetch_add(&batch.completed_tasks, 1) + 1;
+        size_t completed = atomic_fetch_add(&pool->batch.completed_tasks, 1) + 1;
         if (completed == count) {
             pthread_mutex_lock(&pool->lock);
             pthread_cond_broadcast(&pool->done_cond);
@@ -4091,7 +4101,7 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
 
     /* Wait for batch to finish */
     pthread_mutex_lock(&pool->lock);
-    while (atomic_load(&batch.completed_tasks) < count) {
+    while (atomic_load(&pool->batch.completed_tasks) < count) {
         pthread_cond_wait(&pool->done_cond, &pool->lock);
     }
     pool->current_batch = NULL;
@@ -4175,7 +4185,9 @@ void rcre_threadpool_destroy(RCRE_ThreadPool* pool) {
  * Platform probes:
  *   - ARM64 (Apple Silicon / Linux ARM): mrs cntvct_el0 (EL0-accessible on both
  *     macOS and Linux; validated empirically on Apple M5).
- *   - x86-64: RDTSC.
+ *   - x86-64: RDTSC, with a one-shot calibration of the TSC frequency against
+ *     a ~20 ms CLOCK_MONOTONIC window (nanosleep), so no platform-specific
+ *     frequency is hard-coded.
  *   - Fallback: CLOCK_MONOTONIC for both timing sources.
  *   - RSS: macOS MACH_TASK_BASIC_INFO / Linux /proc/self/statm.
  *   - CPU time: getrusage (both platforms).
@@ -4191,6 +4203,7 @@ void rcre_threadpool_destroy(RCRE_ThreadPool* pool) {
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdatomic.h>
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -4226,7 +4239,41 @@ uint64_t rcre_prof_cycles(void) {
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
-uint64_t rcre_prof_cycles_freq(void) { return 0; } /* calibrate if needed */
+static atomic_uint_fast64_t s_tsc_freq_hz = 0;
+uint64_t rcre_prof_cycles_freq(void) {
+    uint64_t f = atomic_load_explicit(&s_tsc_freq_hz, memory_order_acquire);
+    if (f) return f;
+    /* One-shot TSC calibration: count TSC ticks over a ~20 ms monotonic
+     * window. The long window keeps scheduler/overhead noise well below
+     * 1% of the estimate; safe to re-enter (idempotent). */
+    uint64_t t0 = rcre_prof_now_ns();
+    uint64_t c0 = rcre_prof_cycles();
+#if defined(__linux__) || defined(__APPLE__)
+    struct timespec req = { 0, 20000000 }; /* 20 ms */
+    struct timespec rem = { 0, 0 };
+    if (nanosleep(&req, &rem) != 0 && (rem.tv_sec > 0 || rem.tv_nsec > 0)) {
+        struct timespec rq = { rem.tv_sec, rem.tv_nsec }; /* interrupted: sleep the rest */
+        (void)nanosleep(&rq, &rem);
+    }
+#else
+    uint64_t until = t0 + 20000000ULL; /* 20 ms busy-wait fallback */
+    while (rcre_prof_now_ns() < until) { }
+#endif
+    uint64_t el_ns = rcre_prof_now_ns() - t0;
+    uint64_t dc = rcre_prof_cycles() - c0;
+    uint64_t cal;
+    if (el_ns < 1000000ULL || dc < 1000000ULL) {
+        cal = 1000000000ULL; /* degenerate measurement: assume 1 GHz nominal */
+    } else {
+        cal = (uint64_t)((double)dc * 1e9 / (double)el_ns);
+        if (cal == 0) cal = 1000000000ULL;
+    }
+    uint64_t expected = f;
+    if (!atomic_compare_exchange_weak(&s_tsc_freq_hz, &expected, cal)) {
+        cal = expected; /* a concurrent calibrator published first */
+    }
+    return cal ? cal : 1000000000ULL;
+}
 #else
 uint64_t rcre_prof_cycles(void) { return rcre_prof_now_ns(); }
 uint64_t rcre_prof_cycles_freq(void) { return 1000000000ULL; }
