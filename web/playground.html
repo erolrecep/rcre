@@ -669,6 +669,214 @@
     .badge-status.high { background: rgba(6, 182, 212, 0.2); color: var(--accent-cyan); }
     .badge-status.balanced { background: rgba(99, 102, 241, 0.2); color: #a5b4fc; }
     .badge-status.lossy { background: rgba(245, 158, 11, 0.2); color: var(--accent-amber); }
+
+    /* Navbar guideline pill */
+    .nav-guideline-pill {
+      background: rgba(99, 102, 241, 0.2);
+      border: 1px solid rgba(99, 102, 241, 0.5) !important;
+      border-radius: var(--radius-full);
+      padding: 0.35rem 0.85rem !important;
+      color: #c7d2fe !important;
+      font-weight: 600;
+      transition: all 0.2s ease;
+    }
+    .nav-guideline-pill:hover {
+      background: var(--accent-indigo) !important;
+      color: #ffffff !important;
+      box-shadow: var(--shadow-glow);
+    }
+
+    /* Template Guideline Section */
+    .template-guideline-section {
+      margin: 4.5rem 0 2rem;
+      padding: 2.75rem;
+      background: linear-gradient(145deg, rgba(15, 23, 42, 0.9), rgba(10, 13, 20, 0.98));
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      border-radius: var(--radius-lg);
+      box-shadow: 0 25px 50px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      position: relative;
+      overflow: hidden;
+    }
+    .template-guideline-section::before {
+      content: '';
+      position: absolute;
+      top: -100px;
+      right: -100px;
+      width: 320px;
+      height: 320px;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .guideline-header {
+      margin-bottom: 2rem;
+      text-align: left;
+    }
+    .guideline-header .section-tag {
+      display: inline-block;
+      margin-bottom: 0.5rem;
+    }
+    .guideline-title {
+      font-size: 1.85rem;
+      font-weight: 800;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .guideline-desc {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      max-width: 820px;
+      margin-top: 0.5rem;
+      line-height: 1.6;
+    }
+    .guideline-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 1.75rem;
+    }
+    .guideline-card {
+      background: rgba(30, 41, 59, 0.45);
+      border: 1px solid var(--border-glass);
+      border-radius: var(--radius-md);
+      padding: 1.75rem;
+      display: flex;
+      flex-direction: column;
+      backdrop-filter: blur(8px);
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+    .guideline-card:hover {
+      border-color: rgba(99, 102, 241, 0.45);
+      transform: translateY(-2px);
+    }
+    .guideline-card-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .guideline-terminal {
+      background: #050811;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: var(--radius-sm);
+      padding: 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: #e2e8f0;
+      position: relative;
+      margin: 0.75rem 0;
+      overflow-x: auto;
+      line-height: 1.6;
+    }
+    .guideline-terminal-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .term-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    .term-dot.red { background: #ef4444; }
+    .term-dot.yellow { background: #f59e0b; }
+    .term-dot.green { background: #10b981; }
+    .term-title {
+      margin-left: 0.5rem;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+    }
+    .guideline-copy-btn {
+      position: absolute;
+      top: 0.6rem;
+      right: 0.6rem;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: var(--radius-sm);
+      color: var(--text-muted);
+      padding: 0.25rem 0.6rem;
+      font-size: 0.72rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      transition: all 0.2s;
+    }
+    .guideline-copy-btn:hover {
+      background: var(--accent-indigo);
+      color: #fff;
+      border-color: var(--accent-indigo);
+    }
+    .guideline-step-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+    }
+    .guideline-step-item {
+      display: flex;
+      gap: 0.75rem;
+      align-items: flex-start;
+      padding: 0.65rem 0.85rem;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: var(--radius-sm);
+      font-size: 0.85rem;
+    }
+    .guideline-step-num {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: rgba(99, 102, 241, 0.25);
+      color: #a5b4fc;
+      border: 1px solid rgba(99, 102, 241, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.75rem;
+      flex-shrink: 0;
+    }
+    .guideline-step-content strong {
+      color: #e0e7ff;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+    .guideline-step-content p {
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      margin-top: 0.15rem;
+    }
+    .rule-item {
+      padding: 0.75rem 1rem;
+      background: rgba(15, 23, 42, 0.6);
+      border-left: 3px solid var(--accent-indigo);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      margin-bottom: 0.75rem;
+    }
+    .rule-item.rule-amber { border-left-color: var(--accent-amber); }
+    .rule-item.rule-emerald { border-left-color: var(--accent-emerald); }
+    .rule-item-title {
+      font-weight: 700;
+      font-size: 0.88rem;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .rule-item-desc {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
@@ -682,6 +890,7 @@
         <li><a href="index.html">Overview</a></li>
         <li><a href="docs/index.html">Documentation</a></li>
         <li><a href="playground.html" class="active">Webcam Playground</a></li>
+        <li><a href="#template-guideline" class="nav-guideline-pill">⚡ Starter Guide</a></li>
         <li><a href="learn/strides.html">3D Strides</a></li>
         <li><a href="learn/gemm_cache.html">Tiled GEMM</a></li>
         <li><a href="learn/stencils.html">SIMD Stencils</a></li>
@@ -1083,6 +1292,197 @@
               <tbody id="sweep-table-body">
               </tbody>
             </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================================
+         Starter Project Template Mini Guideline Section
+         =================================================================== -->
+    <section class="template-guideline-section" id="template-guideline">
+      <div class="guideline-header">
+        <div class="section-tag">Zero-Friction Developer Toolkit</div>
+        <div class="guideline-title">
+          <span>⚡ Build Locally with the RCRE Project Template</span>
+          <a href="https://github.com/erolrecep/rcre/tree/main/project-template" target="_blank" class="btn btn-secondary" style="font-size: 0.8rem; padding: 0.35rem 0.75rem; text-decoration: none;">
+            <span>GitHub Template Folder ↗</span>
+          </a>
+        </div>
+        <p class="guideline-desc">
+          Ready to take your algorithms beyond the browser? The turnkey <strong>project-template</strong> gives you a clean, zero-dependency C23 starter kit. 
+          No package managers, no CMake hurdles—just pure ISO C23 and the single-header engine.
+        </p>
+      </div>
+
+      <div class="guideline-grid">
+        <!-- Card 1: 60-Second Quickstart -->
+        <div class="guideline-card">
+          <div class="guideline-card-title">
+            <span>🚀 60-Second Quickstart</span>
+            <span class="badge-status high">Terminal</span>
+          </div>
+          <p style="font-size: 0.8rem; color: var(--text-muted);">
+            Clone the repository and build the hardware-accelerated 1080p pipeline in three commands:
+          </p>
+
+          <div class="guideline-terminal">
+            <div class="guideline-terminal-header">
+              <span class="term-dot red"></span>
+              <span class="term-dot yellow"></span>
+              <span class="term-dot green"></span>
+              <span class="term-title">bash — project-template</span>
+            </div>
+            <button class="guideline-copy-btn" onclick="copyGuidelineCode('term-quickstart', 'Quickstart commands copied!')">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span>Copy</span>
+            </button>
+            <pre id="term-quickstart"><span style="color: var(--accent-cyan);">cd</span> apps/rcre/project-template
+
+<span style="color: var(--text-dim);"># 1. Build & execute 1080p SIMD pipeline</span>
+<span style="color: var(--accent-indigo);">make</span> run
+
+<span style="color: var(--text-dim);"># 2. Run AddressSanitizer & UBSan tests</span>
+<span style="color: var(--accent-indigo);">make</span> test</pre>
+          </div>
+
+          <div style="font-size: 0.76rem; color: var(--text-dim); margin-top: auto; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <span style="background: rgba(255,255,255,0.04); padding: 0.2rem 0.45rem; border-radius: 4px;">⚡ &gt;7,500 MP/s on NEON</span>
+            <span style="background: rgba(255,255,255,0.04); padding: 0.2rem 0.45rem; border-radius: 4px;">🛡️ 100% ASan Clean</span>
+          </div>
+        </div>
+
+        <!-- Card 2: 5-Step Lifecycle -->
+        <div class="guideline-card">
+          <div class="guideline-card-title">
+            <span>🔄 The 5-Step C23 Lifecycle</span>
+            <span class="badge-status excellent">Architecture</span>
+          </div>
+          <p style="font-size: 0.8rem; color: var(--text-muted);">
+            Every RCRE program follows this predictable, zero-fragmentation pattern:
+          </p>
+
+          <div class="guideline-step-list">
+            <div class="guideline-step-item">
+              <div class="guideline-step-num">1</div>
+              <div class="guideline-step-content">
+                <strong>rcre_hal_init()</strong>
+                <p>Probes host CPU (ARM NEON, AVX2, or SIMD128) and wires dynamic dispatch tables.</p>
+              </div>
+            </div>
+            <div class="guideline-step-item">
+              <div class="guideline-step-num">2</div>
+              <div class="guideline-step-content">
+                <strong>rcre_arena_create(16MB)</strong>
+                <p>Allocates a 64-byte aligned contiguous memory pool. Zero malloc in hot paths.</p>
+              </div>
+            </div>
+            <div class="guideline-step-item">
+              <div class="guideline-step-num">3</div>
+              <div class="guideline-step-content">
+                <strong>rcre_tensor_create(...)</strong>
+                <p>Sub-allocates strided N-D tensors linearly in O(1) time without OS syscalls.</p>
+              </div>
+            </div>
+            <div class="guideline-step-item">
+              <div class="guideline-step-num">4</div>
+              <div class="guideline-step-content">
+                <strong>rcre_cv_rgb_to_gray(...)</strong>
+                <p>Executes vector micro-kernels delivering multi-gigapixel throughput.</p>
+              </div>
+            </div>
+            <div class="guideline-step-item">
+              <div class="guideline-step-num">5</div>
+              <div class="guideline-step-content">
+                <strong>rcre_arena_reset() / destroy()</strong>
+                <p>Rewinds offset in O(1) time between frames; clean single unmap on exit.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 3: Three Golden Rules -->
+        <div class="guideline-card">
+          <div class="guideline-card-title">
+            <span>📐 Three Golden Silicon Rules</span>
+            <span class="badge-status balanced">Best Practices</span>
+          </div>
+          <p style="font-size: 0.8rem; color: var(--text-muted);">
+            Keep your code blazingly fast and free from memory bugs:
+          </p>
+
+          <div style="margin-top: 0.5rem;">
+            <div class="rule-item rule-amber">
+              <div class="rule-item-title">
+                <span>🚫 Rule 1: Zero malloc() in Inner Loops</span>
+              </div>
+              <div class="rule-item-desc">
+                Heap allocation locks mutexes and fragments memory. Sub-allocate from your arena and call <code style="color: #fcd34d;">rcre_arena_reset()</code> at batch/frame boundaries.
+              </div>
+            </div>
+
+            <div class="rule-item rule-emerald">
+              <div class="rule-item-title">
+                <span>⚡ Rule 2: Strictly 64-Byte Aligned</span>
+              </div>
+              <div class="rule-item-desc">
+                Cache lines are 64 bytes. Vector load instructions saturate memory bus bandwidth when tensors are aligned to 64 bytes (handled automatically by RCRE).
+              </div>
+            </div>
+
+            <div class="rule-item">
+              <div class="rule-item-title">
+                <span>📦 Rule 3: Single Translation Unit Definition</span>
+              </div>
+              <div class="rule-item-desc">
+                Define <code style="color: #a5b4fc;">#define RCRE_IMPLEMENTATION</code> in exactly one file (<code style="color: var(--accent-cyan);">src/main.c</code>). In all other modules, just include <code style="color: var(--accent-cyan);">rcre.h</code>.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 4: Directory & Minimal Code Skeleton -->
+        <div class="guideline-card">
+          <div class="guideline-card-title">
+            <span>💻 Minimal Starter Skeleton</span>
+            <span class="badge-status high">C23 Code</span>
+          </div>
+          <p style="font-size: 0.8rem; color: var(--text-muted);">
+            Copy this minimal skeleton directly into your new project:
+          </p>
+
+          <div class="guideline-terminal" style="max-height: 220px;">
+            <button class="guideline-copy-btn" onclick="copyGuidelineCode('code-skeleton', 'C23 starter skeleton copied!')">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span>Copy</span>
+            </button>
+            <pre id="code-skeleton" style="font-size: 0.75rem;"><span style="color: var(--accent-amber);">#define RCRE_IMPLEMENTATION</span>
+<span style="color: var(--accent-amber);">#include "rcre.h"</span>
+
+<span style="color: #a5b4fc;">int</span> <span style="color: #38bdf8;">main</span>(<span style="color: #a5b4fc;">void</span>) {
+    <span style="color: var(--text-dim);">// 1. Probe CPU SIMD</span>
+    rcre_hal_init();
+
+    <span style="color: var(--text-dim);">// 2. Pre-allocate 16MB linear arena</span>
+    RCRE_Arena* arena = rcre_arena_create(16 * 1024 * 1024);
+
+    <span style="color: var(--text-dim);">// 3. Create strided tensor & execute</span>
+    size_t shape[3] = {1080, 1920, 3};
+    RCRE_Tensor img = rcre_tensor_create(shape, 3, RCRE_DTYPE_U8, RCRE_LAYOUT_HWC, arena);
+
+    <span style="color: var(--text-dim);">// 4. Free arena in O(1) single unmap</span>
+    rcre_arena_destroy(arena);
+    <span style="color: #a5b4fc;">return</span> 0;
+}</pre>
+          </div>
+
+          <div style="display: flex; gap: 0.5rem; margin-top: auto;">
+            <a href="https://github.com/erolrecep/rcre/blob/main/project-template/README.md" target="_blank" class="btn btn-secondary" style="font-size: 0.75rem; flex: 1; justify-content: center; text-decoration: none;">
+              <span>Full README ↗</span>
+            </a>
+            <a href="https://github.com/erolrecep/rcre/blob/main/project-template/GUIDELINES.md" target="_blank" class="btn btn-card-pca" style="font-size: 0.75rem; flex: 1; justify-content: center; text-decoration: none;">
+              <span>Developer Cheat Sheet ↗</span>
+            </a>
           </div>
         </div>
       </div>
@@ -2562,6 +2962,18 @@
       edgeThreshold = parseInt(e.target.value);
       document.getElementById('val-edge-thresh').innerText = edgeThreshold;
     });
+
+    // Helper to copy code snippets from guideline cards
+    function copyGuidelineCode(elementId, successMsg) {
+      const el = document.getElementById(elementId);
+      if (!el) return;
+      const text = el.innerText || el.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        showToast('Copied to Clipboard!', successMsg || 'Snippet copied.');
+      }).catch(() => {
+        showToast('Copy Failed', 'Please manually select and copy.');
+      });
+    }
 
     // Start video pipeline and initial PCA compression run
     renderPipeline();

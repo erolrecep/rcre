@@ -111,6 +111,22 @@ body {
   border: 1px solid var(--border-glass);
 }
 
+.nav-guideline-pill {
+  background: rgba(99, 102, 241, 0.2);
+  border: 1px solid rgba(99, 102, 241, 0.5) !important;
+  border-radius: var(--radius-full);
+  padding: 0.35rem 0.85rem !important;
+  color: #c7d2fe !important;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.nav-guideline-pill:hover {
+  background: var(--accent-indigo) !important;
+  color: #ffffff !important;
+  box-shadow: var(--shadow-glow);
+}
+
 .btn-cta {
   background: linear-gradient(135deg, var(--accent-indigo), var(--accent-violet));
   color: #fff !important;

@@ -84,6 +84,14 @@ In addition to modular core kernels and unit benchmarks, RCRE includes nine self
 apps/rcre/
 ├── dist/
 │   └── rcre.h                  # Amalgamated single-header C23 release (456 KB, 12,805 lines)
+├── project-template/           # Turnkey starter project with rcre.h, main.c, tests, Makefile & docs
+│   ├── include/rcre.h          # Single-header engine distribution
+│   ├── src/main.c              # Pedagogical starter app with 1080p SIMD pipeline
+│   ├── tests/test_main.c       # ASan/UBSan unit test runner
+│   ├── Makefile                # Turnkey build targets (all, run, test, clean, help)
+│   ├── logs/sample_run.log     # Sample telemetry execution log
+│   ├── README.md               # Complete newcomer onboarding manual
+│   └── GUIDELINES.md           # Developer mini guideline & silicon best practices cheat sheet
 ├── include/
 │   ├── rcre.h                  # Core public C23 header & CV APIs
 │   ├── rcre_prof.h             # High-frequency hardware profiler & telemetry header
@@ -244,6 +252,36 @@ make profile
 # 🔒 Verify standalone portability of single-header dist/rcre.h in a clean sandbox
 make test-portable
 ```
+
+---
+
+### Option 3: Turnkey Starter Template & Mini Guideline (`project-template/`)
+
+For newcomers starting a new application without tackling build-system complexities or external dependencies, RCRE provides a turnkey starter kit in [`project-template/`](project-template/):
+
+```bash
+# 1. Enter the starter template
+cd project-template
+
+# 2. Build & run optimized release binary (1080p SIMD Rec.601 pipeline > 7,500 MP/s)
+make run
+
+# 3. Verify under AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan)
+make test
+```
+
+#### The 5-Step RCRE Architecture
+```text
+[1. rcre_hal_init()]  -->  [2. rcre_arena_create(16MB)]  -->  [3. rcre_tensor_create(HWC)]  -->  [4. SIMD CV/ML Kernel]  -->  [5. rcre_arena_reset()]
+ (Probe Host CPU)           (64-byte aligned pool)             (Zero syscall allocations)          (High-throughput vector math)    (O(1) memory rewind)
+```
+
+#### Core Silicon Rules for Newcomers
+1. **Zero `malloc()` in Inner Loops**: Allocate all temporary buffers from `RCRE_Arena` and call `rcre_arena_reset()` between frames or iterations.
+2. **64-Byte Alignment**: Always preserve 64-byte alignment boundaries for maximum vector memory bandwidth (enforced automatically by arenas).
+3. **Single Translation Unit Implementation**: Define `#define RCRE_IMPLEMENTATION` in `main.c` only; include `rcre.h` cleanly everywhere else.
+
+📖 *For the complete onboarding guide, see [`project-template/README.md`](project-template/README.md) and the developer cheat sheet [`project-template/GUIDELINES.md`](project-template/GUIDELINES.md).*
 
 ---
 

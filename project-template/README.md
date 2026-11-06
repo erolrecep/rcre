@@ -1,6 +1,8 @@
 # RCRE Project Starter Template
 
 > **Get started with RCRE in under 60 seconds.** Zero external package managers, zero build-system complications, pure modern C23, and a single-header distribution.
+> 
+> ⚡ *Looking for a quick cheat sheet and silicon best practices? See the [Developer Mini Guideline](GUIDELINES.md).*
 
 ---
 
@@ -25,6 +27,7 @@ This template eliminates that complexity:
 project-template/
 ├── Makefile                # Turnkey build system (all, run, test, clean)
 ├── README.md               # Complete newcomer onboarding manual (you are here)
+├── GUIDELINES.md           # Developer mini guideline & silicon best practices cheat sheet
 ├── .gitignore              # Ignores build binaries and object artifacts
 ├── include/
 │   └── rcre.h              # Amalgamated single-header C23 RCRE engine (~14k lines)
@@ -265,3 +268,4 @@ Now that you have your project up and running:
 - Explore the **RCRE Book**: Learn the mathematical foundations of strided tensors, SIMD kernels, and cache memory hierarchies.
 - Inspect the **Production Projects**: Check `apps/rcre/projects/` (or Appendix A in the RCRE book) to see how RCRE powers real-world face expression analysis, document super-resolution, PCA compression, HNSW vector search, and gradient boosting trees.
 - Happy hacking with C23!
+
