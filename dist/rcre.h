@@ -2069,8 +2069,10 @@ void rcre_neon_axpy_f32(size_t n, float alpha, const float* x, float* y);
 void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
 #endif
 
-/* x86 AVX2 256-bit Micro-Kernels */
-#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+/* x86 AVX2 256-bit Micro-Kernels (declarations only need x86-64; the
+ * definitions in kernels_avx2.c remain gated on __AVX2__, which is set by
+ * compiling that translation unit with -mavx2) */
+#if defined(__x86_64__) || defined(_M_X64)
 void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
                         const float* A, size_t lda, 
                         const float* B, size_t ldb, 
@@ -3293,8 +3295,14 @@ void rcre_hal_init(void) {
     }
 #endif
 
-#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
-    if (feats & RCRE_CPU_FEAT_AVX2) {
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Runtime dispatch: the AVX2 kernel lives in kernels_avx2.c (compiled with
+     * -mavx2 -mfma) and is referenced through function pointers, so this file
+     * itself must NOT be gated on the compile-time __AVX2__ macro — that macro
+     * is only defined when *this* translation unit is built with -mavx2, which
+     * the Makefile intentionally does not do for the dispatcher. Selecting the
+     * backend on the runtime CPUID probe alone keeps SIMD active on AVX2 CPUs. */
+    if ((feats & RCRE_CPU_FEAT_AVX2) && (feats & RCRE_CPU_FEAT_FMA)) {
         rcre_hal.backend_name   = "x86 AVX2 256-bit";
         rcre_hal.cpu_features   = feats;
         rcre_hal.gemm_f32       = rcre_avx2_gemm_f32;

@@ -40,8 +40,14 @@ void rcre_hal_init(void) {
     }
 #endif
 
-#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
-    if (feats & RCRE_CPU_FEAT_AVX2) {
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Runtime dispatch: the AVX2 kernel lives in kernels_avx2.c (compiled with
+     * -mavx2 -mfma) and is referenced through function pointers, so this file
+     * itself must NOT be gated on the compile-time __AVX2__ macro — that macro
+     * is only defined when *this* translation unit is built with -mavx2, which
+     * the Makefile intentionally does not do for the dispatcher. Selecting the
+     * backend on the runtime CPUID probe alone keeps SIMD active on AVX2 CPUs. */
+    if ((feats & RCRE_CPU_FEAT_AVX2) && (feats & RCRE_CPU_FEAT_FMA)) {
         rcre_hal.backend_name   = "x86 AVX2 256-bit";
         rcre_hal.cpu_features   = feats;
         rcre_hal.gemm_f32       = rcre_avx2_gemm_f32;
