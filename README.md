@@ -91,6 +91,7 @@ apps/rcre/
 │   ├── Makefile                # Turnkey build targets (all, run, test, clean, help)
 │   ├── logs/sample_run.log     # Sample telemetry execution log
 │   ├── README.md               # Complete newcomer onboarding manual
+│   ├── MINI_EBOOK.md           # 10-page visual gentle guide for non-CS practitioners
 │   └── GUIDELINES.md           # Developer mini guideline & silicon best practices cheat sheet
 ├── include/
 │   ├── rcre.h                  # Core public C23 header & CV APIs
@@ -281,7 +282,7 @@ make test
 2. **64-Byte Alignment**: Always preserve 64-byte alignment boundaries for maximum vector memory bandwidth (enforced automatically by arenas).
 3. **Single Translation Unit Implementation**: Define `#define RCRE_IMPLEMENTATION` in `main.c` only; include `rcre.h` cleanly everywhere else.
 
-📖 *For the complete onboarding guide, see [`project-template/README.md`](project-template/README.md) and the developer cheat sheet [`project-template/GUIDELINES.md`](project-template/GUIDELINES.md).*
+📖 *Non-CS background? Read our visual [10-Page Mini E-Book](project-template/MINI_EBOOK.md) (or on the [Book Website](https://erolrecep.github.io/rcre-book/chapters/starter_guide_ebook/))! For the full technical reference, see [`project-template/README.md`](project-template/README.md) and the developer cheat sheet [`project-template/GUIDELINES.md`](project-template/GUIDELINES.md).*
 
 ---
 

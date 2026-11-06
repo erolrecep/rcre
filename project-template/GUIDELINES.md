@@ -1,6 +1,8 @@
 # RCRE Project Starter Template — Developer Mini Guideline
 
 > **Compact Cheat Sheet & Best Practices for Building High-Performance C23 Applications.**
+> 
+> 📖 *For a gentle 10-page visual explanation for non-CS practitioners, see the [Beginner's Mini E-Book](MINI_EBOOK.md).*
 
 ---
 
@@ -31,6 +33,7 @@ make clean
 | [`tests/test_main.c`](tests/test_main.c) | Zero-dependency unit tests running under `-fsanitize=address,undefined`. |
 | [`Makefile`](Makefile) | Turnkey build file supporting `-O3`, ASan, UBSan, and real-time execution telemetry. |
 | [`logs/sample_run.log`](logs/sample_run.log) | Benchmark execution log capturing latencies and throughput metrics. |
+| [`MINI_EBOOK.md`](MINI_EBOOK.md) | 10-page visual gentle guide for non-CS engineers and scientists. |
 
 ---
 
@@ -140,3 +143,4 @@ make test
 ```
 - **AddressSanitizer (ASan)** will catch buffer overflows, off-by-one errors, and memory leaks.
 - **UndefinedBehaviorSanitizer (UBSan)** will catch integer overflows, null pointer dereferences, and misalignment.
+

@@ -2,6 +2,7 @@
 
 > **Get started with RCRE in under 60 seconds.** Zero external package managers, zero build-system complications, pure modern C23, and a single-header distribution.
 > 
+> 📖 *Non-CS background or new to C? Read our visual [10-Page Mini E-Book](MINI_EBOOK.md)!*  
 > ⚡ *Looking for a quick cheat sheet and silicon best practices? See the [Developer Mini Guideline](GUIDELINES.md).*
 
 ---
@@ -27,6 +28,7 @@ This template eliminates that complexity:
 project-template/
 ├── Makefile                # Turnkey build system (all, run, test, clean)
 ├── README.md               # Complete newcomer onboarding manual (you are here)
+├── MINI_EBOOK.md           # 10-page visual gentle guide for non-CS practitioners
 ├── GUIDELINES.md           # Developer mini guideline & silicon best practices cheat sheet
 ├── .gitignore              # Ignores build binaries and object artifacts
 ├── include/
