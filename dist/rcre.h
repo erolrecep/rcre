@@ -2646,11 +2646,22 @@ void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
  */
 
 
-#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+#if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #include <string.h>
 
-float rcre_avx2_dot_f32(const float* x, const float* y, size_t n) {
+/* The kernels below emit AVX2+FMA instructions, so each is compiled with a
+ * per-function target attribute instead of requiring -mavx2 for the whole
+ * translation unit. This keeps the amalgamated dist/rcre.h linkable when it
+ * is compiled without -mavx2 (the dispatcher selects these at runtime only
+ * on CPUs that advertise AVX2+FMA). */
+#if defined(__GNUC__) || defined(__clang__)
+#define RCRE_AVX2_TARGET __attribute__((target("avx2,fma")))
+#else
+#define RCRE_AVX2_TARGET
+#endif
+
+RCRE_AVX2_TARGET float rcre_avx2_dot_f32(const float* x, const float* y, size_t n) {
     __m256 sum0 = _mm256_setzero_ps();
     __m256 sum1 = _mm256_setzero_ps();
 
@@ -2684,7 +2695,7 @@ float rcre_avx2_dot_f32(const float* x, const float* y, size_t n) {
     return total;
 }
 
-void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y) {
+RCRE_AVX2_TARGET void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y) {
     __m256 a_vec = _mm256_set1_ps(alpha);
 
     size_t i = 0;
@@ -2704,7 +2715,7 @@ void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y) {
 }
 
 /* 4x16 register-blocked GEMM micro-kernel on AVX2 + FMA (8 YMM accumulators) */
-static void avx2_gemm_microkernel_4x16(size_t K, float alpha,
+RCRE_AVX2_TARGET static void avx2_gemm_microkernel_4x16(size_t K, float alpha,
                                        const float* A, size_t lda,
                                        const float* B, size_t ldb,
                                        float beta, float* C, size_t ldc) {
@@ -2758,7 +2769,7 @@ static void avx2_gemm_microkernel_4x16(size_t K, float alpha,
 }
 
 /* 4x8 register-blocked GEMM micro-kernel fallback for narrower column blocks */
-static void avx2_gemm_microkernel_4x8(size_t K, float alpha,
+RCRE_AVX2_TARGET static void avx2_gemm_microkernel_4x8(size_t K, float alpha,
                                       const float* A, size_t lda,
                                       const float* B, size_t ldb,
                                       float beta, float* C, size_t ldc) {
@@ -2792,7 +2803,7 @@ static void avx2_gemm_microkernel_4x8(size_t K, float alpha,
     #undef STORE_ROW_AVX2_8
 }
 
-void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
+RCRE_AVX2_TARGET void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
                         const float* A, size_t lda, 
                         const float* B, size_t ldb, 
                         float beta, float* C, size_t ldc) {
@@ -2867,7 +2878,7 @@ void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha,
     }
 }
 
-void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels) {
+RCRE_AVX2_TARGET void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels) {
     const __m128i shuf_r = _mm_setr_epi8(0, 3, 6, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
     const __m128i shuf_g = _mm_setr_epi8(1, 4, 7, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
     const __m128i shuf_b = _mm_setr_epi8(2, 5, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
@@ -2934,7 +2945,7 @@ void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
     }
 }
 
-#endif /* (__x86_64__ || _M_X64) && __AVX2__ */
+#endif /* defined(__x86_64__) || defined(_M_X64) */
 
 /* --- Source: kernels_wasm.c --- */
 /**
