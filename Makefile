@@ -33,6 +33,7 @@ else
 endif
 
 SRCS = src/core/arena.c \
+       src/core/slice.c \
        src/core/tensor.c \
        src/core/adapt.c \
        src/core/threadpool.c \
@@ -76,7 +77,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse
+TESTS = test_arena test_slice test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -288,6 +289,7 @@ test-portable: $(AMALGAMATED_HEADER)
 test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@echo "🚀 Running RCRE Full Unit Test Suite (Core, Camera & Amalgamated)..."
 	@bin/test_arena
+	@bin/test_slice
 	@bin/test_tensor_strides
 	@bin/test_adapt_spec
 	@bin/test_threadpool
@@ -321,6 +323,8 @@ test-sanitizers: $(AMALGAMATED_HEADER)
 	@echo "🛡️ Compiling and running tests with AddressSanitizer & UBSan..."
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_arena.c -lm -lpthread -o bin/test_arena_asan
 	@bin/test_arena_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_slice.c -lm -lpthread -o bin/test_slice_asan
+	@bin/test_slice_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_tensor_strides.c -lm -lpthread -o bin/test_tensor_strides_asan
 	@bin/test_tensor_strides_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_adapt_spec.c -lm -lpthread -o bin/test_adapt_spec_asan

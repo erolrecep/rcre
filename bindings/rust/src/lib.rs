@@ -10,6 +10,9 @@ pub struct RCRE_Arena {
     pub buffer: *mut u8,
     pub capacity: usize,
     pub offset: usize,
+    pub high_watermark: usize,
+    pub alloc_count: usize,
+    pub rewind_count: usize,
 }
 
 #[repr(C)]

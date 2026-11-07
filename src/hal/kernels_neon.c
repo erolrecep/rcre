@@ -248,4 +248,116 @@ void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
     }
 }
 
+static inline size_t neon_first_match_16(uint8x16_t cmp) {
+    /* Pack 16 0xFF/0x00 bytes into 16 4-bit nibbles in a single 64-bit word */
+    uint8x8_t narrowed = vshrn_n_u16(vreinterpretq_u16_u8(cmp), 4);
+    uint64_t mask = vget_lane_u64(vreinterpret_u64_u8(narrowed), 0);
+    return (size_t)(__builtin_ctzll(mask) >> 2);
+}
+
+size_t rcre_neon_find_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return RCRE_NPOS;
+    }
+
+    const uint8x16_t vn = vdupq_n_u8(needle);
+    size_t i = 0;
+
+    /* 64-byte unrolled fast scan across 4 NEON registers */
+    for (; i + 63 < len; i += 64) {
+        uint8x16_t c0 = vceqq_u8(vld1q_u8(&hay[i +  0]), vn);
+        uint8x16_t c1 = vceqq_u8(vld1q_u8(&hay[i + 16]), vn);
+        uint8x16_t c2 = vceqq_u8(vld1q_u8(&hay[i + 32]), vn);
+        uint8x16_t c3 = vceqq_u8(vld1q_u8(&hay[i + 48]), vn);
+
+        uint8x16_t any = vorrq_u8(vorrq_u8(c0, c1), vorrq_u8(c2, c3));
+#if defined(__aarch64__)
+        if (vmaxvq_u8(any) != 0) {
+            if (vmaxvq_u8(c0) != 0) return i +  0 + neon_first_match_16(c0);
+            if (vmaxvq_u8(c1) != 0) return i + 16 + neon_first_match_16(c1);
+            if (vmaxvq_u8(c2) != 0) return i + 32 + neon_first_match_16(c2);
+            return i + 48 + neon_first_match_16(c3);
+        }
+#else
+        uint64x2_t any64 = vreinterpretq_u64_u8(any);
+        if ((vgetq_lane_u64(any64, 0) | vgetq_lane_u64(any64, 1)) != 0) {
+            for (size_t k = 0; k < 64; ++k) {
+                if (hay[i + k] == needle) return i + k;
+            }
+        }
+#endif
+    }
+
+    for (; i + 15 < len; i += 16) {
+        uint8x16_t c0 = vceqq_u8(vld1q_u8(&hay[i]), vn);
+#if defined(__aarch64__)
+        if (vmaxvq_u8(c0) != 0) {
+            return i + neon_first_match_16(c0);
+        }
+#else
+        uint64x2_t c64 = vreinterpretq_u64_u8(c0);
+        if ((vgetq_lane_u64(c64, 0) | vgetq_lane_u64(c64, 1)) != 0) {
+            for (size_t k = 0; k < 16; ++k) {
+                if (hay[i + k] == needle) return i + k;
+            }
+        }
+#endif
+    }
+
+    for (; i < len; ++i) {
+        if (hay[i] == needle) {
+            return i;
+        }
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_neon_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return 0;
+    }
+
+    const uint8x16_t vn = vdupq_n_u8(needle);
+    size_t total = 0;
+    size_t i = 0;
+
+    /* Accumulate up to 255 iterations in uint8 lanes before widening reduction */
+    while (i + 63 < len) {
+        uint8x16_t acc0 = vdupq_n_u8(0);
+        uint8x16_t acc1 = vdupq_n_u8(0);
+        uint8x16_t acc2 = vdupq_n_u8(0);
+        uint8x16_t acc3 = vdupq_n_u8(0);
+
+        size_t block_iters = (len - i) / 64;
+        if (block_iters > 255) {
+            block_iters = 255;
+        }
+        for (size_t b = 0; b < block_iters; ++b, i += 64) {
+            /* vceqq_u8 yields 0xFF (-1 in mod 256) on match; subtracting adds +1 */
+            acc0 = vsubq_u8(acc0, vceqq_u8(vld1q_u8(&hay[i +  0]), vn));
+            acc1 = vsubq_u8(acc1, vceqq_u8(vld1q_u8(&hay[i + 16]), vn));
+            acc2 = vsubq_u8(acc2, vceqq_u8(vld1q_u8(&hay[i + 32]), vn));
+            acc3 = vsubq_u8(acc3, vceqq_u8(vld1q_u8(&hay[i + 48]), vn));
+        }
+
+        uint16x8_t s16 = vpaddlq_u8(acc0);
+        s16 = vpadalq_u8(s16, acc1);
+        s16 = vpadalq_u8(s16, acc2);
+        s16 = vpadalq_u8(s16, acc3);
+
+        uint32x4_t s32 = vpaddlq_u16(s16);
+        uint64x2_t s64 = vpaddlq_u32(s32);
+#if defined(__aarch64__)
+        total += (size_t)vaddvq_u64(s64);
+#else
+        total += (size_t)(vgetq_lane_u64(s64, 0) + vgetq_lane_u64(s64, 1));
+#endif
+    }
+
+    for (; i < len; ++i) {
+        total += (size_t)(hay[i] == needle);
+    }
+    return total;
+}
+
 #endif /* __ARM_NEON || __aarch64__ */

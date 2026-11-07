@@ -165,6 +165,55 @@ static void test_hal_rgb_to_gray_u8(void) {
     free(gray_ref);
 }
 
+static void test_hal_simd_byte_scanners(void) {
+    /* Large buffer (> 255 * 64 = 16,320 bytes) to exercise uint8 lane overflow batching */
+    const size_t N = 40019;
+    uint8_t* buf = (uint8_t*)malloc(N);
+    ASSERT_NOT_NULL(buf);
+    memset(buf, '.', N);
+
+    /* Test find_byte at every SIMD lane alignment & boundary */
+    const size_t positions[] = {0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 511, 16384, 40018};
+    for (size_t p = 0; p < sizeof(positions) / sizeof(positions[0]); ++p) {
+        size_t pos = positions[p];
+        buf[pos] = '\n';
+        /* Also test unaligned base pointer (+1, +3, +7) */
+        for (size_t skew = 0; skew <= 7 && skew <= pos; ++skew) {
+            size_t found = rcre_hal.find_byte(buf + skew, N - skew, '\n');
+            ASSERT_UINT_EQ(pos - skew, found);
+        }
+        buf[pos] = '.';
+    }
+    ASSERT_UINT_EQ(RCRE_NPOS, rcre_hal.find_byte(buf, N, '\n'));
+
+    /* Test dense count_byte (every byte matches -> tests >255 uint8 accumulator saturation safety) */
+    ASSERT_UINT_EQ(N, rcre_hal.count_byte(buf, N, '.'));
+    ASSERT_UINT_EQ(0, rcre_hal.count_byte(buf, N, '\n'));
+
+    /* Sparse pseudo-random pattern parity vs scalar */
+    size_t expected_nl = 0;
+    for (size_t i = 0; i < N; ++i) {
+        if ((i * 131 + 17) % 29 == 0) {
+            buf[i] = '\n';
+            expected_nl++;
+        }
+    }
+    ASSERT_UINT_EQ(expected_nl, rcre_hal.count_byte(buf, N, '\n'));
+
+    free(buf);
+}
+
+static void test_cpu_topology_and_pressure(void) {
+    RCRE_CpuTopology topo = rcre_cpu_get_topology();
+    ASSERT_TRUE(topo.logical_cores >= 1);
+    ASSERT_TRUE(topo.perf_cores >= 1);
+    ASSERT_TRUE(topo.effective_quota_cores >= 1);
+    ASSERT_TRUE(topo.effective_quota_cores <= topo.logical_cores);
+
+    int pressure = rcre_cpu_get_memory_pressure();
+    ASSERT_TRUE(pressure >= 0 && pressure <= 2);
+}
+
 int main(void) {
     test_suite_begin("RCRE Hardware Abstraction Layer & SIMD (HAL-REQ-01 to 04)");
     TEST_RUN(test_cpu_probe_and_backend);
@@ -172,5 +221,7 @@ int main(void) {
     TEST_RUN(test_hal_axpy_f32);
     TEST_RUN(test_hal_gemm_f32);
     TEST_RUN(test_hal_rgb_to_gray_u8);
+    TEST_RUN(test_hal_simd_byte_scanners);
+    TEST_RUN(test_cpu_topology_and_pressure);
     return test_suite_report();
 }

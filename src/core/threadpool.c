@@ -20,6 +20,12 @@
 #include <unistd.h>
 #include <pthread.h>
 
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#elif defined(__linux__)
+#include <sched.h>
+#endif
+
 typedef struct RCRE_WorkBatch {
     rcre_task_fn task_fn;
     void*        arg;
@@ -31,24 +37,56 @@ typedef struct RCRE_WorkBatch {
 struct RCRE_ThreadPool {
     pthread_t*      threads;
     size_t          num_threads;
+    RCRE_QoSClass   qos;
     pthread_mutex_t lock;
     pthread_cond_t  work_cond;
     pthread_cond_t  done_cond;
-    RCRE_WorkBatch* current_batch;
-    RCRE_WorkBatch  batch;   /* Embedded (heap lifetime via the pool): workers may
-                                keep a pointer to it after rcre_threadpool_parallel_for
-                                returned; destroy() joins all workers before freeing
-                                the pool, so the batch can never dangle. */
+    RCRE_WorkBatch  batch;
+    size_t          active_workers;
+    bool            has_batch;
     bool            stop;
 };
 
+static void tp_apply_worker_qos(RCRE_QoSClass qos) {
+#if defined(__APPLE__)
+    switch (qos) {
+        case RCRE_QOS_PERF:
+            (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+            break;
+        case RCRE_QOS_EFFICIENCY:
+            (void)pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+            break;
+        case RCRE_QOS_BACKGROUND:
+            (void)pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+            break;
+        case RCRE_QOS_DEFAULT:
+        default:
+            break;
+    }
+#elif defined(__linux__)
+    struct sched_param sp = { .sched_priority = 0 };
+    if (qos == RCRE_QOS_BACKGROUND) {
+  #if defined(SCHED_IDLE)
+        (void)pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp);
+  #endif
+    } else if (qos == RCRE_QOS_EFFICIENCY) {
+  #if defined(SCHED_BATCH)
+        (void)pthread_setschedparam(pthread_self(), SCHED_BATCH, &sp);
+  #endif
+    }
+#else
+    (void)qos;
+#endif
+}
+
 static void* worker_routine(void* arg) {
     RCRE_ThreadPool* pool = (RCRE_ThreadPool*)arg;
+    tp_apply_worker_qos(pool->qos);
 
     while (true) {
         pthread_mutex_lock(&pool->lock);
-        while (!pool->stop && (!pool->current_batch ||
-               atomic_load(&pool->current_batch->next_task) >= pool->current_batch->total_tasks)) {
+        while (!pool->stop && (!pool->has_batch ||
+               atomic_load(&pool->batch.next_task) >= pool->batch.total_tasks)) {
             pthread_cond_wait(&pool->work_cond, &pool->lock);
         }
 
@@ -57,28 +95,27 @@ static void* worker_routine(void* arg) {
             break;
         }
 
-        /* Dispatch under the lock: the batch is embedded in the pool (it outlives
-         * rcre_threadpool_parallel_for), so every field read here is valid, and
-         * the lock serializes this against a *new* parallel_for overwriting the
-         * batch's task_fn/arg/total — a worker always sees one consistent batch
-         * generation (no lost/duplicated task credits across generations).
-         * The pool is only freed in rcre_threadpool_destroy after all workers
-         * are joined, so the batch can never dangle. */
-        size_t task_id = atomic_fetch_add(&pool->batch.next_task, 1);
-        if (task_id >= pool->batch.total_tasks) {
-            /* No work left (overshoot): re-enter the wait loop. */
-            pthread_mutex_unlock(&pool->lock);
-            continue;
-        }
+        pool->active_workers++;
+        size_t total = pool->batch.total_tasks;
         rcre_task_fn fn = pool->batch.task_fn;
-        void* batch_arg = pool->batch.arg;
+        void* fn_arg = pool->batch.arg;
         pthread_mutex_unlock(&pool->lock);
 
-        fn(batch_arg, task_id);
+        /* Work-stealing atomic loop */
+        while (true) {
+            size_t task_id = atomic_fetch_add(&pool->batch.next_task, 1);
+            if (task_id >= total) {
+                break;
+            }
+
+            fn(fn_arg, task_id);
+            atomic_fetch_add(&pool->batch.completed_tasks, 1);
+        }
 
         pthread_mutex_lock(&pool->lock);
-        size_t completed = atomic_fetch_add(&pool->batch.completed_tasks, 1) + 1;
-        if (completed == pool->batch.total_tasks) {
+        pool->active_workers--;
+        if (pool->active_workers == 0 &&
+            atomic_load(&pool->batch.completed_tasks) >= pool->batch.total_tasks) {
             pthread_cond_broadcast(&pool->done_cond);
         }
         pthread_mutex_unlock(&pool->lock);
@@ -86,22 +123,28 @@ static void* worker_routine(void* arg) {
     return NULL;
 }
 
-RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads) {
+RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create_ex(size_t num_threads, RCRE_QoSClass qos) {
     if (num_threads == 0) {
-#if defined(_SC_NPROCESSORS_ONLN)
-        long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
-        num_threads = (nprocs > 0) ? (size_t)nprocs : 4;
-#else
-        num_threads = 4;
-#endif
+        RCRE_CpuTopology topo = rcre_cpu_get_topology();
+        if (qos == RCRE_QOS_PERF && topo.perf_cores > 0) {
+            num_threads = (topo.perf_cores < topo.effective_quota_cores)
+                          ? topo.perf_cores : topo.effective_quota_cores;
+        } else if (qos == RCRE_QOS_EFFICIENCY && topo.eff_cores > 0) {
+            num_threads = (topo.eff_cores < topo.effective_quota_cores)
+                          ? topo.eff_cores : topo.effective_quota_cores;
+        } else {
+            num_threads = (topo.effective_quota_cores > 0) ? topo.effective_quota_cores : 4;
+        }
     }
 
     RCRE_ThreadPool* pool = (RCRE_ThreadPool*)malloc(sizeof(RCRE_ThreadPool));
     if (!pool) return NULL;
 
     pool->num_threads = num_threads;
+    pool->qos = qos;
+    pool->active_workers = 0;
+    pool->has_batch = false;
     pool->stop = false;
-    pool->current_batch = NULL;
 
     pthread_mutex_init(&pool->lock, NULL);
     pthread_cond_init(&pool->work_cond, NULL);
@@ -124,6 +167,10 @@ RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads) {
     return pool;
 }
 
+RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads) {
+    return rcre_threadpool_create_ex(num_threads, RCRE_QOS_DEFAULT);
+}
+
 void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task_fn task, void* arg) {
     if (count == 0 || !task) return;
 
@@ -135,18 +182,16 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
         return;
     }
 
-    RCRE_WorkBatch* batch = &pool->batch; /* embedded: lifetime >= pool */
     pthread_mutex_lock(&pool->lock);
-    batch->task_fn = task;
-    batch->arg = arg;
-    batch->total_tasks = count;
-    atomic_init(&batch->next_task, 0);
-    atomic_init(&batch->completed_tasks, 0);
-    pool->current_batch = batch;
+    pool->batch.task_fn = task;
+    pool->batch.arg = arg;
+    pool->batch.total_tasks = count;
+    atomic_init(&pool->batch.next_task, 0);
+    atomic_init(&pool->batch.completed_tasks, 0);
+    pool->has_batch = true;
     pthread_cond_broadcast(&pool->work_cond);
 
-    /* Main thread participates in task execution (lock-free atomic dispatch;
-     * the main thread owns this batch for the duration of the call). */
+    /* Main thread participates in task execution */
     pthread_mutex_unlock(&pool->lock);
 
     while (true) {
@@ -155,20 +200,15 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
             break;
         }
         task(arg, task_id);
-        size_t completed = atomic_fetch_add(&pool->batch.completed_tasks, 1) + 1;
-        if (completed == count) {
-            pthread_mutex_lock(&pool->lock);
-            pthread_cond_broadcast(&pool->done_cond);
-            pthread_mutex_unlock(&pool->lock);
-        }
+        atomic_fetch_add(&pool->batch.completed_tasks, 1);
     }
 
-    /* Wait for batch to finish */
+    /* Wait for all tasks AND all in-flight worker drains to finish */
     pthread_mutex_lock(&pool->lock);
-    while (atomic_load(&pool->batch.completed_tasks) < count) {
+    while (atomic_load(&pool->batch.completed_tasks) < count || pool->active_workers > 0) {
         pthread_cond_wait(&pool->done_cond, &pool->lock);
     }
-    pool->current_batch = NULL;
+    pool->has_batch = false;
     pthread_mutex_unlock(&pool->lock);
 }
 

@@ -224,4 +224,57 @@ void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
     }
 }
 
+size_t rcre_wasm_find_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return RCRE_NPOS;
+    }
+
+    const v128_t vn = wasm_i8x16_splat((int8_t)needle);
+    size_t i = 0;
+
+    for (; i + 15 < len; i += 16) {
+        uint32_t m = (uint32_t)wasm_i8x16_bitmask(wasm_i8x16_eq(wasm_v128_load(&hay[i]), vn));
+        if (m != 0) {
+            return i + (size_t)__builtin_ctz(m);
+        }
+    }
+
+    for (; i < len; ++i) {
+        if (hay[i] == needle) return i;
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_wasm_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return 0;
+    }
+
+    const v128_t vn = wasm_i8x16_splat((int8_t)needle);
+    size_t total = 0;
+    size_t i = 0;
+
+    while (i + 15 < len) {
+        v128_t acc = wasm_i8x16_splat(0);
+        size_t block_iters = (len - i) / 16;
+        if (block_iters > 255) {
+            block_iters = 255;
+        }
+        for (size_t b = 0; b < block_iters; ++b, i += 16) {
+            acc = wasm_i8x16_sub(acc, wasm_i8x16_eq(wasm_v128_load(&hay[i]), vn));
+        }
+        v128_t s16 = wasm_u16x8_extadd_pairwise_u8x16(acc);
+        v128_t s32 = wasm_u32x4_extadd_pairwise_u16x8(s16);
+        total += (size_t)wasm_u32x4_extract_lane(s32, 0) +
+                 (size_t)wasm_u32x4_extract_lane(s32, 1) +
+                 (size_t)wasm_u32x4_extract_lane(s32, 2) +
+                 (size_t)wasm_u32x4_extract_lane(s32, 3);
+    }
+
+    for (; i < len; ++i) {
+        total += (size_t)(hay[i] == needle);
+    }
+    return total;
+}
+
 #endif /* __wasm_simd128__ */

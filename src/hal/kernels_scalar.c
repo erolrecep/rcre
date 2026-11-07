@@ -97,3 +97,43 @@ void rcre_scalar_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pi
         gray[i] = (uint8_t)((9798 * r + 19235 * g + 3735 * b + 16384) >> 15);
     }
 }
+
+size_t rcre_scalar_find_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return RCRE_NPOS;
+    }
+    size_t i = 0;
+    for (; i + 7 < len; i += 8) {
+        if (hay[i + 0] == needle) return i + 0;
+        if (hay[i + 1] == needle) return i + 1;
+        if (hay[i + 2] == needle) return i + 2;
+        if (hay[i + 3] == needle) return i + 3;
+        if (hay[i + 4] == needle) return i + 4;
+        if (hay[i + 5] == needle) return i + 5;
+        if (hay[i + 6] == needle) return i + 6;
+        if (hay[i + 7] == needle) return i + 7;
+    }
+    for (; i < len; ++i) {
+        if (hay[i] == needle) return i;
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_scalar_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return 0;
+    }
+    size_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+    size_t i = 0;
+    for (; i + 3 < len; i += 4) {
+        c0 += (size_t)(hay[i + 0] == needle);
+        c1 += (size_t)(hay[i + 1] == needle);
+        c2 += (size_t)(hay[i + 2] == needle);
+        c3 += (size_t)(hay[i + 3] == needle);
+    }
+    size_t total = (c0 + c1) + (c2 + c3);
+    for (; i < len; ++i) {
+        total += (size_t)(hay[i] == needle);
+    }
+    return total;
+}

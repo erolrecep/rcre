@@ -8,22 +8,20 @@
 
 #include "hal_internal.h"
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX2__) || defined(__clang__) || defined(__GNUC__))
 #include <immintrin.h>
 #include <string.h>
 
-/* The kernels below emit AVX2+FMA instructions, so each is compiled with a
- * per-function target attribute instead of requiring -mavx2 for the whole
- * translation unit. This keeps the amalgamated dist/rcre.h linkable when it
- * is compiled without -mavx2 (the dispatcher selects these at runtime only
- * on CPUs that advertise AVX2+FMA). */
-#if defined(__GNUC__) || defined(__clang__)
-#define RCRE_AVX2_TARGET __attribute__((target("avx2,fma")))
-#else
-#define RCRE_AVX2_TARGET
+#if !defined(__AVX2__)
+  #if defined(__clang__)
+    #pragma clang attribute push(__attribute__((target("avx2,fma"))), apply_to = function)
+  #elif defined(__GNUC__)
+    #pragma GCC push_options
+    #pragma GCC target("avx2,fma")
+  #endif
 #endif
 
-RCRE_AVX2_TARGET float rcre_avx2_dot_f32(const float* x, const float* y, size_t n) {
+float rcre_avx2_dot_f32(const float* x, const float* y, size_t n) {
     __m256 sum0 = _mm256_setzero_ps();
     __m256 sum1 = _mm256_setzero_ps();
 
@@ -57,7 +55,7 @@ RCRE_AVX2_TARGET float rcre_avx2_dot_f32(const float* x, const float* y, size_t 
     return total;
 }
 
-RCRE_AVX2_TARGET void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y) {
+void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y) {
     __m256 a_vec = _mm256_set1_ps(alpha);
 
     size_t i = 0;
@@ -77,7 +75,7 @@ RCRE_AVX2_TARGET void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, 
 }
 
 /* 4x16 register-blocked GEMM micro-kernel on AVX2 + FMA (8 YMM accumulators) */
-RCRE_AVX2_TARGET static void avx2_gemm_microkernel_4x16(size_t K, float alpha,
+static void avx2_gemm_microkernel_4x16(size_t K, float alpha,
                                        const float* A, size_t lda,
                                        const float* B, size_t ldb,
                                        float beta, float* C, size_t ldc) {
@@ -131,7 +129,7 @@ RCRE_AVX2_TARGET static void avx2_gemm_microkernel_4x16(size_t K, float alpha,
 }
 
 /* 4x8 register-blocked GEMM micro-kernel fallback for narrower column blocks */
-RCRE_AVX2_TARGET static void avx2_gemm_microkernel_4x8(size_t K, float alpha,
+static void avx2_gemm_microkernel_4x8(size_t K, float alpha,
                                       const float* A, size_t lda,
                                       const float* B, size_t ldb,
                                       float beta, float* C, size_t ldc) {
@@ -165,7 +163,7 @@ RCRE_AVX2_TARGET static void avx2_gemm_microkernel_4x8(size_t K, float alpha,
     #undef STORE_ROW_AVX2_8
 }
 
-RCRE_AVX2_TARGET void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
+void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
                         const float* A, size_t lda, 
                         const float* B, size_t ldb, 
                         float beta, float* C, size_t ldc) {
@@ -240,7 +238,7 @@ RCRE_AVX2_TARGET void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alp
     }
 }
 
-RCRE_AVX2_TARGET void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels) {
+void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels) {
     const __m128i shuf_r = _mm_setr_epi8(0, 3, 6, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
     const __m128i shuf_g = _mm_setr_epi8(1, 4, 7, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
     const __m128i shuf_b = _mm_setr_epi8(2, 5, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
@@ -307,4 +305,78 @@ RCRE_AVX2_TARGET void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray
     }
 }
 
-#endif /* defined(__x86_64__) || defined(_M_X64) */
+size_t rcre_avx2_find_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return RCRE_NPOS;
+    }
+
+    const __m256i vn = _mm256_set1_epi8((char)needle);
+    size_t i = 0;
+
+    for (; i + 63 < len; i += 64) {
+        uint32_t m0 = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i +  0]), vn));
+        uint32_t m1 = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i + 32]), vn));
+        if ((m0 | m1) != 0) {
+            if (m0 != 0) return i + (size_t)__builtin_ctz(m0);
+            return i + 32 + (size_t)__builtin_ctz(m1);
+        }
+    }
+
+    for (; i + 31 < len; i += 32) {
+        uint32_t m0 = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i]), vn));
+        if (m0 != 0) {
+            return i + (size_t)__builtin_ctz(m0);
+        }
+    }
+
+    for (; i < len; ++i) {
+        if (hay[i] == needle) return i;
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return 0;
+    }
+
+    const __m256i vn   = _mm256_set1_epi8((char)needle);
+    const __m256i zero = _mm256_setzero_si256();
+    size_t total = 0;
+    size_t i = 0;
+
+    while (i + 63 < len) {
+        __m256i acc0 = zero;
+        __m256i acc1 = zero;
+
+        size_t block_iters = (len - i) / 64;
+        if (block_iters > 255) {
+            block_iters = 255;
+        }
+        for (size_t b = 0; b < block_iters; ++b, i += 64) {
+            acc0 = _mm256_sub_epi8(acc0, _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i +  0]), vn));
+            acc1 = _mm256_sub_epi8(acc1, _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i + 32]), vn));
+        }
+
+        __m256i sad = _mm256_add_epi64(_mm256_sad_epu8(acc0, zero), _mm256_sad_epu8(acc1, zero));
+        __m128i lo  = _mm256_castsi256_si128(sad);
+        __m128i hi  = _mm256_extracti128_si256(sad, 1);
+        __m128i sum = _mm_add_epi64(lo, hi);
+        total += (size_t)_mm_cvtsi128_si64(sum) + (size_t)_mm_extract_epi64(sum, 1);
+    }
+
+    for (; i < len; ++i) {
+        total += (size_t)(hay[i] == needle);
+    }
+    return total;
+}
+
+#if !defined(__AVX2__)
+  #if defined(__clang__)
+    #pragma clang attribute pop
+  #elif defined(__GNUC__)
+    #pragma GCC pop_options
+  #endif
+#endif
+
+#endif /* (__x86_64__ || _M_X64) && AVX2-capable compiler */

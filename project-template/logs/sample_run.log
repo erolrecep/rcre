@@ -10,7 +10,7 @@
       -> Detected SIMD Acceleration: [ARM NEON 128-bit]
 
 [2/5] Creating 16MB contiguous memory arena...
-      -> Arena allocated at: 0x75c6400000 (Capacity: 16.00 MB)
+      -> Arena allocated at: 0x721e400000 (Capacity: 16.00 MB)
       -> Alignment check: PASS (64-byte AVX-512 / Cache-Line Aligned) (address % 64 == 0)
 
 [3/5] Allocating 1080p RGB tensor (1920x1080x3, U8)...
@@ -18,8 +18,8 @@
 
 [4/5] Executing SIMD-accelerated Rec.601 RGB-to-Grayscale conversion...
       -> Processed 100 frames of 1080p (2.07 MP)
-      -> Average Latency: 0.275 ms per frame
-      -> Throughput:      7536.79 Megapixels / second
+      -> Average Latency: 0.327 ms per frame
+      -> Throughput:      6338.18 Megapixels / second
 
 [5/5] Arena lifecycle and memory reset...
       -> Peak Arena Offset: 8294400 bytes (7.91 MB)

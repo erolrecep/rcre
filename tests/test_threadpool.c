@@ -109,10 +109,34 @@ static void test_single_threaded_fallback(void) {
     }
 }
 
+static void test_qos_steered_threadpools(void) {
+    const RCRE_QoSClass classes[] = {
+        RCRE_QOS_PERF,
+        RCRE_QOS_EFFICIENCY,
+        RCRE_QOS_BACKGROUND
+    };
+    const size_t N = 1024;
+    int* data = (int*)calloc(N, sizeof(int));
+    ASSERT_NOT_NULL(data);
+
+    for (size_t c = 0; c < sizeof(classes) / sizeof(classes[0]); ++c) {
+        memset(data, 0, N * sizeof(int));
+        RCRE_ThreadPool* pool = rcre_threadpool_create_ex(0, classes[c]);
+        ASSERT_NOT_NULL(pool);
+
+        TaskPayload payload = { .array = data, .executed_count = 0 };
+        rcre_threadpool_parallel_for(pool, N, increment_task, &payload);
+        ASSERT_UINT_EQ(N, atomic_load(&payload.executed_count));
+        rcre_threadpool_destroy(pool);
+    }
+    free(data);
+}
+
 int main(void) {
     test_suite_begin("RCRE Multicore Threadpool & Work Stealing (THR-REQ-01 to 03)");
     TEST_RUN(test_parallel_for_1d);
     TEST_RUN(test_parallel_for_2d_tiling);
     TEST_RUN(test_single_threaded_fallback);
+    TEST_RUN(test_qos_steered_threadpools);
     return test_suite_report();
 }

@@ -26,6 +26,7 @@ C_FILES = [
     SRC_DIR / "hal" / "cpu_probe.c",
     SRC_DIR / "hal" / "hal_dispatch.c",
     SRC_DIR / "core" / "arena.c",
+    SRC_DIR / "core" / "slice.c",
     SRC_DIR / "core" / "tensor.c",
     SRC_DIR / "core" / "adapt.c",
     SRC_DIR / "core" / "threadpool.c",

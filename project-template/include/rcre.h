@@ -32,7 +32,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 1
-#define RCRE_VERSION_MINOR 0
+#define RCRE_VERSION_MINOR 1
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -175,6 +175,58 @@ void rcre_graph_ctx_reset_tape(RCRE_GraphCtx* ctx);
 void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx);
 
 /* ========================================================================= */
+/* Zero-Copy Byte Slice & Arena String Builder (SLC-REQ-01 to SLC-REQ-03)    */
+/* ========================================================================= */
+
+#define RCRE_NPOS ((size_t)-1)
+
+typedef struct RCRE_Slice {
+    const uint8_t* data;
+    size_t         len;
+} RCRE_Slice;
+
+typedef struct RCRE_SlicePair {
+    RCRE_Slice head;
+    RCRE_Slice tail;
+    bool       found;
+} RCRE_SlicePair;
+
+typedef struct RCRE_StrBuilder {
+    uint8_t*    buf;
+    size_t      len;
+    size_t      cap;
+    RCRE_Arena* arena;
+    bool        overflow;
+} RCRE_StrBuilder;
+
+RCRE_NODISCARD RCRE_Slice rcre_slice_empty(void);
+RCRE_NODISCARD RCRE_Slice rcre_slice_from_parts(const void* data, size_t len);
+RCRE_NODISCARD RCRE_Slice rcre_slice_from_cstr(const char* cstr);
+RCRE_NODISCARD RCRE_Slice rcre_slice_sub(RCRE_Slice s, size_t start, size_t end);
+RCRE_NODISCARD bool rcre_slice_eq(RCRE_Slice a, RCRE_Slice b);
+RCRE_NODISCARD bool rcre_slice_eq_cstr(RCRE_Slice a, const char* cstr);
+RCRE_NODISCARD bool rcre_slice_starts_with(RCRE_Slice s, RCRE_Slice prefix);
+RCRE_NODISCARD bool rcre_slice_ends_with(RCRE_Slice s, RCRE_Slice suffix);
+RCRE_NODISCARD RCRE_Slice rcre_slice_trim_ascii(RCRE_Slice s);
+RCRE_NODISCARD size_t rcre_slice_find_byte(RCRE_Slice s, uint8_t needle);
+RCRE_NODISCARD size_t rcre_slice_rfind_byte(RCRE_Slice s, uint8_t needle);
+RCRE_NODISCARD size_t rcre_slice_count_byte(RCRE_Slice s, uint8_t needle);
+RCRE_NODISCARD RCRE_SlicePair rcre_slice_split_once_byte(RCRE_Slice s, uint8_t delim);
+RCRE_NODISCARD RCRE_SlicePair rcre_slice_split_once(RCRE_Slice s, RCRE_Slice delim);
+RCRE_NODISCARD bool rcre_slice_parse_i64(RCRE_Slice s, int64_t* out_val);
+RCRE_NODISCARD bool rcre_slice_parse_u64(RCRE_Slice s, uint64_t* out_val);
+RCRE_NODISCARD char* rcre_arena_cstr_dup(RCRE_Arena* arena, RCRE_Slice s);
+
+RCRE_NODISCARD RCRE_StrBuilder rcre_sb_init(RCRE_Arena* arena, size_t initial_cap);
+bool rcre_sb_append_slice(RCRE_StrBuilder* sb, RCRE_Slice s);
+bool rcre_sb_append_cstr(RCRE_StrBuilder* sb, const char* cstr);
+bool rcre_sb_append_byte(RCRE_StrBuilder* sb, uint8_t b);
+bool rcre_sb_append_u64(RCRE_StrBuilder* sb, uint64_t val);
+bool rcre_sb_append_i64(RCRE_StrBuilder* sb, int64_t val);
+RCRE_NODISCARD RCRE_Slice rcre_sb_to_slice(const RCRE_StrBuilder* sb);
+RCRE_NODISCARD char* rcre_sb_to_cstr(RCRE_StrBuilder* sb);
+
+/* ========================================================================= */
 /* Tensor Abstraction & Zero-Copy Views (TNS-REQ-01 to TNS-REQ-05)           */
 /* ========================================================================= */
 
@@ -294,14 +346,28 @@ RCRE_NODISCARD int rcre_tensor_adapt(const RCRE_Tensor* src,
 
 typedef struct RCRE_ThreadPool RCRE_ThreadPool;
 
+typedef enum {
+    RCRE_QOS_DEFAULT    = 0, /* Inherit caller OS scheduling class                */
+    RCRE_QOS_PERF       = 1, /* Steer onto Performance (P) cores / high priority  */
+    RCRE_QOS_EFFICIENCY = 2, /* Steer onto Efficiency (E) cores / utility class   */
+    RCRE_QOS_BACKGROUND = 3  /* Lowest background thermal/power scheduling class  */
+} RCRE_QoSClass;
+
 typedef void (*rcre_task_fn)(void* arg, size_t task_id);
 typedef void (*rcre_tile_fn)(void* arg, size_t y_start, size_t y_end, size_t x_start, size_t x_end);
 
 /**
  * @brief Creates a C23 / POSIX work-stealing threadpool with persistent workers.
- * @param num_threads Number of worker threads (0 = auto-detect hardware concurrency).
+ * @param num_threads Number of worker threads (0 = auto-detect effective quota/concurrency).
  */
 RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads);
+
+/**
+ * @brief Creates a work-stealing threadpool with explicit OS Quality-of-Service / core steering.
+ * @param num_threads Number of worker threads (0 = auto-detect matching QoS tier or quota).
+ * @param qos OS scheduling / asymmetric core steering hint.
+ */
+RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create_ex(size_t num_threads, RCRE_QoSClass qos);
 
 /**
  * @brief Executes a 1D parallel-for loop across threadpool workers.
@@ -881,6 +947,18 @@ typedef void (*rcre_axpy_fn)(size_t n, float alpha, const float* x, float* y);
 
 typedef void (*rcre_rgb_to_gray_u8_fn)(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
 
+typedef size_t (*rcre_find_byte_fn)(const uint8_t* hay, size_t len, uint8_t needle);
+
+typedef size_t (*rcre_count_byte_fn)(const uint8_t* hay, size_t len, uint8_t needle);
+
+typedef struct RCRE_CpuTopology {
+    uint32_t logical_cores;         /* Host total online logical processors            */
+    uint32_t perf_cores;            /* Asymmetric Performance (P) cores (Apple/hybrid) */
+    uint32_t eff_cores;             /* Asymmetric Efficiency (E) cores (Apple/hybrid)  */
+    uint32_t effective_quota_cores; /* Effective cgroup v2 / scheduler allowed cores   */
+    uint64_t total_ram_bytes;       /* Total physical/unified memory in bytes          */
+} RCRE_CpuTopology;
+
 typedef struct RCRE_HalDispatch {
     const char*            backend_name;
     uint32_t               cpu_features;
@@ -888,6 +966,8 @@ typedef struct RCRE_HalDispatch {
     rcre_dot_fn            dot_f32;
     rcre_axpy_fn           axpy_f32;
     rcre_rgb_to_gray_u8_fn rgb_to_gray_u8;
+    rcre_find_byte_fn      find_byte;
+    rcre_count_byte_fn     count_byte;
 } RCRE_HalDispatch;
 
 extern RCRE_HalDispatch rcre_hal;
@@ -906,6 +986,16 @@ uint32_t rcre_cpu_get_features(void);
  * @brief Returns human-readable CPU brand/model string.
  */
 const char* rcre_cpu_get_brand(void);
+
+/**
+ * @brief Returns probed asymmetric core counts, cgroup CPU quota, and physical RAM.
+ */
+RCRE_CpuTopology rcre_cpu_get_topology(void);
+
+/**
+ * @brief Queries current OS memory pressure level (0 = normal, 1 = warn, 2 = critical).
+ */
+int rcre_cpu_get_memory_pressure(void);
 
 /* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */
@@ -2055,6 +2145,10 @@ void rcre_scalar_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
 void rcre_scalar_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
 
+size_t rcre_scalar_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+size_t rcre_scalar_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
 /* ARM NEON 128-bit Micro-Kernels */
 #if defined(__ARM_NEON) || defined(__aarch64__)
 void rcre_neon_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
@@ -2067,10 +2161,14 @@ float rcre_neon_dot_f32(const float* x, const float* y, size_t n);
 void rcre_neon_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
 void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
+
+size_t rcre_neon_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+size_t rcre_neon_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 #endif
 
-/* x86 AVX2 256-bit Micro-Kernels */
-#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+/* x86 AVX2 256-bit Micro-Kernels (runtime-dispatched on Clang/GCC even without global -mavx2) */
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX2__) || defined(__clang__) || defined(__GNUC__))
 void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
                         const float* A, size_t lda, 
                         const float* B, size_t ldb, 
@@ -2081,6 +2179,10 @@ float rcre_avx2_dot_f32(const float* x, const float* y, size_t n);
 void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
 void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
+
+size_t rcre_avx2_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 #endif
 
 /* WebAssembly 128-bit SIMD Micro-Kernels */
@@ -2095,6 +2197,10 @@ float rcre_wasm_dot_f32(const float* x, const float* y, size_t n);
 void rcre_wasm_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
 void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
+
+size_t rcre_wasm_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+size_t rcre_wasm_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 #endif
 
 #endif /* RCRE_HAL_INTERNAL_H */
@@ -2382,6 +2488,46 @@ void rcre_scalar_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pi
     }
 }
 
+size_t rcre_scalar_find_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return RCRE_NPOS;
+    }
+    size_t i = 0;
+    for (; i + 7 < len; i += 8) {
+        if (hay[i + 0] == needle) return i + 0;
+        if (hay[i + 1] == needle) return i + 1;
+        if (hay[i + 2] == needle) return i + 2;
+        if (hay[i + 3] == needle) return i + 3;
+        if (hay[i + 4] == needle) return i + 4;
+        if (hay[i + 5] == needle) return i + 5;
+        if (hay[i + 6] == needle) return i + 6;
+        if (hay[i + 7] == needle) return i + 7;
+    }
+    for (; i < len; ++i) {
+        if (hay[i] == needle) return i;
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_scalar_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return 0;
+    }
+    size_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+    size_t i = 0;
+    for (; i + 3 < len; i += 4) {
+        c0 += (size_t)(hay[i + 0] == needle);
+        c1 += (size_t)(hay[i + 1] == needle);
+        c2 += (size_t)(hay[i + 2] == needle);
+        c3 += (size_t)(hay[i + 3] == needle);
+    }
+    size_t total = (c0 + c1) + (c2 + c3);
+    for (; i < len; ++i) {
+        total += (size_t)(hay[i] == needle);
+    }
+    return total;
+}
+
 /* --- Source: kernels_neon.c --- */
 /**
  * @file kernels_neon.c
@@ -2632,6 +2778,118 @@ void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
     }
 }
 
+static inline size_t neon_first_match_16(uint8x16_t cmp) {
+    /* Pack 16 0xFF/0x00 bytes into 16 4-bit nibbles in a single 64-bit word */
+    uint8x8_t narrowed = vshrn_n_u16(vreinterpretq_u16_u8(cmp), 4);
+    uint64_t mask = vget_lane_u64(vreinterpret_u64_u8(narrowed), 0);
+    return (size_t)(__builtin_ctzll(mask) >> 2);
+}
+
+size_t rcre_neon_find_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return RCRE_NPOS;
+    }
+
+    const uint8x16_t vn = vdupq_n_u8(needle);
+    size_t i = 0;
+
+    /* 64-byte unrolled fast scan across 4 NEON registers */
+    for (; i + 63 < len; i += 64) {
+        uint8x16_t c0 = vceqq_u8(vld1q_u8(&hay[i +  0]), vn);
+        uint8x16_t c1 = vceqq_u8(vld1q_u8(&hay[i + 16]), vn);
+        uint8x16_t c2 = vceqq_u8(vld1q_u8(&hay[i + 32]), vn);
+        uint8x16_t c3 = vceqq_u8(vld1q_u8(&hay[i + 48]), vn);
+
+        uint8x16_t any = vorrq_u8(vorrq_u8(c0, c1), vorrq_u8(c2, c3));
+#if defined(__aarch64__)
+        if (vmaxvq_u8(any) != 0) {
+            if (vmaxvq_u8(c0) != 0) return i +  0 + neon_first_match_16(c0);
+            if (vmaxvq_u8(c1) != 0) return i + 16 + neon_first_match_16(c1);
+            if (vmaxvq_u8(c2) != 0) return i + 32 + neon_first_match_16(c2);
+            return i + 48 + neon_first_match_16(c3);
+        }
+#else
+        uint64x2_t any64 = vreinterpretq_u64_u8(any);
+        if ((vgetq_lane_u64(any64, 0) | vgetq_lane_u64(any64, 1)) != 0) {
+            for (size_t k = 0; k < 64; ++k) {
+                if (hay[i + k] == needle) return i + k;
+            }
+        }
+#endif
+    }
+
+    for (; i + 15 < len; i += 16) {
+        uint8x16_t c0 = vceqq_u8(vld1q_u8(&hay[i]), vn);
+#if defined(__aarch64__)
+        if (vmaxvq_u8(c0) != 0) {
+            return i + neon_first_match_16(c0);
+        }
+#else
+        uint64x2_t c64 = vreinterpretq_u64_u8(c0);
+        if ((vgetq_lane_u64(c64, 0) | vgetq_lane_u64(c64, 1)) != 0) {
+            for (size_t k = 0; k < 16; ++k) {
+                if (hay[i + k] == needle) return i + k;
+            }
+        }
+#endif
+    }
+
+    for (; i < len; ++i) {
+        if (hay[i] == needle) {
+            return i;
+        }
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_neon_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return 0;
+    }
+
+    const uint8x16_t vn = vdupq_n_u8(needle);
+    size_t total = 0;
+    size_t i = 0;
+
+    /* Accumulate up to 255 iterations in uint8 lanes before widening reduction */
+    while (i + 63 < len) {
+        uint8x16_t acc0 = vdupq_n_u8(0);
+        uint8x16_t acc1 = vdupq_n_u8(0);
+        uint8x16_t acc2 = vdupq_n_u8(0);
+        uint8x16_t acc3 = vdupq_n_u8(0);
+
+        size_t block_iters = (len - i) / 64;
+        if (block_iters > 255) {
+            block_iters = 255;
+        }
+        for (size_t b = 0; b < block_iters; ++b, i += 64) {
+            /* vceqq_u8 yields 0xFF (-1 in mod 256) on match; subtracting adds +1 */
+            acc0 = vsubq_u8(acc0, vceqq_u8(vld1q_u8(&hay[i +  0]), vn));
+            acc1 = vsubq_u8(acc1, vceqq_u8(vld1q_u8(&hay[i + 16]), vn));
+            acc2 = vsubq_u8(acc2, vceqq_u8(vld1q_u8(&hay[i + 32]), vn));
+            acc3 = vsubq_u8(acc3, vceqq_u8(vld1q_u8(&hay[i + 48]), vn));
+        }
+
+        uint16x8_t s16 = vpaddlq_u8(acc0);
+        s16 = vpadalq_u8(s16, acc1);
+        s16 = vpadalq_u8(s16, acc2);
+        s16 = vpadalq_u8(s16, acc3);
+
+        uint32x4_t s32 = vpaddlq_u16(s16);
+        uint64x2_t s64 = vpaddlq_u32(s32);
+#if defined(__aarch64__)
+        total += (size_t)vaddvq_u64(s64);
+#else
+        total += (size_t)(vgetq_lane_u64(s64, 0) + vgetq_lane_u64(s64, 1));
+#endif
+    }
+
+    for (; i < len; ++i) {
+        total += (size_t)(hay[i] == needle);
+    }
+    return total;
+}
+
 #endif /* __ARM_NEON || __aarch64__ */
 
 /* --- Source: kernels_avx2.c --- */
@@ -2644,9 +2902,18 @@ void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
  */
 
 
-#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX2__) || defined(__clang__) || defined(__GNUC__))
 #include <immintrin.h>
 #include <string.h>
+
+#if !defined(__AVX2__)
+  #if defined(__clang__)
+    #pragma clang attribute push(__attribute__((target("avx2,fma"))), apply_to = function)
+  #elif defined(__GNUC__)
+    #pragma GCC push_options
+    #pragma GCC target("avx2,fma")
+  #endif
+#endif
 
 float rcre_avx2_dot_f32(const float* x, const float* y, size_t n) {
     __m256 sum0 = _mm256_setzero_ps();
@@ -2932,7 +3199,81 @@ void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
     }
 }
 
-#endif /* (__x86_64__ || _M_X64) && __AVX2__ */
+size_t rcre_avx2_find_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return RCRE_NPOS;
+    }
+
+    const __m256i vn = _mm256_set1_epi8((char)needle);
+    size_t i = 0;
+
+    for (; i + 63 < len; i += 64) {
+        uint32_t m0 = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i +  0]), vn));
+        uint32_t m1 = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i + 32]), vn));
+        if ((m0 | m1) != 0) {
+            if (m0 != 0) return i + (size_t)__builtin_ctz(m0);
+            return i + 32 + (size_t)__builtin_ctz(m1);
+        }
+    }
+
+    for (; i + 31 < len; i += 32) {
+        uint32_t m0 = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i]), vn));
+        if (m0 != 0) {
+            return i + (size_t)__builtin_ctz(m0);
+        }
+    }
+
+    for (; i < len; ++i) {
+        if (hay[i] == needle) return i;
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return 0;
+    }
+
+    const __m256i vn   = _mm256_set1_epi8((char)needle);
+    const __m256i zero = _mm256_setzero_si256();
+    size_t total = 0;
+    size_t i = 0;
+
+    while (i + 63 < len) {
+        __m256i acc0 = zero;
+        __m256i acc1 = zero;
+
+        size_t block_iters = (len - i) / 64;
+        if (block_iters > 255) {
+            block_iters = 255;
+        }
+        for (size_t b = 0; b < block_iters; ++b, i += 64) {
+            acc0 = _mm256_sub_epi8(acc0, _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i +  0]), vn));
+            acc1 = _mm256_sub_epi8(acc1, _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)&hay[i + 32]), vn));
+        }
+
+        __m256i sad = _mm256_add_epi64(_mm256_sad_epu8(acc0, zero), _mm256_sad_epu8(acc1, zero));
+        __m128i lo  = _mm256_castsi256_si128(sad);
+        __m128i hi  = _mm256_extracti128_si256(sad, 1);
+        __m128i sum = _mm_add_epi64(lo, hi);
+        total += (size_t)_mm_cvtsi128_si64(sum) + (size_t)_mm_extract_epi64(sum, 1);
+    }
+
+    for (; i < len; ++i) {
+        total += (size_t)(hay[i] == needle);
+    }
+    return total;
+}
+
+#if !defined(__AVX2__)
+  #if defined(__clang__)
+    #pragma clang attribute pop
+  #elif defined(__GNUC__)
+    #pragma GCC pop_options
+  #endif
+#endif
+
+#endif /* (__x86_64__ || _M_X64) && AVX2-capable compiler */
 
 /* --- Source: kernels_wasm.c --- */
 /**
@@ -3160,6 +3501,59 @@ void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
     }
 }
 
+size_t rcre_wasm_find_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return RCRE_NPOS;
+    }
+
+    const v128_t vn = wasm_i8x16_splat((int8_t)needle);
+    size_t i = 0;
+
+    for (; i + 15 < len; i += 16) {
+        uint32_t m = (uint32_t)wasm_i8x16_bitmask(wasm_i8x16_eq(wasm_v128_load(&hay[i]), vn));
+        if (m != 0) {
+            return i + (size_t)__builtin_ctz(m);
+        }
+    }
+
+    for (; i < len; ++i) {
+        if (hay[i] == needle) return i;
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_wasm_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
+    if (!hay || len == 0) {
+        return 0;
+    }
+
+    const v128_t vn = wasm_i8x16_splat((int8_t)needle);
+    size_t total = 0;
+    size_t i = 0;
+
+    while (i + 15 < len) {
+        v128_t acc = wasm_i8x16_splat(0);
+        size_t block_iters = (len - i) / 16;
+        if (block_iters > 255) {
+            block_iters = 255;
+        }
+        for (size_t b = 0; b < block_iters; ++b, i += 16) {
+            acc = wasm_i8x16_sub(acc, wasm_i8x16_eq(wasm_v128_load(&hay[i]), vn));
+        }
+        v128_t s16 = wasm_u16x8_extadd_pairwise_u8x16(acc);
+        v128_t s32 = wasm_u32x4_extadd_pairwise_u16x8(s16);
+        total += (size_t)wasm_u32x4_extract_lane(s32, 0) +
+                 (size_t)wasm_u32x4_extract_lane(s32, 1) +
+                 (size_t)wasm_u32x4_extract_lane(s32, 2) +
+                 (size_t)wasm_u32x4_extract_lane(s32, 3);
+    }
+
+    for (; i < len; ++i) {
+        total += (size_t)(hay[i] == needle);
+    }
+    return total;
+}
+
 #endif /* __wasm_simd128__ */
 
 /* --- Source: cpu_probe.c --- */
@@ -3170,8 +3564,11 @@ void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
  * Satisfies HAL-REQ-01.
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <unistd.h>
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
@@ -3182,6 +3579,91 @@ void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
 static atomic_bool s_probed = false;
 static uint32_t s_features = 0;
 static char s_brand[128] = "Unknown CPU";
+static RCRE_CpuTopology s_topology = { 1, 1, 0, 1, 0 };
+
+static uint32_t probe_env_positive_u32(const char* name) {
+    const char* v = getenv(name);
+    if (!v || v[0] == '\0') return 0;
+    char* end = nullptr;
+    unsigned long parsed = strtoul(v, &end, 10);
+    if (end == v || parsed == 0 || parsed > 65535UL) return 0;
+    return (uint32_t)parsed;
+}
+
+#if defined(__linux__)
+static uint32_t probe_linux_cgroup_quota_cores(uint32_t host_cores) {
+    /* cgroup v2: /sys/fs/cgroup/cpu.max format: "<quota_us> <period_us>" or "max 100000" */
+    FILE* f = fopen("/sys/fs/cgroup/cpu.max", "r");
+    if (f) {
+        char quota_tok[32] = {0};
+        unsigned long long period = 0;
+        if (fscanf(f, "%31s %llu", quota_tok, &period) == 2 && period > 0) {
+            if (strcmp(quota_tok, "max") != 0) {
+                unsigned long long quota = strtoull(quota_tok, nullptr, 10);
+                if (quota > 0) {
+                    fclose(f);
+                    uint32_t c = (uint32_t)((quota + period - 1ULL) / period);
+                    if (c == 0) c = 1;
+                    return (c < host_cores) ? c : host_cores;
+                }
+            }
+        }
+        fclose(f);
+    }
+    return host_cores;
+}
+#endif
+
+static void probe_topology(void) {
+    uint32_t logical = 1;
+#if defined(_SC_NPROCESSORS_ONLN)
+    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nprocs > 0) logical = (uint32_t)nprocs;
+#endif
+
+    uint32_t perf = logical;
+    uint32_t eff  = 0;
+    uint32_t quota = logical;
+    uint64_t ram_bytes = 0;
+
+#if defined(__APPLE__)
+    int p_val = 0, e_val = 0;
+    size_t sz_p = sizeof(p_val), sz_e = sizeof(e_val);
+    if (sysctlbyname("hw.perflevel0.physicalcpu", &p_val, &sz_p, nullptr, 0) == 0 && p_val > 0) {
+        perf = (uint32_t)p_val;
+        if (sysctlbyname("hw.perflevel1.physicalcpu", &e_val, &sz_e, nullptr, 0) == 0 && e_val >= 0) {
+            eff = (uint32_t)e_val;
+        }
+    }
+    uint64_t mem64 = 0;
+    size_t sz_mem = sizeof(mem64);
+    if (sysctlbyname("hw.memsize", &mem64, &sz_mem, nullptr, 0) == 0) {
+        ram_bytes = mem64;
+    }
+#elif defined(__linux__)
+    quota = probe_linux_cgroup_quota_cores(logical);
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_sz = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && page_sz > 0) {
+        ram_bytes = (uint64_t)pages * (uint64_t)page_sz;
+    }
+#endif
+
+    /* Respect HPC scheduler per-allocation limits if narrower than cgroup/host */
+    uint32_t slurm_cpus = probe_env_positive_u32("SLURM_CPUS_ON_NODE");
+    if (slurm_cpus == 0) {
+        slurm_cpus = probe_env_positive_u32("SLURM_CPUS_PER_TASK");
+    }
+    if (slurm_cpus > 0 && slurm_cpus < quota) {
+        quota = slurm_cpus;
+    }
+
+    s_topology.logical_cores         = logical;
+    s_topology.perf_cores            = perf;
+    s_topology.eff_cores             = eff;
+    s_topology.effective_quota_cores = (quota > 0) ? quota : 1;
+    s_topology.total_ram_bytes       = ram_bytes;
+}
 
 static void probe_cpu(void) {
     uint32_t feats = RCRE_CPU_FEAT_SCALAR;
@@ -3233,6 +3715,7 @@ static void probe_cpu(void) {
     strncpy(s_brand, "Generic Host CPU", sizeof(s_brand) - 1);
 #endif
 
+    probe_topology();
     s_features = feats;
     atomic_store(&s_probed, true);
 }
@@ -3249,6 +3732,61 @@ const char* rcre_cpu_get_brand(void) {
         probe_cpu();
     }
     return s_brand;
+}
+
+RCRE_CpuTopology rcre_cpu_get_topology(void) {
+    if (!atomic_load(&s_probed)) {
+        probe_cpu();
+    }
+    return s_topology;
+}
+
+int rcre_cpu_get_memory_pressure(void) {
+#if defined(__APPLE__)
+    /* XNU memorystatus levels: 1 = NORMAL, 2 = WARN, 4 = CRITICAL */
+    int level = 1;
+    size_t sz = sizeof(level);
+    if (sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &sz, nullptr, 0) == 0) {
+        if (level >= 4) return 2;
+        if (level >= 2) return 1;
+    }
+    return 0;
+#elif defined(__linux__)
+    /* Check Linux PSI (/proc/pressure/memory) first */
+    FILE* psi = fopen("/proc/pressure/memory", "r");
+    if (psi) {
+        char line[128];
+        double avg10 = 0.0;
+        while (fgets(line, sizeof(line), psi)) {
+            if (strncmp(line, "full ", 5) == 0 && sscanf(line, "full avg10=%lf", &avg10) == 1) {
+                if (avg10 >= 20.0) { fclose(psi); return 2; }
+                if (avg10 >= 5.0)  { fclose(psi); return 1; }
+            }
+        }
+        fclose(psi);
+    }
+    /* Fallback to MemAvailable / MemTotal ratio in /proc/meminfo */
+    FILE* mi = fopen("/proc/meminfo", "r");
+    if (mi) {
+        char key[64];
+        unsigned long long val = 0;
+        unsigned long long mem_total = 0, mem_avail = 0;
+        char unit[32];
+        while (fscanf(mi, "%63s %llu %31s", key, &val, unit) >= 2) {
+            if (strcmp(key, "MemTotal:") == 0) mem_total = val;
+            else if (strcmp(key, "MemAvailable:") == 0) mem_avail = val;
+            if (mem_total > 0 && mem_avail > 0) break;
+        }
+        fclose(mi);
+        if (mem_total > 0 && mem_avail > 0) {
+            if (mem_avail * 25ULL < mem_total) return 2; /* < 4% free */
+            if (mem_avail * 10ULL < mem_total) return 1; /* < 10% free */
+        }
+    }
+    return 0;
+#else
+    return 0;
+#endif
 }
 
 /* --- Source: hal_dispatch.c --- */
@@ -3268,7 +3806,9 @@ RCRE_HalDispatch rcre_hal = {
     .gemm_f32        = rcre_scalar_gemm_f32,
     .dot_f32         = rcre_scalar_dot_f32,
     .axpy_f32        = rcre_scalar_axpy_f32,
-    .rgb_to_gray_u8  = rcre_scalar_rgb_to_gray_u8
+    .rgb_to_gray_u8  = rcre_scalar_rgb_to_gray_u8,
+    .find_byte       = rcre_scalar_find_byte,
+    .count_byte      = rcre_scalar_count_byte
 };
 
 static atomic_bool s_hal_initialized = false;
@@ -3288,12 +3828,14 @@ void rcre_hal_init(void) {
         rcre_hal.dot_f32        = rcre_neon_dot_f32;
         rcre_hal.axpy_f32       = rcre_neon_axpy_f32;
         rcre_hal.rgb_to_gray_u8 = rcre_neon_rgb_to_gray_u8;
+        rcre_hal.find_byte      = rcre_neon_find_byte;
+        rcre_hal.count_byte     = rcre_neon_count_byte;
         atomic_store(&s_hal_initialized, true);
         return;
     }
 #endif
 
-#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX2__) || defined(__clang__) || defined(__GNUC__))
     if (feats & RCRE_CPU_FEAT_AVX2) {
         rcre_hal.backend_name   = "x86 AVX2 256-bit";
         rcre_hal.cpu_features   = feats;
@@ -3301,6 +3843,8 @@ void rcre_hal_init(void) {
         rcre_hal.dot_f32        = rcre_avx2_dot_f32;
         rcre_hal.axpy_f32       = rcre_avx2_axpy_f32;
         rcre_hal.rgb_to_gray_u8 = rcre_avx2_rgb_to_gray_u8;
+        rcre_hal.find_byte      = rcre_avx2_find_byte;
+        rcre_hal.count_byte     = rcre_avx2_count_byte;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -3314,6 +3858,8 @@ void rcre_hal_init(void) {
         rcre_hal.dot_f32        = rcre_wasm_dot_f32;
         rcre_hal.axpy_f32       = rcre_wasm_axpy_f32;
         rcre_hal.rgb_to_gray_u8 = rcre_wasm_rgb_to_gray_u8;
+        rcre_hal.find_byte      = rcre_wasm_find_byte;
+        rcre_hal.count_byte     = rcre_wasm_count_byte;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -3325,6 +3871,8 @@ void rcre_hal_init(void) {
     rcre_hal.dot_f32        = rcre_scalar_dot_f32;
     rcre_hal.axpy_f32       = rcre_scalar_axpy_f32;
     rcre_hal.rgb_to_gray_u8 = rcre_scalar_rgb_to_gray_u8;
+    rcre_hal.find_byte      = rcre_scalar_find_byte;
+    rcre_hal.count_byte     = rcre_scalar_count_byte;
     atomic_store(&s_hal_initialized, true);
 }
 
@@ -3484,6 +4032,430 @@ void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx) {
         if (ctx->tape_arena) rcre_arena_destroy(ctx->tape_arena);
         free(ctx);
     }
+}
+
+/* --- Source: slice.c --- */
+/**
+ * @file slice.c
+ * @brief Zero-Copy Fat-Pointer Byte Slices & Arena-Backed String Builder
+ *
+ * Satisfies SLC-REQ-01, SLC-REQ-02, and SLC-REQ-03.
+ * Pure ISO C23, zero heap allocations, UBSan-clean on empty/NULL views,
+ * and accelerated by rcre_hal SIMD byte-stream scanners.
+ */
+
+#include <string.h>
+#include <limits.h>
+
+static inline bool slice_is_ascii_space(uint8_t c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+RCRE_Slice rcre_slice_empty(void) {
+    RCRE_Slice s = { .data = nullptr, .len = 0 };
+    return s;
+}
+
+RCRE_Slice rcre_slice_from_parts(const void* data, size_t len) {
+    if (!data || len == 0) {
+        return rcre_slice_empty();
+    }
+    RCRE_Slice s = { .data = (const uint8_t*)data, .len = len };
+    return s;
+}
+
+RCRE_Slice rcre_slice_from_cstr(const char* cstr) {
+    if (!cstr) {
+        return rcre_slice_empty();
+    }
+    size_t n = strlen(cstr);
+    if (n == 0) {
+        return rcre_slice_empty();
+    }
+    RCRE_Slice s = { .data = (const uint8_t*)cstr, .len = n };
+    return s;
+}
+
+RCRE_Slice rcre_slice_sub(RCRE_Slice s, size_t start, size_t end) {
+    if (!s.data || s.len == 0 || start >= s.len || start >= end) {
+        return rcre_slice_empty();
+    }
+    if (end > s.len) {
+        end = s.len;
+    }
+    RCRE_Slice out = { .data = s.data + start, .len = end - start };
+    return out;
+}
+
+bool rcre_slice_eq(RCRE_Slice a, RCRE_Slice b) {
+    if (a.len != b.len) {
+        return false;
+    }
+    if (a.len == 0) {
+        return true;
+    }
+    if (a.data == b.data) {
+        return true;
+    }
+    return memcmp(a.data, b.data, a.len) == 0;
+}
+
+bool rcre_slice_eq_cstr(RCRE_Slice a, const char* cstr) {
+    return rcre_slice_eq(a, rcre_slice_from_cstr(cstr));
+}
+
+bool rcre_slice_starts_with(RCRE_Slice s, RCRE_Slice prefix) {
+    if (prefix.len == 0) {
+        return true;
+    }
+    if (prefix.len > s.len) {
+        return false;
+    }
+    return memcmp(s.data, prefix.data, prefix.len) == 0;
+}
+
+bool rcre_slice_ends_with(RCRE_Slice s, RCRE_Slice suffix) {
+    if (suffix.len == 0) {
+        return true;
+    }
+    if (suffix.len > s.len) {
+        return false;
+    }
+    return memcmp(s.data + (s.len - suffix.len), suffix.data, suffix.len) == 0;
+}
+
+RCRE_Slice rcre_slice_trim_ascii(RCRE_Slice s) {
+    if (!s.data || s.len == 0) {
+        return rcre_slice_empty();
+    }
+    size_t start = 0;
+    size_t end = s.len;
+    while (start < end && slice_is_ascii_space(s.data[start])) {
+        start++;
+    }
+    while (end > start && slice_is_ascii_space(s.data[end - 1])) {
+        end--;
+    }
+    return rcre_slice_sub(s, start, end);
+}
+
+size_t rcre_slice_find_byte(RCRE_Slice s, uint8_t needle) {
+    if (!s.data || s.len == 0) {
+        return RCRE_NPOS;
+    }
+    return rcre_hal.find_byte(s.data, s.len, needle);
+}
+
+size_t rcre_slice_rfind_byte(RCRE_Slice s, uint8_t needle) {
+    if (!s.data || s.len == 0) {
+        return RCRE_NPOS;
+    }
+    size_t i = s.len;
+    while (i > 0) {
+        i--;
+        if (s.data[i] == needle) {
+            return i;
+        }
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_slice_count_byte(RCRE_Slice s, uint8_t needle) {
+    if (!s.data || s.len == 0) {
+        return 0;
+    }
+    return rcre_hal.count_byte(s.data, s.len, needle);
+}
+
+RCRE_SlicePair rcre_slice_split_once_byte(RCRE_Slice s, uint8_t delim) {
+    size_t pos = rcre_slice_find_byte(s, delim);
+    if (pos == RCRE_NPOS) {
+        RCRE_SlicePair p = { .head = s, .tail = rcre_slice_empty(), .found = false };
+        return p;
+    }
+    RCRE_SlicePair p = {
+        .head  = rcre_slice_sub(s, 0, pos),
+        .tail  = rcre_slice_sub(s, pos + 1, s.len),
+        .found = true
+    };
+    return p;
+}
+
+RCRE_SlicePair rcre_slice_split_once(RCRE_Slice s, RCRE_Slice delim) {
+    if (delim.len == 0) {
+        RCRE_SlicePair p = { .head = rcre_slice_empty(), .tail = s, .found = true };
+        return p;
+    }
+    if (delim.len == 1) {
+        return rcre_slice_split_once_byte(s, delim.data[0]);
+    }
+    if (!s.data || s.len < delim.len) {
+        RCRE_SlicePair p = { .head = s, .tail = rcre_slice_empty(), .found = false };
+        return p;
+    }
+
+    uint8_t first = delim.data[0];
+    size_t search_limit = s.len - delim.len + 1;
+    size_t offset = 0;
+
+    while (offset < search_limit) {
+        size_t rel = rcre_hal.find_byte(s.data + offset, search_limit - offset, first);
+        if (rel == RCRE_NPOS) {
+            break;
+        }
+        size_t candidate = offset + rel;
+        if (memcmp(s.data + candidate + 1, delim.data + 1, delim.len - 1) == 0) {
+            RCRE_SlicePair p = {
+                .head  = rcre_slice_sub(s, 0, candidate),
+                .tail  = rcre_slice_sub(s, candidate + delim.len, s.len),
+                .found = true
+            };
+            return p;
+        }
+        offset = candidate + 1;
+    }
+
+    RCRE_SlicePair p = { .head = s, .tail = rcre_slice_empty(), .found = false };
+    return p;
+}
+
+bool rcre_slice_parse_u64(RCRE_Slice s, uint64_t* out_val) {
+    if (!out_val || !s.data || s.len == 0) {
+        return false;
+    }
+    size_t idx = 0;
+    if (s.data[0] == '+') {
+        idx++;
+        if (idx == s.len) return false;
+    }
+    uint64_t acc = 0;
+    for (; idx < s.len; ++idx) {
+        uint8_t c = s.data[idx];
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        uint64_t digit = (uint64_t)(c - '0');
+        if (acc > (UINT64_MAX - digit) / 10ULL) {
+            return false; /* Overflow */
+        }
+        acc = acc * 10ULL + digit;
+    }
+    *out_val = acc;
+    return true;
+}
+
+bool rcre_slice_parse_i64(RCRE_Slice s, int64_t* out_val) {
+    if (!out_val || !s.data || s.len == 0) {
+        return false;
+    }
+    bool neg = false;
+    size_t idx = 0;
+    if (s.data[0] == '-') {
+        neg = true;
+        idx++;
+    } else if (s.data[0] == '+') {
+        idx++;
+    }
+    if (idx >= s.len) {
+        return false;
+    }
+    uint64_t mag = 0;
+    if (!rcre_slice_parse_u64(rcre_slice_sub(s, idx, s.len), &mag)) {
+        return false;
+    }
+    if (neg) {
+        const uint64_t max_neg = (uint64_t)INT64_MAX + 1ULL;
+        if (mag > max_neg) return false;
+        if (mag == max_neg) {
+            *out_val = INT64_MIN;
+        } else {
+            *out_val = -(int64_t)mag;
+        }
+    } else {
+        if (mag > (uint64_t)INT64_MAX) return false;
+        *out_val = (int64_t)mag;
+    }
+    return true;
+}
+
+char* rcre_arena_cstr_dup(RCRE_Arena* arena, RCRE_Slice s) {
+    if (!arena) {
+        return nullptr;
+    }
+    char* out = (char*)rcre_arena_alloc(arena, s.len + 1, 8);
+    if (!out) {
+        return nullptr;
+    }
+    if (s.len > 0 && s.data) {
+        memcpy(out, s.data, s.len);
+    }
+    out[s.len] = '\0';
+    return out;
+}
+
+/* ========================================================================= */
+/* Arena-Backed String Builder                                               */
+/* ========================================================================= */
+
+static bool slice_sb_reserve(RCRE_StrBuilder* sb, size_t extra) {
+    if (!sb || sb->overflow) {
+        return false;
+    }
+    if (extra > SIZE_MAX - sb->len - 1) {
+        sb->overflow = true;
+        return false;
+    }
+    size_t needed = sb->len + extra + 1; /* Always keep room for trailing NUL */
+    if (needed <= sb->cap) {
+        return true;
+    }
+    if (!sb->arena) {
+        sb->overflow = true;
+        return false;
+    }
+
+    size_t new_cap = (sb->cap == 0) ? 64 : sb->cap;
+    while (new_cap < needed) {
+        if (new_cap > SIZE_MAX / 2) {
+            new_cap = needed;
+            break;
+        }
+        new_cap *= 2;
+    }
+
+    /* Fast path: extend in-place if this builder sits at the tip of the arena */
+    if (sb->buf && (sb->buf + sb->cap == sb->arena->buffer + sb->arena->offset)) {
+        size_t delta = new_cap - sb->cap;
+        if (sb->arena->offset + delta <= sb->arena->capacity) {
+            sb->arena->offset += delta;
+            if (sb->arena->offset > sb->arena->high_watermark) {
+                sb->arena->high_watermark = sb->arena->offset;
+            }
+            sb->cap = new_cap;
+            return true;
+        }
+    }
+
+    uint8_t* next_buf = (uint8_t*)rcre_arena_alloc(sb->arena, new_cap, 8);
+    if (!next_buf) {
+        sb->overflow = true;
+        return false;
+    }
+    if (sb->len > 0 && sb->buf) {
+        memcpy(next_buf, sb->buf, sb->len);
+    }
+    next_buf[sb->len] = '\0';
+    sb->buf = next_buf;
+    sb->cap = new_cap;
+    return true;
+}
+
+RCRE_StrBuilder rcre_sb_init(RCRE_Arena* arena, size_t initial_cap) {
+    RCRE_StrBuilder sb = {
+        .buf      = nullptr,
+        .len      = 0,
+        .cap      = 0,
+        .arena    = arena,
+        .overflow = (arena == nullptr)
+    };
+    if (arena && initial_cap > 0) {
+        size_t alloc_cap = initial_cap + 1;
+        uint8_t* mem = (uint8_t*)rcre_arena_alloc(arena, alloc_cap, 8);
+        if (mem) {
+            mem[0] = '\0';
+            sb.buf = mem;
+            sb.cap = alloc_cap;
+        } else {
+            sb.overflow = true;
+        }
+    }
+    return sb;
+}
+
+bool rcre_sb_append_slice(RCRE_StrBuilder* sb, RCRE_Slice s) {
+    if (!sb || sb->overflow) {
+        return false;
+    }
+    if (s.len == 0) {
+        return true;
+    }
+    if (!s.data) {
+        sb->overflow = true;
+        return false;
+    }
+    if (!slice_sb_reserve(sb, s.len)) {
+        return false;
+    }
+    memcpy(sb->buf + sb->len, s.data, s.len);
+    sb->len += s.len;
+    sb->buf[sb->len] = '\0';
+    return true;
+}
+
+bool rcre_sb_append_cstr(RCRE_StrBuilder* sb, const char* cstr) {
+    if (!cstr) {
+        return sb && !sb->overflow;
+    }
+    return rcre_sb_append_slice(sb, rcre_slice_from_cstr(cstr));
+}
+
+bool rcre_sb_append_byte(RCRE_StrBuilder* sb, uint8_t b) {
+    if (!slice_sb_reserve(sb, 1)) {
+        return false;
+    }
+    sb->buf[sb->len++] = b;
+    sb->buf[sb->len] = '\0';
+    return true;
+}
+
+bool rcre_sb_append_u64(RCRE_StrBuilder* sb, uint64_t val) {
+    uint8_t tmp[24];
+    size_t n = 0;
+    do {
+        tmp[n++] = (uint8_t)('0' + (val % 10ULL));
+        val /= 10ULL;
+    } while (val > 0);
+
+    if (!slice_sb_reserve(sb, n)) {
+        return false;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        sb->buf[sb->len++] = tmp[n - 1 - i];
+    }
+    sb->buf[sb->len] = '\0';
+    return true;
+}
+
+bool rcre_sb_append_i64(RCRE_StrBuilder* sb, int64_t val) {
+    if (val < 0) {
+        if (!rcre_sb_append_byte(sb, '-')) {
+            return false;
+        }
+        uint64_t mag = (val == INT64_MIN) ? ((uint64_t)INT64_MAX + 1ULL) : (uint64_t)(-val);
+        return rcre_sb_append_u64(sb, mag);
+    }
+    return rcre_sb_append_u64(sb, (uint64_t)val);
+}
+
+RCRE_Slice rcre_sb_to_slice(const RCRE_StrBuilder* sb) {
+    if (!sb || sb->overflow || !sb->buf || sb->len == 0) {
+        return rcre_slice_empty();
+    }
+    RCRE_Slice s = { .data = sb->buf, .len = sb->len };
+    return s;
+}
+
+char* rcre_sb_to_cstr(RCRE_StrBuilder* sb) {
+    if (!sb || sb->overflow) {
+        return nullptr;
+    }
+    if (!sb->buf) {
+        if (!slice_sb_reserve(sb, 0)) {
+            return nullptr;
+        }
+    }
+    sb->buf[sb->len] = '\0';
+    return (char*)sb->buf;
 }
 
 /* --- Source: tensor.c --- */
@@ -3956,6 +4928,12 @@ RCRE_NODISCARD int rcre_tensor_adapt(const RCRE_Tensor* src,
 #include <unistd.h>
 #include <pthread.h>
 
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#elif defined(__linux__)
+#include <sched.h>
+#endif
+
 typedef struct RCRE_WorkBatch {
     rcre_task_fn task_fn;
     void*        arg;
@@ -3967,20 +4945,56 @@ typedef struct RCRE_WorkBatch {
 struct RCRE_ThreadPool {
     pthread_t*      threads;
     size_t          num_threads;
+    RCRE_QoSClass   qos;
     pthread_mutex_t lock;
     pthread_cond_t  work_cond;
     pthread_cond_t  done_cond;
-    RCRE_WorkBatch* current_batch;
+    RCRE_WorkBatch  batch;
+    size_t          active_workers;
+    bool            has_batch;
     bool            stop;
 };
 
+static void tp_apply_worker_qos(RCRE_QoSClass qos) {
+#if defined(__APPLE__)
+    switch (qos) {
+        case RCRE_QOS_PERF:
+            (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+            break;
+        case RCRE_QOS_EFFICIENCY:
+            (void)pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+            break;
+        case RCRE_QOS_BACKGROUND:
+            (void)pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+            break;
+        case RCRE_QOS_DEFAULT:
+        default:
+            break;
+    }
+#elif defined(__linux__)
+    struct sched_param sp = { .sched_priority = 0 };
+    if (qos == RCRE_QOS_BACKGROUND) {
+  #if defined(SCHED_IDLE)
+        (void)pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp);
+  #endif
+    } else if (qos == RCRE_QOS_EFFICIENCY) {
+  #if defined(SCHED_BATCH)
+        (void)pthread_setschedparam(pthread_self(), SCHED_BATCH, &sp);
+  #endif
+    }
+#else
+    (void)qos;
+#endif
+}
+
 static void* worker_routine(void* arg) {
     RCRE_ThreadPool* pool = (RCRE_ThreadPool*)arg;
+    tp_apply_worker_qos(pool->qos);
 
     while (true) {
         pthread_mutex_lock(&pool->lock);
-        while (!pool->stop && (!pool->current_batch || 
-               atomic_load(&pool->current_batch->next_task) >= pool->current_batch->total_tasks)) {
+        while (!pool->stop && (!pool->has_batch ||
+               atomic_load(&pool->batch.next_task) >= pool->batch.total_tasks)) {
             pthread_cond_wait(&pool->work_cond, &pool->lock);
         }
 
@@ -3989,45 +5003,56 @@ static void* worker_routine(void* arg) {
             break;
         }
 
-        RCRE_WorkBatch* batch = pool->current_batch;
+        pool->active_workers++;
+        size_t total = pool->batch.total_tasks;
+        rcre_task_fn fn = pool->batch.task_fn;
+        void* fn_arg = pool->batch.arg;
         pthread_mutex_unlock(&pool->lock);
 
         /* Work-stealing atomic loop */
         while (true) {
-            size_t task_id = atomic_fetch_add(&batch->next_task, 1);
-            if (task_id >= batch->total_tasks) {
+            size_t task_id = atomic_fetch_add(&pool->batch.next_task, 1);
+            if (task_id >= total) {
                 break;
             }
 
-            batch->task_fn(batch->arg, task_id);
-            size_t completed = atomic_fetch_add(&batch->completed_tasks, 1) + 1;
-
-            if (completed == batch->total_tasks) {
-                pthread_mutex_lock(&pool->lock);
-                pthread_cond_broadcast(&pool->done_cond);
-                pthread_mutex_unlock(&pool->lock);
-            }
+            fn(fn_arg, task_id);
+            atomic_fetch_add(&pool->batch.completed_tasks, 1);
         }
+
+        pthread_mutex_lock(&pool->lock);
+        pool->active_workers--;
+        if (pool->active_workers == 0 &&
+            atomic_load(&pool->batch.completed_tasks) >= pool->batch.total_tasks) {
+            pthread_cond_broadcast(&pool->done_cond);
+        }
+        pthread_mutex_unlock(&pool->lock);
     }
     return NULL;
 }
 
-RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads) {
+RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create_ex(size_t num_threads, RCRE_QoSClass qos) {
     if (num_threads == 0) {
-#if defined(_SC_NPROCESSORS_ONLN)
-        long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
-        num_threads = (nprocs > 0) ? (size_t)nprocs : 4;
-#else
-        num_threads = 4;
-#endif
+        RCRE_CpuTopology topo = rcre_cpu_get_topology();
+        if (qos == RCRE_QOS_PERF && topo.perf_cores > 0) {
+            num_threads = (topo.perf_cores < topo.effective_quota_cores)
+                          ? topo.perf_cores : topo.effective_quota_cores;
+        } else if (qos == RCRE_QOS_EFFICIENCY && topo.eff_cores > 0) {
+            num_threads = (topo.eff_cores < topo.effective_quota_cores)
+                          ? topo.eff_cores : topo.effective_quota_cores;
+        } else {
+            num_threads = (topo.effective_quota_cores > 0) ? topo.effective_quota_cores : 4;
+        }
     }
 
     RCRE_ThreadPool* pool = (RCRE_ThreadPool*)malloc(sizeof(RCRE_ThreadPool));
     if (!pool) return NULL;
 
     pool->num_threads = num_threads;
+    pool->qos = qos;
+    pool->active_workers = 0;
+    pool->has_batch = false;
     pool->stop = false;
-    pool->current_batch = NULL;
 
     pthread_mutex_init(&pool->lock, NULL);
     pthread_cond_init(&pool->work_cond, NULL);
@@ -4050,6 +5075,10 @@ RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads) {
     return pool;
 }
 
+RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads) {
+    return rcre_threadpool_create_ex(num_threads, RCRE_QOS_DEFAULT);
+}
+
 void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task_fn task, void* arg) {
     if (count == 0 || !task) return;
 
@@ -4061,40 +5090,33 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
         return;
     }
 
-    RCRE_WorkBatch batch;
-    batch.task_fn = task;
-    batch.arg = arg;
-    batch.total_tasks = count;
-    atomic_init(&batch.next_task, 0);
-    atomic_init(&batch.completed_tasks, 0);
-
     pthread_mutex_lock(&pool->lock);
-    pool->current_batch = &batch;
+    pool->batch.task_fn = task;
+    pool->batch.arg = arg;
+    pool->batch.total_tasks = count;
+    atomic_init(&pool->batch.next_task, 0);
+    atomic_init(&pool->batch.completed_tasks, 0);
+    pool->has_batch = true;
     pthread_cond_broadcast(&pool->work_cond);
 
     /* Main thread participates in task execution */
     pthread_mutex_unlock(&pool->lock);
 
     while (true) {
-        size_t task_id = atomic_fetch_add(&batch.next_task, 1);
+        size_t task_id = atomic_fetch_add(&pool->batch.next_task, 1);
         if (task_id >= count) {
             break;
         }
         task(arg, task_id);
-        size_t completed = atomic_fetch_add(&batch.completed_tasks, 1) + 1;
-        if (completed == count) {
-            pthread_mutex_lock(&pool->lock);
-            pthread_cond_broadcast(&pool->done_cond);
-            pthread_mutex_unlock(&pool->lock);
-        }
+        atomic_fetch_add(&pool->batch.completed_tasks, 1);
     }
 
-    /* Wait for batch to finish */
+    /* Wait for all tasks AND all in-flight worker drains to finish */
     pthread_mutex_lock(&pool->lock);
-    while (atomic_load(&batch.completed_tasks) < count) {
+    while (atomic_load(&pool->batch.completed_tasks) < count || pool->active_workers > 0) {
         pthread_cond_wait(&pool->done_cond, &pool->lock);
     }
-    pool->current_batch = NULL;
+    pool->has_batch = false;
     pthread_mutex_unlock(&pool->lock);
 }
 
@@ -4175,7 +5197,9 @@ void rcre_threadpool_destroy(RCRE_ThreadPool* pool) {
  * Platform probes:
  *   - ARM64 (Apple Silicon / Linux ARM): mrs cntvct_el0 (EL0-accessible on both
  *     macOS and Linux; validated empirically on Apple M5).
- *   - x86-64: RDTSC.
+ *   - x86-64: RDTSC, with a one-shot calibration of the TSC frequency against
+ *     a ~20 ms CLOCK_MONOTONIC window (nanosleep), so no platform-specific
+ *     frequency is hard-coded.
  *   - Fallback: CLOCK_MONOTONIC for both timing sources.
  *   - RSS: macOS MACH_TASK_BASIC_INFO / Linux /proc/self/statm.
  *   - CPU time: getrusage (both platforms).
@@ -4191,6 +5215,7 @@ void rcre_threadpool_destroy(RCRE_ThreadPool* pool) {
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdatomic.h>
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -4226,7 +5251,41 @@ uint64_t rcre_prof_cycles(void) {
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
-uint64_t rcre_prof_cycles_freq(void) { return 0; } /* calibrate if needed */
+static atomic_uint_fast64_t s_tsc_freq_hz = 0;
+uint64_t rcre_prof_cycles_freq(void) {
+    uint64_t f = atomic_load_explicit(&s_tsc_freq_hz, memory_order_acquire);
+    if (f) return f;
+    /* One-shot TSC calibration: count TSC ticks over a ~20 ms monotonic
+     * window. The long window keeps scheduler/overhead noise well below
+     * 1% of the estimate; safe to re-enter (idempotent). */
+    uint64_t t0 = rcre_prof_now_ns();
+    uint64_t c0 = rcre_prof_cycles();
+#if defined(__linux__) || defined(__APPLE__)
+    struct timespec req = { 0, 20000000 }; /* 20 ms */
+    struct timespec rem = { 0, 0 };
+    if (nanosleep(&req, &rem) != 0 && (rem.tv_sec > 0 || rem.tv_nsec > 0)) {
+        struct timespec rq = { rem.tv_sec, rem.tv_nsec }; /* interrupted: sleep the rest */
+        (void)nanosleep(&rq, &rem);
+    }
+#else
+    uint64_t until = t0 + 20000000ULL; /* 20 ms busy-wait fallback */
+    while (rcre_prof_now_ns() < until) { }
+#endif
+    uint64_t el_ns = rcre_prof_now_ns() - t0;
+    uint64_t dc = rcre_prof_cycles() - c0;
+    uint64_t cal;
+    if (el_ns < 1000000ULL || dc < 1000000ULL) {
+        cal = 1000000000ULL; /* degenerate measurement: assume 1 GHz nominal */
+    } else {
+        cal = (uint64_t)((double)dc * 1e9 / (double)el_ns);
+        if (cal == 0) cal = 1000000000ULL;
+    }
+    uint64_t expected = f;
+    if (!atomic_compare_exchange_weak(&s_tsc_freq_hz, &expected, cal)) {
+        cal = expected; /* a concurrent calibrator published first */
+    }
+    return cal ? cal : 1000000000ULL;
+}
 #else
 uint64_t rcre_prof_cycles(void) { return rcre_prof_now_ns(); }
 uint64_t rcre_prof_cycles_freq(void) { return 1000000000ULL; }

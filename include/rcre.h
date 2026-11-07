@@ -27,7 +27,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 1
-#define RCRE_VERSION_MINOR 0
+#define RCRE_VERSION_MINOR 1
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -170,6 +170,58 @@ void rcre_graph_ctx_reset_tape(RCRE_GraphCtx* ctx);
 void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx);
 
 /* ========================================================================= */
+/* Zero-Copy Byte Slice & Arena String Builder (SLC-REQ-01 to SLC-REQ-03)    */
+/* ========================================================================= */
+
+#define RCRE_NPOS ((size_t)-1)
+
+typedef struct RCRE_Slice {
+    const uint8_t* data;
+    size_t         len;
+} RCRE_Slice;
+
+typedef struct RCRE_SlicePair {
+    RCRE_Slice head;
+    RCRE_Slice tail;
+    bool       found;
+} RCRE_SlicePair;
+
+typedef struct RCRE_StrBuilder {
+    uint8_t*    buf;
+    size_t      len;
+    size_t      cap;
+    RCRE_Arena* arena;
+    bool        overflow;
+} RCRE_StrBuilder;
+
+RCRE_NODISCARD RCRE_Slice rcre_slice_empty(void);
+RCRE_NODISCARD RCRE_Slice rcre_slice_from_parts(const void* data, size_t len);
+RCRE_NODISCARD RCRE_Slice rcre_slice_from_cstr(const char* cstr);
+RCRE_NODISCARD RCRE_Slice rcre_slice_sub(RCRE_Slice s, size_t start, size_t end);
+RCRE_NODISCARD bool rcre_slice_eq(RCRE_Slice a, RCRE_Slice b);
+RCRE_NODISCARD bool rcre_slice_eq_cstr(RCRE_Slice a, const char* cstr);
+RCRE_NODISCARD bool rcre_slice_starts_with(RCRE_Slice s, RCRE_Slice prefix);
+RCRE_NODISCARD bool rcre_slice_ends_with(RCRE_Slice s, RCRE_Slice suffix);
+RCRE_NODISCARD RCRE_Slice rcre_slice_trim_ascii(RCRE_Slice s);
+RCRE_NODISCARD size_t rcre_slice_find_byte(RCRE_Slice s, uint8_t needle);
+RCRE_NODISCARD size_t rcre_slice_rfind_byte(RCRE_Slice s, uint8_t needle);
+RCRE_NODISCARD size_t rcre_slice_count_byte(RCRE_Slice s, uint8_t needle);
+RCRE_NODISCARD RCRE_SlicePair rcre_slice_split_once_byte(RCRE_Slice s, uint8_t delim);
+RCRE_NODISCARD RCRE_SlicePair rcre_slice_split_once(RCRE_Slice s, RCRE_Slice delim);
+RCRE_NODISCARD bool rcre_slice_parse_i64(RCRE_Slice s, int64_t* out_val);
+RCRE_NODISCARD bool rcre_slice_parse_u64(RCRE_Slice s, uint64_t* out_val);
+RCRE_NODISCARD char* rcre_arena_cstr_dup(RCRE_Arena* arena, RCRE_Slice s);
+
+RCRE_NODISCARD RCRE_StrBuilder rcre_sb_init(RCRE_Arena* arena, size_t initial_cap);
+bool rcre_sb_append_slice(RCRE_StrBuilder* sb, RCRE_Slice s);
+bool rcre_sb_append_cstr(RCRE_StrBuilder* sb, const char* cstr);
+bool rcre_sb_append_byte(RCRE_StrBuilder* sb, uint8_t b);
+bool rcre_sb_append_u64(RCRE_StrBuilder* sb, uint64_t val);
+bool rcre_sb_append_i64(RCRE_StrBuilder* sb, int64_t val);
+RCRE_NODISCARD RCRE_Slice rcre_sb_to_slice(const RCRE_StrBuilder* sb);
+RCRE_NODISCARD char* rcre_sb_to_cstr(RCRE_StrBuilder* sb);
+
+/* ========================================================================= */
 /* Tensor Abstraction & Zero-Copy Views (TNS-REQ-01 to TNS-REQ-05)           */
 /* ========================================================================= */
 
@@ -289,14 +341,28 @@ RCRE_NODISCARD int rcre_tensor_adapt(const RCRE_Tensor* src,
 
 typedef struct RCRE_ThreadPool RCRE_ThreadPool;
 
+typedef enum {
+    RCRE_QOS_DEFAULT    = 0, /* Inherit caller OS scheduling class                */
+    RCRE_QOS_PERF       = 1, /* Steer onto Performance (P) cores / high priority  */
+    RCRE_QOS_EFFICIENCY = 2, /* Steer onto Efficiency (E) cores / utility class   */
+    RCRE_QOS_BACKGROUND = 3  /* Lowest background thermal/power scheduling class  */
+} RCRE_QoSClass;
+
 typedef void (*rcre_task_fn)(void* arg, size_t task_id);
 typedef void (*rcre_tile_fn)(void* arg, size_t y_start, size_t y_end, size_t x_start, size_t x_end);
 
 /**
  * @brief Creates a C23 / POSIX work-stealing threadpool with persistent workers.
- * @param num_threads Number of worker threads (0 = auto-detect hardware concurrency).
+ * @param num_threads Number of worker threads (0 = auto-detect effective quota/concurrency).
  */
 RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads);
+
+/**
+ * @brief Creates a work-stealing threadpool with explicit OS Quality-of-Service / core steering.
+ * @param num_threads Number of worker threads (0 = auto-detect matching QoS tier or quota).
+ * @param qos OS scheduling / asymmetric core steering hint.
+ */
+RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create_ex(size_t num_threads, RCRE_QoSClass qos);
 
 /**
  * @brief Executes a 1D parallel-for loop across threadpool workers.
@@ -876,6 +942,18 @@ typedef void (*rcre_axpy_fn)(size_t n, float alpha, const float* x, float* y);
 
 typedef void (*rcre_rgb_to_gray_u8_fn)(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
 
+typedef size_t (*rcre_find_byte_fn)(const uint8_t* hay, size_t len, uint8_t needle);
+
+typedef size_t (*rcre_count_byte_fn)(const uint8_t* hay, size_t len, uint8_t needle);
+
+typedef struct RCRE_CpuTopology {
+    uint32_t logical_cores;         /* Host total online logical processors            */
+    uint32_t perf_cores;            /* Asymmetric Performance (P) cores (Apple/hybrid) */
+    uint32_t eff_cores;             /* Asymmetric Efficiency (E) cores (Apple/hybrid)  */
+    uint32_t effective_quota_cores; /* Effective cgroup v2 / scheduler allowed cores   */
+    uint64_t total_ram_bytes;       /* Total physical/unified memory in bytes          */
+} RCRE_CpuTopology;
+
 typedef struct RCRE_HalDispatch {
     const char*            backend_name;
     uint32_t               cpu_features;
@@ -883,6 +961,8 @@ typedef struct RCRE_HalDispatch {
     rcre_dot_fn            dot_f32;
     rcre_axpy_fn           axpy_f32;
     rcre_rgb_to_gray_u8_fn rgb_to_gray_u8;
+    rcre_find_byte_fn      find_byte;
+    rcre_count_byte_fn     count_byte;
 } RCRE_HalDispatch;
 
 extern RCRE_HalDispatch rcre_hal;
@@ -901,6 +981,16 @@ uint32_t rcre_cpu_get_features(void);
  * @brief Returns human-readable CPU brand/model string.
  */
 const char* rcre_cpu_get_brand(void);
+
+/**
+ * @brief Returns probed asymmetric core counts, cgroup CPU quota, and physical RAM.
+ */
+RCRE_CpuTopology rcre_cpu_get_topology(void);
+
+/**
+ * @brief Queries current OS memory pressure level (0 = normal, 1 = warn, 2 = critical).
+ */
+int rcre_cpu_get_memory_pressure(void);
 
 /* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */
