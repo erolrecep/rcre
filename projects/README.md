@@ -19,6 +19,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-wavelet`** | [`wavelet_compression/`](wavelet_compression/) | Reversible multi-resolution integer wavelet image codec (lossless to 32x lossy) | LeGall 5/3 Integer Lifting, 2D DWT Pyramid, Dead-Zone Quant, Run-Length Codec |
 | **`rcre-xgb`** | [`rcre_xgb/`](rcre_xgb/) | XGBoost-style regularized second-order gradient boosted decision trees | Quantile Histograms, Newton Updates, Missing NaN Routing, Flat-Array Predictor |
 | **`rcre-omnisearch`** | [`omnisearch_hash/`](omnisearch_hash/) | 30M multimodal vector search & LSH hash engine for mixed text and images | L2 Spherical Normalization, Random Hyperplanes, Arena Hash Table, SIMD ADC |
+| **`rcre-galton`** | [`rcre_galtonboard/`](rcre_galtonboard/) | High-speed Galton Board (Quincunx) flow simulator, Bernoulli trials & Central Limit Theorem | xoshiro256** PRNG, SIMD Bit-Level Popcount, Dynamic Histograms, Chi-Square Goodness-of-Fit, WebAssembly Canvas2D |
 
 ---
 
@@ -260,6 +261,33 @@ make project_omnisearch_bench
 ```
 
 For complete CLI documentation and binary file specifications, see [`projects/omnisearch_hash/README.md`](omnisearch_hash/README.md).
+
+---
+
+## 10. `rcre-galton` (Galton Board Quincunx Flow & CLT Simulator)
+
+A high-throughput ISO C23 simulation engine and interactive visualizer modeling the emergence of the Gaussian Normal Distribution from discrete Bernoulli trials (Central Limit Theorem).
+
+### Key Capabilities
+* **Bit-Level SIMD Popcount Saturation**: Hardware popcount over 64-bit `xoshiro256**` words evaluating 64-row lattices at **750+ Million drops/sec** (1.33 ns/drop).
+* **Mathematical Parity**: Exact Binomial PMF computed in log-space (`lgamma`) without floating-point overflow, and Pearson Chi-Square Goodness-of-Fit testing with incomplete gamma p-value calculation.
+* **Live ANSI Terminal Visualizer**: Interactive terminal animation with colored marble deflection trails, pin lattice, and Unicode vertical block histograms.
+* **Portable Web & WebAssembly Visualizer**: Zero-dependency HTML5 Canvas2D / Web Audio visualizer with continuous particle kinematics, restitution, gravity, and live pentatonic audio synthesis.
+* **Python 3.15 FastAPI Streaming Service**: Modern asynchronous service with REST APIs, WebSocket real-time drop streaming, and strict Pydantic v2 validation.
+
+### Quick Start
+```bash
+# Run the C23 AddressSanitizer & UBSan test suite:
+make project_galton_test
+
+# Run the 1,000,000-ball Monte-Carlo demo:
+make project_galton_demo
+
+# Run the 20,000,000-ball throughput benchmark:
+make project_galton_bench
+```
+
+For complete documentation, see [`projects/rcre_galtonboard/README.md`](rcre_galtonboard/README.md).
 
 
 

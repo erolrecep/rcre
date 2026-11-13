@@ -86,7 +86,7 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help prep all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench
+.PHONY: default help prep all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench project_omnisearch_test project_omnisearch_demo project_omnisearch_bench project_galton_test project_galton_demo project_galton_bench
 
 default: help
 
@@ -256,6 +256,16 @@ project_omnisearch_demo: $(LIB)
 
 project_omnisearch_bench: $(LIB)
 	@$(MAKE) -C projects/omnisearch_hash bench
+
+project_galton_test: $(LIB)
+	@$(MAKE) -C projects/rcre_galtonboard test
+
+project_galton_demo: $(LIB)
+	@$(MAKE) -C projects/rcre_galtonboard demo
+
+project_galton_bench: $(LIB)
+	@$(MAKE) -C projects/rcre_galtonboard bench
+
 
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
