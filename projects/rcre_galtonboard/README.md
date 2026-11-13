@@ -17,8 +17,8 @@ $$x_{r, c} = x_{\text{center}} + \left(c - \frac{r}{2}\right) d_x, \quad y_{r, c
 
 A marble enters the top funnel and undergoes $N$ independent collisions. At each peg, it deflects right with probability $p$ and left with probability $1 - p$.
 
-### 2. Discrete Binomial Distribution
-The cumulative horizontal displacement corresponds to the total number of right bounces $K = \sum_{i=1}^N B_i$, where $B_i \sim \text{Bernoulli}(p)$:
+### 2. Discrete Binomial & Compound Mixture Distributions
+When a single peg is at the apex ($P_0 = 1$), the cumulative horizontal displacement corresponds to the total number of right bounces $K = \sum_{i=1}^N B_i$, where $B_i \sim \text{Bernoulli}(p)$:
 
 $$P(K = k) = \binom{N}{k} p^k (1 - p)^{N - k}, \quad k \in \{0, 1, \dots, N\}$$
 
@@ -27,6 +27,17 @@ To prevent numerical overflow for large $N$, combinations are computed in log-sp
 $$\ln \binom{N}{k} = \ln \Gamma(N + 1) - \ln \Gamma(k + 1) - \ln \Gamma(N - k + 1)$$
 
 $$\ln P(K = k) = \ln \binom{N}{k} + k \ln p + (N - k) \ln(1 - p)$$
+
+#### Variable Apex Starting Pins ($P_0 \ge 1$)
+When the top row begins with $P_0$ pegs, incoming balls enter via a discrete uniform prior $U \sim \text{Uniform}\{0, \dots, P_0 - 1\}$. The final landed bin $K = U + \sum_{i=1}^N B_i$ is a compound mixture:
+
+$$P(K = k) = \frac{1}{P_0} \sum_{j=0}^{P_0 - 1} \binom{N}{k - j} p^{k - j} (1 - p)^{N - (k - j)}$$
+
+Compound theoretical moments are given by:
+
+$$\mathbb{E}[K] = \frac{P_0 - 1}{2} + N p, \quad \text{Var}(K) = \frac{P_0^2 - 1}{12} + N p (1 - p)$$
+
+For low pin counts ($N \in \{3, 4\}$) or multi-pin apexes ($P_0 \in \{3, 4\}$), the distribution transitions from a standard bell curve to a flattened plateau (platykurtic mixture).
 
 ### 3. De Moivre–Laplace Theorem & Central Limit Theorem
 As $N \to \infty$, the discrete Binomial PMF converges asymptotically to the continuous Gaussian Normal density $\mathcal{N}(\mu, \sigma^2)$:
@@ -138,7 +149,7 @@ Features:
 - **60 FPS Canvas Physics**: Elastic pin collisions with restitution $e$, gravity, sub-pixel motion.
 - **Web Audio Synthesis**: Synthesized pentatonic chime tones on peg hits scaling with row depth.
 - **Dual Distribution Curves**: Live Amber dotted line (Binomial PMF) + Cyan glowing curve (Gaussian PDF).
-- **Interactive Controls**: Sliders for rows ($6$ to $24$), bias ($0.10$ to $0.90$), drop rate, and bounciness.
+- **Interactive Controls**: Sliders for rows ($N \in [2, 28]$), apex starting pins ($P_0 \in [1, 8]$), bias ($0.10$ to $0.90$), drop rate, bounciness, and quick experiment presets (`N=3, P₀=1`, `N=4, P₀=1`, `N=12, P₀=3`, `N=12, P₀=4`, `Classic`).
 - **One-Click Export**: Instant CSV and JSON export.
 
 ### 4. Run Python 3.15 FastAPI Service

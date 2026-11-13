@@ -43,6 +43,28 @@ def test_simulate_endpoint():
     assert data["elapsed_ms"] >= 0
 
 
+def test_simulate_endpoint_start_pins():
+    """Verify simulation with apex starting pins P_0 = 4 produces mixture distribution."""
+    payload = {
+        "rows": 12,
+        "start_pins": 4,
+        "balls": 30000,
+        "bias": 0.5,
+        "seed": 42
+    }
+    response = client.post("/api/v1/simulate", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["stats"]["total_balls"] == 30000
+    # Expected mean = (4 - 1)/2 + 12 * 0.5 = 7.5
+    assert abs(data["stats"]["mean"] - 7.5) < 0.08
+    # Number of bins = 12 + 4 = 16
+    assert len(data["distribution"]) == 16
+    assert data["stats"]["theoretical_mean"] == 7.5
+    assert abs(data["stats"]["theoretical_variance"] - 4.25) < 1e-4
+
+
 def test_export_endpoints():
     """Verify CSV and JSON export routes."""
     # Ensure there's data in the board

@@ -24,6 +24,7 @@ static void print_usage(const char* prog) {
     printf("Usage: %s [OPTIONS]\n\n", prog);
     printf("Options:\n");
     printf("  --rows <N>           Number of pin rows [1..64] (default: 12)\n");
+    printf("  --start-pins <P>     Number of apex starting pins [1..16] (default: 1)\n");
     printf("  --balls <M>          Total number of balls to drop (default: 100,000)\n");
     printf("  --bias <p>           Right bounce probability [0.0..1.0] (default: 0.500)\n");
     printf("  --seed <S>           PRNG seed for deterministic runs (default: hardware entropy)\n");
@@ -43,6 +44,7 @@ static void print_usage(const char* prog) {
 int main(int argc, char* argv[]) {
     galton_config_t config = {
         .rows = RCRE_GALTON_DEFAULT_ROWS,
+        .start_pins = RCRE_GALTON_DEFAULT_START_PINS,
         .bias = RCRE_GALTON_DEFAULT_BIAS,
         .seed = 0,
         .record_paths = false
@@ -59,6 +61,8 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--rows") == 0 && i + 1 < argc) {
             config.rows = (uint32_t)strtoul(argv[++i], nullptr, 10);
+        } else if (strcmp(argv[i], "--start-pins") == 0 && i + 1 < argc) {
+            config.start_pins = (uint32_t)strtoul(argv[++i], nullptr, 10);
         } else if (strcmp(argv[i], "--balls") == 0 && i + 1 < argc) {
             n_balls = strtoull(argv[++i], nullptr, 10);
         } else if (strcmp(argv[i], "--bias") == 0 && i + 1 < argc) {

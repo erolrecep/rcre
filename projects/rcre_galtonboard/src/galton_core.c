@@ -79,6 +79,17 @@ static inline double prng_next_double(galton_prng_t* prng) {
     return exp(log_prob);
 }
 
+[[nodiscard]] double galton_mixture_pmf(uint32_t n, uint32_t start_pins, uint32_t k, double p) {
+    if (start_pins <= 1) return galton_binomial_pmf(n, k, p);
+    double sum = 0.0;
+    for (uint32_t j = 0; j < start_pins; ++j) {
+        if (k >= j && (k - j) <= n) {
+            sum += galton_binomial_pmf(n, k - j, p);
+        }
+    }
+    return sum / (double)start_pins;
+}
+
 [[nodiscard]] double galton_gaussian_pdf(double x, double mu, double sigma) {
     if (sigma <= 0.0) return 0.0;
     double diff = (x - mu) / sigma;
@@ -166,10 +177,12 @@ static double gammq_cf(double a, double x) {
 
     if (board->config.rows < 1) board->config.rows = 1;
     if (board->config.rows > RCRE_GALTON_MAX_ROWS) board->config.rows = RCRE_GALTON_MAX_ROWS;
+    if (board->config.start_pins < 1) board->config.start_pins = 1;
+    if (board->config.start_pins > RCRE_GALTON_MAX_START_PINS) board->config.start_pins = RCRE_GALTON_MAX_START_PINS;
     if (board->config.bias < 0.0) board->config.bias = 0.0;
     if (board->config.bias > 1.0) board->config.bias = 1.0;
 
-    board->num_bins = board->config.rows + 1;
+    board->num_bins = board->config.rows + board->config.start_pins;
     board->total_dropped = 0;
 
     /* Allocate aligned bin counts buffer (64-byte aligned) */
@@ -195,13 +208,15 @@ static double gammq_cf(double a, double x) {
 
     /* Precompute theoretical distributions */
     uint32_t n = board->config.rows;
+    uint32_t sp = board->config.start_pins;
     double p = board->config.bias;
-    double mu = (double)n * p;
-    double sigma = sqrt((double)n * p * (1.0 - p));
+    double mu = ((double)sp - 1.0) / 2.0 + (double)n * p;
+    double var_u = ((double)(sp * sp) - 1.0) / 12.0;
+    double sigma = sqrt(var_u + (double)n * p * (1.0 - p));
     if (sigma < 1e-6) sigma = 1e-6;
 
     for (uint32_t k = 0; k < board->num_bins; ++k) {
-        board->theoretical_pmf[k] = galton_binomial_pmf(n, k, p);
+        board->theoretical_pmf[k] = galton_mixture_pmf(n, sp, k, p);
         board->gaussian_pdf[k] = galton_gaussian_pdf((double)k, mu, sigma);
     }
 
@@ -232,8 +247,15 @@ void galton_board_reset(galton_board_t* board) {
 
 uint32_t galton_drop_single(galton_board_t* board, uint32_t* path_out) {
     const uint32_t rows = board->config.rows;
+    const uint32_t start_pins = board->config.start_pins;
     const double bias = board->config.bias;
     uint32_t right_bounces = 0;
+
+    uint32_t init_offset = 0;
+    if (start_pins > 1) {
+        init_offset = (uint32_t)(prng_next_double(&board->prng) * (double)start_pins);
+        if (init_offset >= start_pins) init_offset = start_pins - 1;
+    }
 
     /* Symmetric fast-path (p == 0.5): single bit-level popcount */
     if (fabs(bias - 0.5) < 1e-9 && rows <= 64) {
@@ -260,18 +282,20 @@ uint32_t galton_drop_single(galton_board_t* board, uint32_t* path_out) {
         }
     }
 
-    board->bin_counts[right_bounces]++;
+    uint32_t final_bin = init_offset + right_bounces;
+    board->bin_counts[final_bin]++;
     board->total_dropped++;
-    board->last_bin = right_bounces;
-    return right_bounces;
+    board->last_bin = final_bin;
+    return final_bin;
 }
 
 void galton_drop_batch(galton_board_t* board, uint64_t n_balls) {
     const uint32_t rows = board->config.rows;
+    const uint32_t start_pins = board->config.start_pins;
     const double bias = board->config.bias;
 
-    /* Fast path for symmetric board: unroll popcount by 4 */
-    if (fabs(bias - 0.5) < 1e-9 && rows <= 64) {
+    /* Fast path for symmetric board with 1 starting pin: unroll popcount by 4 */
+    if (start_pins == 1 && fabs(bias - 0.5) < 1e-9 && rows <= 64) {
         const uint64_t mask = (rows == 64) ? ~0ULL : ((1ULL << rows) - 1ULL);
         uint64_t i = 0;
         const uint64_t unroll_limit = (n_balls >= 4) ? (n_balls - 3) : 0;
@@ -292,15 +316,26 @@ void galton_drop_batch(galton_board_t* board, uint64_t n_balls) {
             board->bin_counts[__builtin_popcountll(w)]++;
         }
     } else {
-        /* General asymmetric Bernoulli trials */
+        /* General Bernoulli trials with arbitrary starting apex pins and bias */
         for (uint64_t i = 0; i < n_balls; ++i) {
+            uint32_t init_pin = 0;
+            if (start_pins > 1) {
+                init_pin = (uint32_t)(prng_next_double(&board->prng) * (double)start_pins);
+                if (init_pin >= start_pins) init_pin = start_pins - 1;
+            }
+
             uint32_t k = 0;
-            for (uint32_t r = 0; r < rows; ++r) {
-                if (prng_next_double(&board->prng) < bias) {
-                    k++;
+            if (fabs(bias - 0.5) < 1e-9 && rows <= 64) {
+                uint64_t mask = (rows == 64) ? ~0ULL : ((1ULL << rows) - 1ULL);
+                k = (uint32_t)__builtin_popcountll(prng_next_u64(&board->prng) & mask);
+            } else {
+                for (uint32_t r = 0; r < rows; ++r) {
+                    if (prng_next_double(&board->prng) < bias) {
+                        k++;
+                    }
                 }
             }
-            board->bin_counts[k]++;
+            board->bin_counts[init_pin + k]++;
         }
     }
 
@@ -321,12 +356,15 @@ void galton_calculate_stats(galton_board_t* board, galton_stats_t* stats_out) {
 
     stats_out->total_balls = total;
     stats_out->rows = n;
+    stats_out->start_pins = board->config.start_pins;
     stats_out->bins = bins;
     stats_out->bias = p;
 
-    /* Theoretical moments */
-    stats_out->theoretical_mean = (double)n * p;
-    stats_out->theoretical_variance = (double)n * p * (1.0 - p);
+    /* Theoretical moments (compound mixture if start_pins > 1) */
+    double sp = (double)board->config.start_pins;
+    double var_u = (sp * sp - 1.0) / 12.0;
+    stats_out->theoretical_mean = (sp - 1.0) / 2.0 + (double)n * p;
+    stats_out->theoretical_variance = var_u + (double)n * p * (1.0 - p);
     stats_out->theoretical_std_dev = sqrt(stats_out->theoretical_variance);
 
     if (stats_out->theoretical_variance > 1e-12) {

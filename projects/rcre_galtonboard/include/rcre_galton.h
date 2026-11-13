@@ -23,12 +23,15 @@ extern "C" {
 #define RCRE_GALTON_MAX_ROWS 64
 #define RCRE_GALTON_DEFAULT_ROWS 12
 #define RCRE_GALTON_DEFAULT_BIAS 0.5
+#define RCRE_GALTON_DEFAULT_START_PINS 1
+#define RCRE_GALTON_MAX_START_PINS 16
 
 /**
  * @brief Configuration parameters for the Galton Board.
  */
 typedef struct {
     uint32_t rows;           /**< Number of pin levels / rows (1 to RCRE_GALTON_MAX_ROWS) */
+    uint32_t start_pins;     /**< Number of pins at top row (apex) (1 to RCRE_GALTON_MAX_START_PINS, default 1) */
     double bias;             /**< Probability p of deflecting right at each pin [0.0, 1.0] */
     uint64_t seed;           /**< PRNG seed for deterministic runs (0 = use time/hardware entropy) */
     bool record_paths;       /**< Whether to retain recent drop trajectories */
@@ -40,7 +43,8 @@ typedef struct {
 typedef struct {
     uint64_t total_balls;             /**< Total number of balls dropped */
     uint32_t rows;                    /**< Number of pin levels N */
-    uint32_t bins;                    /**< Number of collector bins (N + 1) */
+    uint32_t start_pins;              /**< Number of pins at apex level */
+    uint32_t bins;                    /**< Number of collector bins (N + start_pins) */
     double bias;                      /**< Right-deflection probability p */
 
     /* Empirical sample moments */
@@ -151,6 +155,12 @@ void galton_calculate_stats(galton_board_t* board, galton_stats_t* stats_out);
  * P(K = k) = (n choose k) * p^k * (1-p)^(n-k)
  */
 [[nodiscard]] double galton_binomial_pmf(uint32_t n, uint32_t k, double p);
+
+/**
+ * @brief Calculate compound Mixture PMF for multi-pin apex lattices.
+ * P(K = k) = (1 / start_pins) * sum_{j=0}^{start_pins-1} BinomialPMF(n, k - j, p)
+ */
+[[nodiscard]] double galton_mixture_pmf(uint32_t n, uint32_t start_pins, uint32_t k, double p);
 
 /**
  * @brief Calculate Gaussian Normal Probability Density Function (PDF).

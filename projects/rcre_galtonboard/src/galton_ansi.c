@@ -57,8 +57,9 @@ static void render_frame(const galton_board_t* board,
     printf("%*s\x1b[38;5;244m \\v/ \x1b[0m\n", funnel_indent, "");
 
     /* Draw Pin Pyramid */
+    const uint32_t start_pins = board->config.start_pins > 0 ? board->config.start_pins : 1;
     for (uint32_t r = 0; r < rows; ++r) {
-        int row_pegs = r + 1;
+        int row_pegs = r + start_pins;
         int row_width = (row_pegs - 1) * 4;
         int start_x = center_x - (row_width / 2);
         if (start_x < 2) start_x = 2;
@@ -127,7 +128,8 @@ static void render_frame(const galton_board_t* board,
     /* 4. Telemetry and Statistical Parity HUD */
     printf("\x1b[1;33m--- STATISTICAL TELEMETRY & CLT CONVERGENCE ---\x1b[0m\n");
     printf("  Total Balls Dropped : \x1b[1;32m%llu\x1b[0m\n", (unsigned long long)stats->total_balls);
-    printf("  Lattice Rows (N)    : %u    |  Right Bias (p) : %.3f\n", stats->rows, stats->bias);
+    printf("  Lattice Rows (N)    : %u    |  Apex Pins (P₀) : %u   |  Right Bias (p) : %.3f\n",
+           stats->rows, stats->start_pins, stats->bias);
     printf("  Empirical Mean (x̄)  : \x1b[1;37m%.4f\x1b[0m (Target: %.4f, Δ: %+.4f)\n",
            stats->mean, stats->theoretical_mean, stats->mean - stats->theoretical_mean);
     printf("  Empirical StdDev (s): \x1b[1;37m%.4f\x1b[0m (Target: %.4f, Δ: %+.4f)\n",

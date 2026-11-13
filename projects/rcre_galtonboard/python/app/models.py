@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class SimulationConfig(BaseModel):
     """Configuration for a Galton Board simulation run."""
     rows: int = Field(default=12, ge=1, le=64, description="Number of pin rows N")
+    start_pins: int = Field(default=1, ge=1, le=16, description="Number of apex entry pins P₀")
     balls: int = Field(default=50000, ge=1, le=50_000_000, description="Total balls to simulate")
     bias: float = Field(default=0.50, ge=0.0, le=1.0, description="Right bounce deflection probability p")
     seed: Optional[int] = Field(default=None, description="Optional PRNG seed for deterministic runs")
@@ -18,6 +19,7 @@ class BinDistributionItem(BaseModel):
     count: int
     empirical_prob: float
     binomial_pmf: float
+    mixture_pmf: float
     gaussian_pdf: float
 
 

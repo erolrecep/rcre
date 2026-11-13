@@ -22,6 +22,17 @@ def binomial_pmf(n: int, k: int, p: float) -> float:
     return math.exp(log_prob)
 
 
+def mixture_pmf(n: int, sp: int, k: int, p: float) -> float:
+    """Compute exact discrete mixture PMF over uniform apex starting pins P_0."""
+    if sp <= 1:
+        return binomial_pmf(n, k, p)
+    total = 0.0
+    for j in range(sp):
+        if 0 <= k - j <= n:
+            total += binomial_pmf(n, k - j, p)
+    return total / sp
+
+
 def gaussian_pdf(x: float, mu: float, sigma: float) -> float:
     """Compute Gaussian Normal PDF."""
     if sigma <= 0.0:
@@ -47,7 +58,7 @@ class GaltonEngine:
     def __init__(self, config: SimulationConfig | None = None):
         self.config = config or SimulationConfig()
         self.rng = np.random.default_rng(self.config.seed)
-        self.num_bins = self.config.rows + 1
+        self.num_bins = self.config.rows + self.config.start_pins
         self.bin_counts = np.zeros(self.num_bins, dtype=np.int64)
         self.total_dropped = 0
 
@@ -56,7 +67,7 @@ class GaltonEngine:
         if config:
             self.config = config
             self.rng = np.random.default_rng(config.seed)
-            self.num_bins = config.rows + 1
+            self.num_bins = config.rows + config.start_pins
         self.bin_counts = np.zeros(self.num_bins, dtype=np.int64)
         self.total_dropped = 0
 
@@ -64,8 +75,14 @@ class GaltonEngine:
         """Execute a batch of Monte-Carlo Bernoulli drops."""
         t0 = time.perf_counter()
         
-        # High-performance NumPy vectorization of Binomial(n, p)
-        outcomes = self.rng.binomial(n=self.config.rows, p=self.config.bias, size=n_balls)
+        # High-performance NumPy vectorization of Binomial(n, p) + uniform apex pins
+        b_outcomes = self.rng.binomial(n=self.config.rows, p=self.config.bias, size=n_balls)
+        if self.config.start_pins > 1:
+            u_offsets = self.rng.integers(0, self.config.start_pins, size=n_balls)
+            outcomes = b_outcomes + u_offsets
+        else:
+            outcomes = b_outcomes
+
         counts = np.bincount(outcomes, minlength=self.num_bins)
 
         self.bin_counts += counts
@@ -76,9 +93,10 @@ class GaltonEngine:
 
     def drop_single(self) -> Tuple[int, List[int]]:
         """Simulate a single ball dropping and record deflection path (0=left, 1=right)."""
+        init_pin = int(self.rng.integers(0, self.config.start_pins)) if self.config.start_pins > 1 else 0
         rands = self.rng.random(self.config.rows)
         path = [1 if r < self.config.bias else 0 for r in rands]
-        landed_bin = sum(path)
+        landed_bin = init_pin + sum(path)
 
         self.bin_counts[landed_bin] += 1
         self.total_dropped += 1
@@ -87,11 +105,13 @@ class GaltonEngine:
     def calculate_statistics(self) -> SimulationStats:
         """Compute empirical sample moments and compare against Central Limit Theorem."""
         n = self.config.rows
+        sp = self.config.start_pins
         p = self.config.bias
         M = self.total_dropped
 
-        theo_mean = n * p
-        theo_var = n * p * (1.0 - p)
+        theo_mean = ((sp - 1) / 2.0) + (n * p)
+        var_u = (sp * sp - 1.0) / 12.0
+        theo_var = var_u + (n * p * (1.0 - p))
         theo_std = math.sqrt(theo_var) if theo_var > 0 else 1e-6
         theo_skew = (1.0 - 2.0 * p) / theo_std if theo_std > 1e-6 else 0.0
         theo_kurt = (1.0 - 6.0 * p * (1.0 - p)) / theo_var if theo_var > 1e-6 else 0.0
@@ -131,11 +151,11 @@ class GaltonEngine:
             skewness = 0.0
             kurtosis = 0.0
 
-        # Pearson Chi-Square test against Binomial PMF
+        # Pearson Chi-Square test against Mixture PMF
         chi2 = 0.0
         active_bins = 0
         for k in range(self.num_bins):
-            expected = M * binomial_pmf(n, k, p)
+            expected = M * mixture_pmf(n, sp, k, p)
             if expected >= 1.0:
                 observed = float(self.bin_counts[k])
                 chi2 += ((observed - expected) ** 2) / expected
@@ -169,16 +189,20 @@ class GaltonEngine:
     def get_distribution_items(self) -> List[BinDistributionItem]:
         """Return breakdown per bin with empirical vs theoretical probabilities."""
         n = self.config.rows
+        sp = self.config.start_pins
         p = self.config.bias
         M = self.total_dropped if self.total_dropped > 0 else 1
-        theo_mean = n * p
-        theo_std = math.sqrt(n * p * (1.0 - p)) if n * p * (1.0 - p) > 0 else 1e-6
+        theo_mean = ((sp - 1) / 2.0) + (n * p)
+        var_u = (sp * sp - 1.0) / 12.0
+        theo_var = var_u + (n * p * (1.0 - p))
+        theo_std = math.sqrt(theo_var) if theo_var > 0 else 1e-6
 
         items = []
         for k in range(self.num_bins):
             cnt = int(self.bin_counts[k])
             emp_prob = cnt / M
             b_pmf = binomial_pmf(n, k, p)
+            mix_pmf = mixture_pmf(n, sp, k, p)
             g_pdf = gaussian_pdf(float(k), theo_mean, theo_std)
             items.append(
                 BinDistributionItem(
@@ -186,6 +210,7 @@ class GaltonEngine:
                     count=cnt,
                     empirical_prob=round(emp_prob, 8),
                     binomial_pmf=round(b_pmf, 8),
+                    mixture_pmf=round(mix_pmf, 8),
                     gaussian_pdf=round(g_pdf, 8),
                 )
             )

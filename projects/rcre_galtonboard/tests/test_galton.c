@@ -89,7 +89,7 @@ static void test_clt_convergence_symmetric(void) {
 
 static void test_skewed_board(void) {
     /* N=12, p=0.25: mu = 3.0, theoretical skewness = (1 - 2*0.25) / sqrt(12 * 0.25 * 0.75) = 0.5 / 1.5 = +0.3333 */
-    galton_config_t cfg = {.rows = 12, .bias = 0.25, .seed = 777ULL, .record_paths = false};
+    galton_config_t cfg = {.rows = 12, .start_pins = 1, .bias = 0.25, .seed = 777ULL, .record_paths = false};
     galton_board_t* b = galton_board_create(&cfg);
 
     uint64_t n_balls = 200000ULL;
@@ -103,6 +103,31 @@ static void test_skewed_board(void) {
 
     galton_board_destroy(b);
     TEST_PASS("test_skewed_board");
+}
+
+static void test_start_pins_mixture(void) {
+    /* Test small N=3, start_pins=1: 4 bins, exact binomial probabilities */
+    galton_config_t cfg_small = {.rows = 3, .start_pins = 1, .bias = 0.5, .seed = 101ULL, .record_paths = false};
+    galton_board_t* b_small = galton_board_create(&cfg_small);
+    TEST_ASSERT(b_small->num_bins == 4, "Small N=3 board must have 4 bins");
+    galton_drop_batch(b_small, 100000ULL);
+    galton_stats_t stats_small;
+    galton_calculate_stats(b_small, &stats_small);
+    TEST_ASSERT(fabs(stats_small.mean - 1.5) < 0.02, "N=3 mean must be close to 1.5");
+    galton_board_destroy(b_small);
+
+    /* Test N=12, start_pins=4: target mean = (4-1)/2 + 12*0.5 = 7.5, var = (16-1)/12 + 12*0.25 = 4.25 */
+    galton_config_t cfg_mix = {.rows = 12, .start_pins = 4, .bias = 0.5, .seed = 202ULL, .record_paths = false};
+    galton_board_t* b_mix = galton_board_create(&cfg_mix);
+    TEST_ASSERT(b_mix->num_bins == 16, "N=12 with 4 start pins must have 16 bins");
+    galton_drop_batch(b_mix, 200000ULL);
+    galton_stats_t stats_mix;
+    galton_calculate_stats(b_mix, &stats_mix);
+    TEST_ASSERT(fabs(stats_mix.mean - 7.5) < 0.03, "Multi-pin apex mean diverged from compound expectation 7.5");
+    TEST_ASSERT(fabs(stats_mix.variance - 4.25) < 0.08, "Multi-pin apex variance diverged from compound expectation 4.25");
+    galton_board_destroy(b_mix);
+
+    TEST_PASS("test_start_pins_mixture");
 }
 
 static void test_csv_and_json_export(void) {
@@ -145,6 +170,7 @@ int main(void) {
     test_binomial_pmf_exact();
     test_clt_convergence_symmetric();
     test_skewed_board();
+    test_start_pins_mixture();
     test_csv_and_json_export();
 
     printf("\x1b[1;32m\nAll C23 tests passed successfully!\x1b[0m\n");

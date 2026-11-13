@@ -19,7 +19,11 @@ g_manager = ConnectionManager()
 g_controller = StreamController(g_engine, g_manager)
 
 # Resolve path to HTML visualizer
-WEB_INDEX_PATH = Path(__file__).resolve().parent.parent.parent / "web" / "index.html"
+_candidates = [
+    Path(__file__).resolve().parent.parent / "web" / "index.html",
+    Path(__file__).resolve().parent.parent.parent / "web" / "index.html",
+]
+WEB_INDEX_PATH = next((p for p in _candidates if p.exists()), _candidates[0])
 
 
 @asynccontextmanager
@@ -100,9 +104,9 @@ async def reset_simulation(config: SimulationConfig | None = None):
 async def export_csv():
     """Export current bin accumulation as CSV text."""
     items = g_engine.get_distribution_items()
-    lines = ["bin_index,count,empirical_probability,binomial_pmf,gaussian_pdf"]
+    lines = ["bin_index,count,empirical_probability,binomial_pmf,mixture_pmf,gaussian_pdf"]
     for it in items:
-        lines.append(f"{it.bin},{it.count},{it.empirical_prob:.8f},{it.binomial_pmf:.8f},{it.gaussian_pdf:.8f}")
+        lines.append(f"{it.bin},{it.count},{it.empirical_prob:.8f},{it.binomial_pmf:.8f},{it.mixture_pmf:.8f},{it.gaussian_pdf:.8f}")
     return PlainTextResponse(content="\n".join(lines), media_type="text/csv")
 
 
