@@ -86,9 +86,13 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench
+.PHONY: default help prep all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench
 
 default: help
+
+prep:
+	@chmod +x scripts/prep.sh 2>/dev/null || true
+	@bash scripts/prep.sh
 
 all: $(LIB) $(DYLIB) $(AMALGAMATED_HEADER) $(EXAMPLE_BINS)
 
@@ -442,6 +446,7 @@ help:
 	@echo "  make project_sr_demo       Run Document Super-Resolution (rcre-sr) live demo"
 	@echo ""
 	@echo "Build & Documentation Targets:"
+	@echo "  make prep               Detect OS/Arch/Bitness and prepare build environment"
 	@echo "  make all                Build static/shared libraries, dist header & examples"
 	@echo "  make dist               Generate single-header amalgamated dist/rcre.h"
 	@echo "  make docs               Extract API signatures and build web documentation"
