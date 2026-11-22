@@ -1,7 +1,7 @@
 CC ?= clang
 AR ?= ar
-CFLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O3 -Iinclude -Isrc/hal -Isrc/core -fPIC
-SANITIZER_FLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address,undefined -Iinclude -Isrc/hal -Isrc/core
+CFLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O3 -Iinclude -Isrc/hal -Isrc/core -Isrc/ml -fPIC
+SANITIZER_FLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address,undefined -Iinclude -Isrc/hal -Isrc/core -Isrc/ml -ffp-contract=off
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -39,6 +39,7 @@ SRCS = src/core/arena.c \
        src/core/threadpool.c \
        src/core/prof.c \
        src/core/sparse.c \
+       src/core/io.c \
        src/cv/color.c \
        src/cv/geom.c \
        src/cv/filter.c \
@@ -49,6 +50,7 @@ SRCS = src/core/arena.c \
        src/cv/nn.c \
        src/ml/linear.c \
        src/ml/cluster.c \
+       src/ml/e_means.c \
        src/ml/gbdt_infer.c \
        src/ml/hnsw.c \
        src/autograd/scalar_autograd.c \
@@ -77,7 +79,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_slice test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse
+TESTS = test_arena test_slice test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_emeans test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse test_io
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -86,7 +88,7 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help prep all clean test test-sanitizers test-parity test-portable test-all bench profile examples dist up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench project_omnisearch_test project_omnisearch_demo project_omnisearch_bench project_galton_test project_galton_demo project_galton_bench
+.PHONY: default help prep all clean test test-sanitizers test-parity test-portable test-all bench bench_io profile examples dist docs up_docs sync_blog up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo gpt_train sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench project_omnisearch_test project_omnisearch_demo project_omnisearch_bench project_galton_test project_galton_demo project_galton_bench project_emeans_test project_emeans_demo project_emeans_bench project_manifold_test project_manifold_demo project_manifold_animate project_manifold_swiss project_manifold_pacmap project_manifold_san
 
 default: help
 
@@ -119,6 +121,12 @@ $(OBJS): include/rcre.h
 
 src/hal/kernels_avx2.o: src/hal/kernels_avx2.c
 	$(CC) $(CFLAGS) $(AVX2_FLAGS) -c $< -o $@
+
+# e-means: its strict-parity contract (bit-exact FP32 state machine vs the
+# Python oracle) assumes no FMA contraction. Scope the flag to this
+# translation unit — the rest of the library keeps its default behavior.
+src/ml/e_means.o: src/ml/e_means.c
+	$(CC) $(CFLAGS) -ffp-contract=off -c $< -o $@
 
 src/extras/%.o: src/extras/%.c
 	$(CC) $(CFLAGS) -Isrc/extras -c $< -o $@
@@ -195,7 +203,10 @@ mlp_train: bin/mlp_autograd_train
 	@bin/mlp_autograd_train
 
 gpt_demo: bin/gpt_generate
-	@bin/gpt_generate
+	@bin/gpt_generate $(ARGS)
+
+gpt_train: bin/gpt_generate
+	@bin/gpt_generate $(ARGS)
 
 sparse_bench: bin/sparse_prune_bench
 	@bin/sparse_prune_bench
@@ -266,13 +277,47 @@ project_galton_demo: $(LIB)
 project_galton_bench: $(LIB)
 	@$(MAKE) -C projects/rcre_galtonboard bench
 
+project_emeans_test: $(LIB)
+	@$(MAKE) -C projects/rcre_emeans test
+
+project_emeans_demo: $(LIB)
+	@$(MAKE) -C projects/rcre_emeans demo
+
+project_emeans_bench: $(LIB)
+	@$(MAKE) -C projects/rcre_emeans bench
+
+project_manifold_test: $(LIB)
+	@$(MAKE) -C projects/rcre_manifold test
+
+project_manifold_demo: $(LIB)
+	@$(MAKE) -C projects/rcre_manifold demo
+
+project_manifold_animate: $(LIB)
+	@$(MAKE) -C projects/rcre_manifold animate
+
+project_manifold_swiss: $(LIB)
+	@$(MAKE) -C projects/rcre_manifold animate-swiss
+
+project_manifold_pacmap: $(LIB)
+	@$(MAKE) -C projects/rcre_manifold animate-pacmap
+
+project_manifold_san: $(LIB)
+	@$(MAKE) -C projects/rcre_manifold san
+
 
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@
 
+bin/bench_io: benchmarks/bench_io.c $(LIB)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@
+
 bench: bin/bench_hal
 	@bin/bench_hal
+
+bench_io: bin/bench_io
+	@bin/bench_io
 
 # =============================================================================
 # Profiling & Telemetry (rcre_prof) — CI threshold gate + trace export
@@ -313,6 +358,7 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@bin/test_ml_linear
 	@bin/test_hal
 	@bin/test_cluster
+	@bin/test_emeans
 	@bin/test_gbdt
 	@bin/test_hnsw
 	@bin/test_cam
@@ -330,6 +376,8 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@bin/test_cv_homography
 	@bin/test_cv_optical_flow
 	@bin/test_profiler
+	@bin/test_sparse
+	@bin/test_io
 	@echo "🎉 All RCRE Unit Tests Passed!"
 
 test-sanitizers: $(AMALGAMATED_HEADER)
@@ -357,6 +405,8 @@ test-sanitizers: $(AMALGAMATED_HEADER)
 	@bin/test_hal_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_cluster.c -lm -lpthread -o bin/test_cluster_asan
 	@bin/test_cluster_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_emeans.c -lm -lpthread -o bin/test_emeans_asan
+	@bin/test_emeans_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_gbdt.c -lm -lpthread -o bin/test_gbdt_asan
 	@bin/test_gbdt_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_hnsw.c -lm -lpthread -o bin/test_hnsw_asan
@@ -395,6 +445,10 @@ endif
 	@bin/test_cv_optical_flow_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_profiler.c -lm -lpthread -o bin/test_profiler_asan
 	@bin/test_profiler_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_sparse.c -lm -lpthread -o bin/test_sparse_asan
+	@bin/test_sparse_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_io.c -lm -lpthread -o bin/test_io_asan
+	@bin/test_io_asan
 	@echo "🎉 Zero Memory Leaks & Zero Undefined Behavior Detected!"
 
 test-parity: $(DYLIB)
@@ -454,6 +508,15 @@ help:
 	@echo "  make project_perf_demo     Run Hardware Benchmark (rcre-perf) live demo"
 	@echo "  make project_sr_test       Run Document Super-Resolution (rcre-sr) test suite"
 	@echo "  make project_sr_demo       Run Document Super-Resolution (rcre-sr) live demo"
+	@echo "  make project_emeans_test   Run e-means Clustering (rcre-emeans) test suite"
+	@echo "  make project_emeans_demo   Run e-means Clustering (rcre-emeans) visual ASCII demo"
+	@echo "  make project_emeans_bench  Run e-means vs Lloyd benchmark (4krgb & sift100k)"
+	@echo "  make project_manifold_test    Run Manifold Learning (rcre-manifold) verification suite"
+	@echo "  make project_manifold_demo    Run Manifold Learning (rcre-manifold) 10D ASCII untangling demo"
+	@echo "  make project_manifold_animate Run Manifold Interactive Terminal Timeline Animation (UMAP 10D)"
+	@echo "  make project_manifold_swiss   Run 3D Swiss Roll Unrolling Terminal Animation"
+	@echo "  make project_manifold_pacmap  Run PaCMAP 3-Stage Annealing Terminal Animation"
+	@echo "  make project_manifold_san     Run Manifold Learning under ASan + UBSan sanitizers"
 	@echo ""
 	@echo "Build & Documentation Targets:"
 	@echo "  make prep               Detect OS/Arch/Bitness and prepare build environment"

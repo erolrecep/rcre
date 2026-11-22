@@ -16,6 +16,8 @@
 
 #include "rcre.h"
 
+struct RCRE_SafeTensorsArchive;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -323,6 +325,49 @@ int rcre_gpt_generate(
 
 bool rcre_gpt_save_checkpoint(const RCRE_GPTModel *model, const char *filepath);
 bool rcre_gpt_load_checkpoint(RCRE_GPTModel *model, const char *filepath);
+
+/**
+ * @brief Binds an RCRE_GPTModel's internal layer weight pointers (wte, wpe,
+ *        blocks[0..L-1], ln_f, head_w) directly to an external 64-byte aligned
+ *        memory buffer (e.g. a zero-copy mmap'd .safetensors or .npy view).
+ * @param model Target initialized GPT model.
+ * @param external_params 64-byte aligned read/write or read-only float buffer.
+ * @param num_floats Element count of external_params (must equal model->num_params).
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG on size or alignment mismatch.
+ */
+RCRE_NODISCARD int rcre_gpt_bind_weights_zero_copy(
+    RCRE_GPTModel *model,
+    const float *external_params,
+    size_t num_floats
+);
+
+/**
+ * @brief Serializes an RCRE_GPTModel's parameters into a 64-byte aligned
+ *        Hugging Face .safetensors archive ("gpt.params") via rcre_io.
+ * @param model Trained GPT model.
+ * @param filepath Destination .safetensors file path.
+ * @param scratch Transient arena for JSON header assembly.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_gpt_save_safetensors(
+    const RCRE_GPTModel *model,
+    const char *filepath,
+    RCRE_Arena *scratch
+);
+
+/**
+ * @brief Memory-maps a .safetensors checkpoint and binds its 64-byte aligned
+ *        weights directly into model with ZERO memory copies.
+ * @param model Target GPT model with matching RCRE_GPTConfig.
+ * @param filepath Source .safetensors file path.
+ * @param out_archive Output archive handle (must stay open while model is used).
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_gpt_load_safetensors_zero_copy(
+    RCRE_GPTModel *model,
+    const char *filepath,
+    struct RCRE_SafeTensorsArchive *out_archive
+);
 
 #ifdef __cplusplus
 }

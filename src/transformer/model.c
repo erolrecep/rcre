@@ -170,6 +170,93 @@ void rcre_gpt_zero_grads(RCRE_GPTModel *model) {
     }
 }
 
+RCRE_NODISCARD int rcre_gpt_bind_weights_zero_copy(
+    RCRE_GPTModel *model,
+    const float *external_params,
+    size_t num_floats
+) {
+    if (!model || !model->blocks || !external_params || num_floats != model->num_params) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (((uintptr_t)external_params & 63U) != 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    float *base = (float*)(uintptr_t)external_params;
+    int V = model->config.vocab_size;
+    int T = model->config.seq_len;
+    int C = model->config.embed_dim;
+    int L = model->config.num_layers;
+
+    size_t offset = 0;
+    model->wte = base + offset; offset += (size_t)V * C;
+    model->wpe = base + offset; offset += (size_t)T * C;
+
+    for (int l = 0; l < L; l++) {
+        map_block_pointers(&model->blocks[l], base, &model->config, &offset);
+    }
+
+    model->ln_f_w = base + offset; offset += (size_t)C;
+    model->ln_f_b = base + offset; offset += (size_t)C;
+    model->head_w = base + offset; offset += (size_t)C * V;
+
+    if (offset != model->num_params) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_gpt_save_safetensors(
+    const RCRE_GPTModel *model,
+    const char *filepath,
+    RCRE_Arena *scratch
+) {
+    if (!model || !model->params || !filepath || !scratch || model->num_params == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t shape[1] = { model->num_params };
+    RCRE_Tensor param_view = rcre_tensor_from_buffer(
+        model->params, shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR
+    );
+    const char *names[1] = { "gpt.params" };
+    return rcre_io_safetensors_save(filepath, names, &param_view, 1, scratch);
+}
+
+RCRE_NODISCARD int rcre_gpt_load_safetensors_zero_copy(
+    RCRE_GPTModel *model,
+    const char *filepath,
+    struct RCRE_SafeTensorsArchive *out_archive
+) {
+    if (!model || !filepath || !out_archive) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    int rc = rcre_io_safetensors_open(filepath, out_archive);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    RCRE_Tensor view = {0};
+    rc = rcre_io_safetensors_get_tensor(out_archive, "gpt.params", nullptr, &view);
+    if (rc != RCRE_OK) {
+        rcre_io_safetensors_close(out_archive);
+        return rc;
+    }
+
+    if (view.dtype != RCRE_DTYPE_F32 || view.numel != model->num_params) {
+        rcre_io_safetensors_close(out_archive);
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    rc = rcre_gpt_bind_weights_zero_copy(model, (const float*)view.data, view.numel);
+    if (rc != RCRE_OK) {
+        rcre_io_safetensors_close(out_archive);
+        return rc;
+    }
+    return RCRE_OK;
+}
+
 void rcre_gpt_free(RCRE_GPTModel *model) {
     if (!model) return;
     if (model->owns_heap) {

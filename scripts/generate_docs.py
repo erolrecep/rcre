@@ -84,6 +84,10 @@ def parse_header(header_path):
             category = "Generative Transformers"
         elif name.startswith("rcre_hal") or name.startswith("rcre_cpu"):
             category = "Hardware Acceleration"
+        elif name.startswith("rcre_io") or name.startswith("rcre_slice_parse_f32"):
+            category = "Data I/O & Interop"
+        elif name.startswith("rcre_sparse"):
+            category = "Sparse Matrices"
 
         functions.append({
             "name": name,
@@ -103,10 +107,12 @@ def main():
     rcre_prof_h = root / "include" / "rcre_prof.h"
     rcre_autograd_h = root / "include" / "rcre_autograd.h"
     rcre_transformer_h = root / "include" / "rcre_transformer.h"
+    rcre_sparse_h = root / "include" / "rcre_sparse.h"
+    rcre_io_h = root / "include" / "rcre_io.h"
     rcre_cam_h = root / "include" / "extras" / "rcre_cam.h"
 
     all_funcs = []
-    for h in [rcre_h, rcre_prof_h, rcre_autograd_h, rcre_transformer_h, rcre_cam_h]:
+    for h in [rcre_h, rcre_prof_h, rcre_autograd_h, rcre_transformer_h, rcre_sparse_h, rcre_io_h, rcre_cam_h]:
         if h.exists():
             all_funcs.extend(parse_header(h))
 

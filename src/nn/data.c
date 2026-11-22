@@ -18,136 +18,38 @@ static bool data_is_f32(const RCRE_Tensor* t) {
 }
 
 /* ========================================================================= */
-/* Dynamic line reader (lines may exceed any fixed stack buffer)             */
+/* High-Throughput Memory-Mapped & SIMD-Accelerated CSV Loader               */
 /* ========================================================================= */
-
-typedef struct {
-    char*  buf;
-    size_t cap;
-    int    done; /* 1 when a line was fully read */
-} csv_line_t;
-
-static void csv_line_free(csv_line_t* ln) {
-    if (ln->buf) { free(ln->buf); ln->buf = nullptr; ln->cap = 0; }
-}
-
-/* Reads one full line (without the trailing newline). Returns 1 on success,
- * 0 at EOF. Grows the buffer as needed so arbitrarily long rows parse intact. */
-static int csv_line_read(FILE* f, csv_line_t* ln) {
-    size_t len = 0;
-    int c;
-    ln->done = 1;
-
-    if (ln->cap == 0) {
-        ln->cap = 4096;
-        ln->buf = (char*)malloc(ln->cap);
-        if (!ln->buf) return 0;
-    }
-
-    while ((c = fgetc(f)) != EOF) {
-        if (c == '\n') break;
-        if (c == '\r') continue;
-        if (len + 1 >= ln->cap) {
-            size_t new_cap = ln->cap * 2;
-            char* nb = (char*)realloc(ln->buf, new_cap);
-            if (!nb) { ln->buf = nullptr; ln->cap = 0; ln->done = 0; return 0; }
-            ln->buf = nb;
-            ln->cap = new_cap;
-        }
-        ln->buf[len++] = (char)c;
-    }
-    if (c == EOF && len == 0) {
-        ln->done = 0; /* EOF before any content of this line */
-        return 0;
-    }
-    ln->buf[len] = '\0';
-    return 1;
-}
 
 RCRE_Tensor* rcre_data_load_csv(RCRE_Arena* arena, const char* filepath, bool skip_header, size_t max_rows) {
     if (arena == nullptr || filepath == nullptr) return nullptr;
-    FILE* f = fopen(filepath, "r");
-    if (!f) return nullptr;
 
-    csv_line_t line = { nullptr, 0, 0 };
-
-    if (skip_header && !csv_line_read(f, &line)) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-
-    /* Column count comes from the first data row. The rewind position must
-     * be captured BEFORE reading it, so the parse pass sees the same start. */
-    long first_data_pos = ftell(f);
-    int have_first = csv_line_read(f, &line);
-    if (!have_first) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-    int c0 = 0;
-    char* save = nullptr;
-    char* tok = strtok_r(line.buf, ",\t", &save);
-    while (tok != nullptr) { c0++; tok = strtok_r(nullptr, ",\t", &save); }
-    if (c0 == 0) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-    size_t cols = (size_t)c0;
-
-    size_t rows = 1;
-    if (max_rows == 0 || rows < max_rows) {
-        int rc;
-        while ((rc = csv_line_read(f, &line)) != 0) {
-            rows++;
-            if (max_rows > 0 && rows >= max_rows) break;
-        }
-        (void)rc;
-    }
-    if (rows == 0) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-
-    fseek(f, first_data_pos, SEEK_SET);
-
-    RCRE_Tensor* t = rcre_tensor_alloc_2d(arena, rows, cols);
+    RCRE_ArenaTemp checkpoint = rcre_arena_temp_begin(arena);
+    RCRE_Tensor* t = (RCRE_Tensor*)rcre_arena_alloc(arena, sizeof(RCRE_Tensor), alignof(RCRE_Tensor));
     if (!t) {
-        csv_line_free(&line);
-        fclose(f);
+        rcre_arena_temp_end(checkpoint);
         return nullptr;
     }
-    float* td = rcre_tensor_f32_data(t);
 
-    /* Parse pass: every row must carry exactly `cols` fields. Ragged or
-     * truncated rows are a data error -> reject the whole file (fail fast
-     * instead of silently zero-filling missing values). */
-    size_t r = 0;
-    csv_line_read(f, &line);
-    for (;;) {
-        size_t c = 0;
-        save = nullptr;
-        tok = strtok_r(line.buf, ",\t", &save);
-        while (tok != nullptr) {
-            if (c >= cols) break;
-            td[r * cols + c] = (float)atof(tok);
-            c++;
-            tok = strtok_r(nullptr, ",\t", &save);
-        }
-        if (c != cols) {
-            csv_line_free(&line);
-            fclose(f);
-            return nullptr;
-        }
-        if (++r >= rows) break;
-        if (!csv_line_read(f, &line)) break;
+    RCRE_CSVOptions opts = {
+        .delimiter      = 0, /* Auto: ',' or '\t' */
+        .skip_header    = skip_header,
+        .strict_numbers = false,
+        .max_rows       = max_rows,
+        .pool           = nullptr
+    };
+
+    if (rcre_io_load_csv_ex(filepath, &opts, arena, t) != RCRE_OK) {
+        rcre_arena_temp_end(checkpoint);
+        return nullptr;
     }
 
-    csv_line_free(&line);
-    fclose(f);
+    t->grad = (float*)rcre_arena_alloc(arena, t->numel * sizeof(float), 64);
+    if (!t->grad) {
+        rcre_arena_temp_end(checkpoint);
+        return nullptr;
+    }
+    memset(t->grad, 0, t->numel * sizeof(float));
     return t;
 }
 

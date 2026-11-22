@@ -200,6 +200,26 @@ def load_rcre():
     ]
     rcre.rcre_ml_pca_fit.restype = ctypes.c_int
 
+    # Data I/O primitives (.npy & .safetensors)
+    rcre.rcre_io_save_npy.argtypes = [ctypes.POINTER(RCRE_Tensor), ctypes.c_char_p]
+    rcre.rcre_io_save_npy.restype = ctypes.c_int
+
+    rcre.rcre_io_load_npy.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(RCRE_Tensor)
+    ]
+    rcre.rcre_io_load_npy.restype = ctypes.c_int
+
+    rcre.rcre_io_safetensors_save.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.POINTER(RCRE_Tensor),
+        ctypes.c_size_t,
+        ctypes.c_void_p
+    ]
+    rcre.rcre_io_safetensors_save.restype = ctypes.c_int
+
     return rcre
 
 def wrap_numpy_tensor(np_arr, dtype, layout, rcre, arena):
@@ -627,6 +647,71 @@ def test_resize_bilinear_parity(rcre):
     rcre.rcre_arena_destroy(arena)
     print("     ✓ Bilinear resize parity verified against OpenCV (epsilon <= 1e-3)")
 
+def test_io_npy_and_safetensors_parity(rcre):
+    import os
+    import json
+    import struct
+    print("🔬 [Parity 12/12] Testing NumPy (.npy) & Safetensors I/O against Python...")
+    arena = rcre.rcre_arena_create(16 * 1024 * 1024)
+    np.random.seed(2026)
+
+    # 1. Python np.save -> RCRE rcre_io_load_npy (0-ULP bit-exact)
+    py_arr = np.random.randn(17, 23).astype(np.float32)
+    py_npy_path = "/tmp/rcre_parity_from_py.npy"
+    np.save(py_npy_path, py_arr)
+
+    t_loaded = RCRE_Tensor()
+    rc = rcre.rcre_io_load_npy(py_npy_path.encode("utf-8"), arena, ctypes.byref(t_loaded))
+    assert rc == 0, f"rcre_io_load_npy failed on Python .npy with status {rc}"
+    assert t_loaded.ndim == 2
+    assert t_loaded.shape[0] == 17 and t_loaded.shape[1] == 23
+
+    rcre_arr = np.ctypeslib.as_array(
+        ctypes.cast(t_loaded.data, ctypes.POINTER(ctypes.c_float)),
+        shape=(17, 23)
+    )
+    assert np.array_equal(py_arr, rcre_arr), "0-ULP mismatch loading Python .npy in RCRE!"
+    os.remove(py_npy_path)
+
+    # 2. RCRE rcre_io_save_npy -> Python np.load(mmap_mode='r') (0-ULP + 64B alignment)
+    c_npy_path = "/tmp/rcre_parity_from_c.npy"
+    rc = rcre.rcre_io_save_npy(ctypes.byref(t_loaded), c_npy_path.encode("utf-8"))
+    assert rc == 0, f"rcre_io_save_npy failed with status {rc}"
+
+    mm_arr = np.load(c_npy_path, mmap_mode="r")
+    assert mm_arr.ctypes.data % 64 == 0, f"RCRE .npy mmap pointer {mm_arr.ctypes.data:#x} not 64-byte aligned!"
+    assert np.array_equal(py_arr, mm_arr), "0-ULP mismatch loading RCRE .npy in Python!"
+    del mm_arr
+    os.remove(c_npy_path)
+
+    # 3. RCRE rcre_io_safetensors_save -> Python Safetensors binary spec validation
+    st_path = "/tmp/rcre_parity_model.safetensors"
+    names_c = (ctypes.c_char_p * 1)(b"layer0.weight")
+    rc = rcre.rcre_io_safetensors_save(
+        st_path.encode("utf-8"),
+        names_c,
+        ctypes.byref(t_loaded),
+        1,
+        arena
+    )
+    assert rc == 0, f"rcre_io_safetensors_save failed with status {rc}"
+
+    with open(st_path, "rb") as f:
+        raw = f.read()
+    hdr_len = struct.unpack("<Q", raw[:8])[0]
+    assert (8 + hdr_len) % 64 == 0, f"Safetensors data offset {8 + hdr_len} not 64-byte aligned!"
+    meta = json.loads(raw[8:8 + hdr_len].decode("utf-8"))
+    assert "layer0.weight" in meta
+    assert meta["layer0.weight"]["dtype"] == "F32"
+    assert meta["layer0.weight"]["shape"] == [17, 23]
+    b0, b1 = meta["layer0.weight"]["data_offsets"]
+    st_arr = np.frombuffer(raw[8 + hdr_len + b0 : 8 + hdr_len + b1], dtype=np.float32).reshape(17, 23)
+    assert np.array_equal(py_arr, st_arr), "0-ULP mismatch in RCRE .safetensors payload!"
+    os.remove(st_path)
+
+    rcre.rcre_arena_destroy(arena)
+    print("     ✓ NumPy (.npy) & Safetensors 0-ULP bit-exact parity & 64B alignment verified")
+
 # ---------------------------------------------------------------------------
 # Main Runner
 # ---------------------------------------------------------------------------
@@ -648,6 +733,7 @@ def main():
     test_cnn_parity(rcre)
     test_integral_image_parity(rcre)
     test_resize_bilinear_parity(rcre)
+    test_io_npy_and_safetensors_parity(rcre)
 
     print("=" * 70)
     print("🎉 ALL LAYER 3 NUMERICAL PARITY GATES PASSED (OpenCV & Scikit-Learn)!")

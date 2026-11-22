@@ -27,8 +27,10 @@
 * **Dual Reverse-Mode Autograd Engine**: Micrograd-style scalar computation DAGs (`RCRE_ScalarVal`) with topological backprop and Graphviz export, alongside high-performance Tensor Tape autograd (`RCRE_AGTensor`) with automatic Vector-Jacobian Product (VJP) propagation and cache-blocked GEMM.
 * **Autoregressive Transformer Suite**: Complete NanoGPT-style generative transformer engine featuring multi-head self-attention, GELU, LayerNorm, KV-cache with $\le 10^{-5}$ equivalence, Byte-Pair Encoding (BPE) subword tokenizer, streaming dataloaders, and scheduled AdamW.
 * **Zero-Allocation Deep Learning Suite**: Production loss functions (MSE, BCE, Softmax Cross-Entropy, KL Divergence), optimizers (Decoupled AdamW, Momentum SGD), streaming CSV dataset loaders, and live terminal ANSI/SVG/WebGL visualizers.
+* **e-Means Mini-Batch Clustering Operator (`rcre_ml_emeans_*`)**: Faithful C23 port of the 2026 e-means algorithm (Bessa et al., arXiv 2611.09501) — exponential-moving-average centroid updates with a cosine-annealed step schedule, scaling-law batch/step auto-tuning (shipped-reference constants), and Gumbel-max dead-cluster revival with deterministic per-dimension splits. Dual-kernel exact assignment (per-row FP32 for $k \\cdot d \\le 16384$, HAL GEMM above), FP64 objective & finalization, and a pool-parallel slab partition that is **bit-identical across pool sizes and machines** (the partition depends only on the batch size). Verified: 205,790-assertion 0-ULP strict-parity replay against an independent Python oracle, plus statistical quality parity (C run at 0.589× the oracle's MSE). On an 8.3M-pixel palette workload (d=3, k=256) the pooled operator trains in ~1.1 s vs 34–78 s for 25-iteration Lloyd k-means; on 100K × 128-d embeddings with k=4096 it is 9× faster **and** 0.566× the final MSE.
 * **Isolated Camera Companion (`rcre_cam.h`)**: Native hardware ingestion using macOS AVFoundation (`CVPixelBuffer` zero-copy), Linux Video4Linux2 (`mmap`), and deterministic synthetic test generators for headless CI.
-* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~456 KB, 12,805 lines).
+* **High-Performance Scientific Data I/O (`rcre_io.h`)**: Zero-copy virtual memory mapping (`mmap` + `madvise` + `F_NOCACHE`), 64-byte SIMD-aligned **NumPy (`.npy` v1/v2)** and **Hugging Face (`.safetensors`)** containers, **2.77 GB/s** multi-threaded SIMD CSV ingestion with Clinger/Eisel–Lemire 0-ULP float32 parsing, **45.45 GB/s** ARM NEON byte-shuffling with `"RCRZ"` LZ4-class lossless block compression, out-of-core ping-pong `.npy` streaming, and zero-copy **DLPack v1.0** & **Apache Arrow C Data Interface** bridges. See [**io_benchmark.md**](io_benchmark.md).
+* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (~619 KB, 17,727 lines).
 * **Native Hardware Profiling & Telemetry (`rcre_prof`)**: Microsecond-accurate cycle tracing (< 7 ns overhead per scope) on ARM64 (`cntvct_el0`) and x86 (`rdtsc`), tracking dual-layer RAM (Arena watermarks vs OS RSS), CPU time, engine storage I/O, and zero-dependency Chrome Tracing/Perfetto JSON and standalone HTML exports. See [**rcre_profiling.md**](rcre_profiling.md).
 * **Interactive Educational Visualizers**: Three.js 3D tensor stride visualizers, cache hierarchy simulators, and live in-browser webcam playgrounds in [`web/`](web/).
 
@@ -48,6 +50,8 @@
 | **Tabular GBDT Prediction** (100 Trees) | Flat-Array Nodes | **7.86M preds / sec** | **127 ns** / pred | Linear Arena (0 in loop) |
 | **XGBoost Inference** (82 Trees, 100k Rows) | Flat 24-byte Cache-Aligned | **1.18B rows / sec** | **0.8 µs** / row | Linear Arena (0 in loop) |
 | **HNSW Vector Search** (64-D, M=16) | SIMD Euclidean L2 | **44,434 QPS** | **22.5 µs** / query | Linear Arena (0 in loop) |
+| **E-Means Clustering (8.3M × 3, k=256, T=5)** | Pool Slabs + Exact-Kernel Argmin | **12.3x vs serial** | **1.11 s** (Lloyd-25: 35.9 s) | Linear Arena (0 in loop) |
+| **E-Means Clustering (100K × 128, k=4096, T=5)** | Pool Slabs + HAL GEMM Argmin | **8.8x wall vs Lloyd-25** | **1.16 s** (0.566× Lloyd MSE) | Linear Arena (0 in loop) |
 | **LSH Multimodal Vector Search (Top-20)** | Multi-Probe Hash + SIMD Re-rank | **113,392 QPS** | **8.82 µs** / query | Linear Arena (0 in loop) |
 | **Live Camera Edge Filter** (640 × 480) | Camera → Gray → Blur → Sobel | **239.39 FPS** | **4.18 ms** / frame | Single scratchpad rewind |
 | **BCSR4 SpMV (MobileNet Head 75% Sparse)** | ARM NEON 4x4 Register Blocks | **28.78x speedup** | **1.56 µs** / pass | Linear Arena (0 in loop) |
@@ -55,12 +59,16 @@
 | **Cache-Tiled GEMM (512 × 512)** | ARM NEON 128-bit | **71.56 GFLOPS** | **3.75 ms** | Linear Arena (25.0x speedup vs scalar) |
 | **Cache Streaming vs Thrashing** (4096 × 4096) | Sequential Row-Major | **7.33 GB/s** | **8.96 ms** | 6.5x faster than column-major |
 | **ShapeTracker Zero-Copy Transpose** | O(1) Stride Swap | **Instantaneous** | **0 ns** | 0 bytes memory allocated |
+| **Parallel SIMD CSV Ingestion** (16,384 × 64 F32) | `mmap` + SIMD Slabs + Eisel–Lemire | **2.77 GB/s (397M floats/s)** | **2.64 ms** | **32.7x vs C89 / 11.3x vs NumPy** |
+| **Zero-Copy `.npy` / `.safetensors` View** (64 MB) | 64-Byte Padded `mmap` (`is_view=true`) | **9.89 GB/s sustained** | **55.0 µs** (`.npy`) / **8.2 ns** (lookup) | **0 bytes allocated (119x vs `fread`)** |
+| **SIMD Byte-Unshuffle & `RCRZ` Block Codec** (16 MB) | ARM NEON `vst4q_u8` + LZ4-Class Match | **45.45 GB/s** (unshuffle) / **2.61 GB/s** (codec) | **0.34 ms** / **5.98 ms** | **0-ULP Lossless** (Scoped Arena) |
+| **DLPack v1.0 & Arrow C Data Zero-Copy Handoff** | Plain C ABI Pointer & Stride Cast | **> 85 TB/s equiv.** | **10.5 ns** / **11.0 ns** | **0 bytes copied** |
 
 ---
 
 ## 🛠️ Turnkey Production Projects (`projects/`)
 
-In addition to modular core kernels and unit benchmarks, RCRE includes nine self-contained, turnkey production applications built 100% on RCRE and ISO C23:
+In addition to modular core kernels and unit benchmarks, RCRE includes twelve self-contained, turnkey production applications built 100% on RCRE and ISO C23:
 
 | Project | Directory | Purpose | Core RCRE Technologies | Live Launch |
 | :--- | :--- | :--- | :--- | :--- |
@@ -73,6 +81,9 @@ In addition to modular core kernels and unit benchmarks, RCRE includes nine self
 | **`rcre-wavelet`** | [`projects/wavelet_compression/`](projects/wavelet_compression/) | Reversible multi-resolution integer wavelet image codec (lossless to 32x lossy) | LeGall 5/3 Integer Lifting, 2D DWT Pyramid, Dead-Zone Quant, Run-Length Codec | `make project_wavelet_demo` |
 | **`rcre-xgb`** | [`projects/rcre_xgb/`](projects/rcre_xgb/) | XGBoost-style regularized second-order gradient boosted trees | Quantile Histograms, Newton Updates, Missing NaN Routing, Flat-Array Predictor | `make project_xgb_demo` |
 | **`rcre-omnisearch`** | [`projects/omnisearch_hash/`](projects/omnisearch_hash/) | 30M multimodal vector search & LSH hash engine for mixed text & images | L2 Spherical Normalization, Random Hyperplanes, Arena Hash Table, SIMD ADC | `make project_omnisearch_demo` |
+| **`rcre-galton`** | [`projects/rcre_galtonboard/`](projects/rcre_galtonboard/) | High-speed Galton Board (Quincunx) flow simulator, Bernoulli trials & CLT | SIMD Bit-Level Popcount, Dynamic Histograms, Chi-Square Goodness-of-Fit, WebAssembly | `make project_galton_demo` |
+| **`rcre-emeans`** | [`projects/rcre_emeans/`](projects/rcre_emeans/) | Ultra-fast mini-batch EMA k-means clustering with scaling-law recipes & dead-cluster revival | EMA Updates, Gumbel-Max Revival, Dual-Kernel Argmin, Deterministic Slabs | `make project_emeans_demo` |
+| **`rcre-manifold`** | [`projects/rcre_manifold/`](projects/rcre_manifold/) | Multi-dimensional manifold learning, UMAP, Barnes-Hut t-SNE & PaCMAP untangling | Fuzzy Simplicial Sets, 2D Quadtree Repulsion, 3-Tier Pair Annealing, WebAssembly | `make project_manifold_demo` |
 
 📖 *For complete CLI documentation and architectural guides, see [`projects/README.md`](projects/README.md).*
 
@@ -95,6 +106,8 @@ apps/rcre/
 │   └── GUIDELINES.md           # Developer mini guideline & silicon best practices cheat sheet
 ├── include/
 │   ├── rcre.h                  # Core public C23 header & CV APIs
+│   ├── rcre_io.h               # Zero-copy mmap, .npy, .safetensors, SIMD CSV, DLPack & Arrow
+│   ├── rcre_sparse.h           # CSR & 4x4 Block-CSR (BCSR4) sparse matrix & pruning engine
 │   ├── rcre_prof.h             # High-frequency hardware profiler & telemetry header
 │   ├── rcre_autograd.h         # Autograd, Losses, Optimizers, Ingestion & Vis C23 header
 │   ├── rcre_transformer.h      # NanoGPT, Attention, KV-Cache & Tokenizers C23 header
@@ -107,12 +120,16 @@ apps/rcre/
 │   ├── pca_compression/       # rcre-pca: Spatial PCA image compression & 8-bit codec
 │   ├── c_performance/         # rcre-perf: Hardware microarchitecture & SIMD benchmark suite
 │   ├── document_super_resolution/ # rcre-sr: Adaptive document super-resolution & OCR restoration
+│   ├── wavelet_compression/   # rcre-wavelet: Multi-resolution integer wavelet image codec
+│   ├── rcre_xgb/              # rcre-xgb: XGBoost-style gradient boosted decision trees
 │   ├── omnisearch_hash/        # rcre-omnisearch: 30M multimodal vector search & LSH hash engine
+│   ├── rcre_galtonboard/      # rcre-galton: High-speed Galton Board Bernoulli & CLT simulator
+│   ├── rcre_emeans/           # rcre-emeans: Fast mini-batch EMA k-means with Gumbel revival
 │   └── README.md               # Production Projects Hub guide
 ├── src/
 │   ├── core/                   # Arena allocator, profiler engine (prof.c), tensor, threadpool
 │   ├── cv/                     # Color, Resizing, Filters, FFT, Features, Homography, Optical Flow, CNN
-│   ├── ml/                     # OLS regression, Logistic, Linear SVM, KMeans, PCA, GBDT, HNSW
+│   ├── ml/                     # OLS regression, Logistic, Linear SVM, KMeans, E-Means, PCA, GBDT, HNSW
 │   ├── autograd/               # Scalar reverse-mode DAG autograd & Tensor tape VJP autograd
 │   ├── transformer/            # Generative transformer, Attention, KV-Cache, BPE, Char tokenizer
 │   ├── nn/                     # Losses, AdamW/SGD optimizers, CSV streaming, ANSI/SVG visualizers
@@ -127,13 +144,42 @@ apps/rcre/
 ├── bindings/
 │   ├── python/                 # Python FFI bindings (ctypes + NumPy interop)
 │   └── rust/                   # Safe Rust FFI bindings crate
-├── tests/                      # 27 Unit test suites (including test_profiler), ASan/UBSan targets
-├── benchmarks/                 # Micro-benchmarks for HAL kernels, GEMM, and bench_prof
+├── tests/                      # 31 Unit test suites (including test_io & test_profiler), ASan/UBSan targets
+├── benchmarks/                 # Micro-benchmarks for HAL kernels (bench_hal), I/O (bench_io), and bench_prof
 ├── prof/                       # Profiling trace artifacts (Perfetto JSON & HTML reports)
+├── io_benchmark.md             # Hardware I/O bandwidth & scientific ecosystem comparison report
 ├── rcre_profiling.md           # Standalone guide for hardware profiling and Perfetto usage
 ├── web/                        # Interactive Three.js 3D visualizers and webcam playground
 └── Makefile                    # Unified, self-contained, zero-dependency build system
 ```
+
+---
+
+## ✅ Required Steps (Prerequisites & First Run)
+
+Follow these steps once to build, verify, and run everything in this project (including the new `rcre_io` engine and the local small-LLM pipeline):
+
+1. **Install a C23-capable toolchain** (required; the core is strict ISO C23, `-std=c2x`):
+   * macOS: Xcode Command Line Tools (`xcode-select --install`), Apple Clang 15+ (Clang 17+ recommended).
+   * Linux: `clang` 17+ or `gcc` 13+ plus `make` (`sudo apt install clang make`). `-D_GNU_SOURCE` is added automatically.
+   * Windows: use WSL2 (Ubuntu) and follow the Linux steps.
+2. **Install `python3`** (3.9+): required by `make dist` (`scripts/amalgamate.py`) and `make docs`.
+3. **Install [`uv`](https://docs.astral.sh/uv/)** *(optional)*: only needed for `make test-parity` (pulls `numpy`, `opencv-python`, `scikit-learn`, `scipy` on demand, verifying `.npy` / `.safetensors` 0-ULP parity).
+4. **Clone and enter the project**:
+   ```bash
+   git clone https://github.com/erolrecep/rcre.git && cd rcre   # or: cd apps/rcre inside the monorepo
+   ```
+5. **Prepare the build environment** (detects OS / architecture / SIMD): `make prep`
+6. **Build the library, single header, and examples**: `make all` → produces `lib/librcre.a`, `lib/librcre.dylib`, `dist/rcre.h`, and `bin/*`.
+7. **Verify the install**: `make test` (all unit suites, including `test_io`), then optionally `make test-sanitizers` (ASan + UBSan) and `make test-parity`.
+8. **Run the new capabilities**:
+   ```bash
+   make bench_io     # Scientific data I/O bandwidth benchmark (see io_benchmark.md)
+   make gpt_train    # Train a tiny LLM locally, save .safetensors, zero-copy reload + KV-cache inference
+   ```
+   * `make gpt_train` needs the bundled corpora in [`data/`](data/) (`tinystories.txt`, `tinyshakespeare.txt`, `arithmetic.txt`). Use another one with `make gpt_train ARGS="--corpus data/tinyshakespeare.txt --steps 600"`.
+   * It needs ~64 MB of free RAM and about 5 seconds on Apple M-series; it writes a temporary checkpoint to `/tmp` and removes it afterwards.
+9. **Optional hardware add-ons**: macOS camera demos use AVFoundation (permission prompt on first run); Linux uses V4L2 (`/dev/video0`); use `make webcam_test_dummy` for headless/CI.
 
 ---
 
@@ -304,6 +350,31 @@ open prof/rcre_profile.html  # On macOS (or xdg-open on Linux)
 # Drag prof/rcre_profile.json into https://ui.perfetto.dev for interactive timeline exploration!
 ```
 📖 For detailed architectural derivations and C23 API integration instructions, see [**rcre_profiling.md**](rcre_profiling.md).
+
+---
+
+## ⚡ High-Performance Scientific Data I/O (`rcre_io`) & Bandwidth Benchmarks
+
+RCRE includes a zero-dependency scientific data I/O engine ([`include/rcre_io.h`](include/rcre_io.h), [`src/core/io.c`](src/core/io.c)) engineered from first principles to prevent storage bottlenecks from starving SIMD compute kernels:
+
+* **Zero-Copy 64-Byte Aligned Containers (`.npy` & `.safetensors`)**: Pads binary headers to exact multiples of 64 bytes ($\Delta_{\text{file}} \equiv 0 \pmod{64}$) so OS page-aligned `mmap` views (`is_view = true`) land directly on 64-byte SIMD boundaries with **0 bytes copied and 0 arena allocations**.
+* **Multi-Threaded SIMD Tabular CSV Ingestion**: Combines `mmap` + `rcre_hal.find_byte` SIMD scanning + `RCRE_ThreadPool` row-slab partitioning + a Clinger/Eisel–Lemire **0-ULP fast float32 parser** (`rcre_slice_parse_f32`), reaching **2.77 GB/s** on Apple M5 Max (**32.7x faster** than C89 `stdio`, **11.3x faster** than Python `numpy.loadtxt`).
+* **SIMD Byte-Shuffle & Lossless `"RCRZ"` Block Codec**: Uses hardware de-interleaving (`vld4q_u8` / `vst4q_u8` on NEON, `_mm_shuffle_epi8` on AVX2, `wasm_i8x16_shuffle` on WASM SIMD128) at **45.45 GB/s** to group correlated IEEE-754 exponent bytes prior to zero-dependency LZ4-class match compression.
+* **Zero-Copy Cross-Framework C ABI Bridges**: Built-in **DLPack v1.0** (`RCRE_DLTensor`, **10.5 ns**) and **Apache Arrow C Data Interface** (`RCRE_ArrowSchema` / `RCRE_ArrowArray`, **11.0 ns**) structs for instant zero-copy pointer exchange with PyTorch, NumPy, JAX, Polars, and DuckDB.
+
+| I/O Workload | Legacy C89 `stdio` | Python `NumPy 2.x` | **RCRE (`rcre_io` C23)** | **RCRE Speedup** |
+| :--- | :---: | :---: | :---: | :---: |
+| **CSV Ingestion (1M Floats, 7.5 MB)** | 86.53 ms (86.7 MB/s) | 29.96 ms (250.3 MB/s) | **2.64 ms (2,836.6 MB/s / 2.77 GB/s)** | **32.7x vs C89 / 11.3x vs NumPy** |
+| **64 MB `.npy` Cold Map / View Init** | 6.55 ms (`fread` copy) | 144.16 µs (`mmap_mode='r'`) | **55.03 µs (`rcre_io_view_npy`, 0 B alloc)** | **119x vs `fread` / 2.6x vs NumPy** |
+| **`.safetensors` Tensor View Lookup** | — | — | **8.2 ns (`is_view = true`, 64B aligned)** | **Zero-Copy $\mathcal{O}(1)$ Slice Cast** |
+| **SIMD Byte-Unshuffle + `RCRZ` Codec** | — | — | **45.45 GB/s unshuffle / 2.61 GB/s compress** | **0-ULP Bit-Exact Lossless** |
+| **DLPack & Arrow C ABI Handoff** | `memcpy` required | `__dlpack__` capsule | **10.5 ns (DLPack) / 11.0 ns (Arrow)** | **0 Bytes Copied** |
+
+```bash
+# Run the full C23 Scientific Data I/O Bandwidth Benchmark Suite
+make bench_io
+```
+📖 For the complete multi-hardware bandwidth matrix (Apple Silicon, x86_64 AVX2 HPC, ARM64 Edge, WebAssembly SIMD128) and architectural comparison against HDF5, NumPy, Safetensors-rs, Blosc2, and Apache Arrow, see [**io_benchmark.md**](io_benchmark.md).
 
 ---
 

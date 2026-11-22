@@ -412,7 +412,27 @@
       {
         "name": "num_threads",
         "type": "size_t",
-        "description": "Number of worker threads (0 = auto-detect hardware concurrency)."
+        "description": "Number of worker threads (0 = auto-detect effective quota/concurrency)."
+      }
+    ],
+    "returns": "",
+    "category": "Concurrency",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_threadpool_create_ex",
+    "return_type": "RCRE_ThreadPool*",
+    "brief": "Creates a work-stealing threadpool with explicit OS Quality-of-Service / core steering.",
+    "params": [
+      {
+        "name": "num_threads",
+        "type": "size_t",
+        "description": "Number of worker threads (0 = auto-detect matching QoS tier or quota)."
+      },
+      {
+        "name": "qos",
+        "type": "RCRE_QoSClass",
+        "description": "OS scheduling / asymmetric core steering hint."
       }
     ],
     "returns": "",
@@ -2135,6 +2155,175 @@
     "header": "rcre.h"
   },
   {
+    "name": "rcre_ml_emeans_params_default",
+    "return_type": "RCRE_EMMeansParams",
+    "brief": "Returns the default parameter struct: T = 5, batch and alpha0 from",
+    "params": [],
+    "returns": "",
+    "category": "Machine Learning",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_ml_emeans_recipe",
+    "return_type": "int",
+    "brief": "Fills the e-means training plan without running training.",
+    "params": [
+      {
+        "name": "X",
+        "type": "const RCRE_Tensor*",
+        "description": "[n,d] F32 input (only n and d are needed; data may be NULL)."
+      },
+      {
+        "name": "k",
+        "type": "size_t",
+        "description": "Number of clusters."
+      },
+      {
+        "name": "params",
+        "type": "const RCRE_EMMeansParams*",
+        "description": "NULL = all defaults."
+      },
+      {
+        "name": "out",
+        "type": "RCRE_EMMeansRecipe*",
+        "description": "Resolved recipe (batch B, alpha0, epoch rows, total steps)."
+      }
+    ],
+    "returns": "s RCRE_OK or RCRE_ERR_INVALID_ARG.",
+    "category": "Machine Learning",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_ml_emeans_fit",
+    "return_type": "int",
+    "brief": "Trains e-means on X with all-default parameters (T = nepochs).",
+    "params": [
+      {
+        "name": "X",
+        "type": "const RCRE_Tensor*",
+        "description": "[n,d] F32."
+      },
+      {
+        "name": "k",
+        "type": "size_t",
+        "description": "Number of clusters (1 <= k <= n)."
+      },
+      {
+        "name": "nepochs",
+        "type": "float",
+        "description": "Epoch budget T (fractional supported, > 0, <= 16)."
+      },
+      {
+        "name": "centroids",
+        "type": "RCRE_Tensor*",
+        "description": "Output [k,d] F32 (last-epoch-mean finalization)."
+      },
+      {
+        "name": "labels",
+        "type": "RCRE_Tensor*",
+        "description": "Output [n,1] I32: last-epoch nearest-centroid id, or NULL."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Scratch arena (permutation, batch stats, labels)."
+      }
+    ],
+    "returns": "s RCRE_OK or an RCRE_ERR_* code.",
+    "category": "Machine Learning",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_ml_emeans_fit_ex",
+    "return_type": "int",
+    "brief": "Trains e-means with full control (see RCRE_EMMeansParams).",
+    "params": [
+      {
+        "name": "X",
+        "type": "const RCRE_Tensor*",
+        "description": "[n,d] F32 (n >= 1, d >= 1, n < 2^32)."
+      },
+      {
+        "name": "k",
+        "type": "size_t",
+        "description": "Number of clusters (1 <= k <= n)."
+      },
+      {
+        "name": "params",
+        "type": "const RCRE_EMMeansParams*",
+        "description": "NULL = all defaults."
+      },
+      {
+        "name": "centroids",
+        "type": "RCRE_Tensor*",
+        "description": "Output [k,d] F32."
+      },
+      {
+        "name": "labels",
+        "type": "RCRE_Tensor*",
+        "description": "Output [n,1] I32 (F32 also accepted), or NULL."
+      },
+      {
+        "name": "out_inertia",
+        "type": "float*",
+        "description": "Optional: moving-pass mean squared distance of the"
+      },
+      {
+        "name": "out_n_splits",
+        "type": "int*",
+        "description": "Optional: total dead-cluster revival splits performed."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Scratch arena."
+      },
+      {
+        "name": "pool",
+        "type": "RCRE_ThreadPool*",
+        "description": "Optional RCRE_ThreadPool (NULL = serial). Pooled runs are"
+      }
+    ],
+    "returns": "s RCRE_OK or an RCRE_ERR_* code.",
+    "category": "Machine Learning",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_ml_emeans_assign",
+    "return_type": "int",
+    "brief": "Exact nearest-centroid assignment of X against trained centroids.",
+    "params": [
+      {
+        "name": "X",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "centroids",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "type": "RCRE_Tensor*",
+        "description": "Output [n,1] I32 (F32 also accepted)."
+      },
+      {
+        "name": "out_mse",
+        "type": "float*",
+        "description": "Optional: mean squared distance to the assigned centroid"
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "s RCRE_OK or an RCRE_ERR_* code.",
+    "category": "Machine Learning",
+    "header": "rcre.h"
+  },
+  {
     "name": "rcre_ml_dbscan_fit",
     "return_type": "int",
     "brief": "Density-Based Spatial Clustering of Applications with Noise (DBSCAN).",
@@ -2432,6 +2621,24 @@
     "header": "rcre.h"
   },
   {
+    "name": "rcre_cpu_get_topology",
+    "return_type": "RCRE_CpuTopology",
+    "brief": "Returns probed asymmetric core counts, cgroup CPU quota, and physical RAM.",
+    "params": [],
+    "returns": "",
+    "category": "Hardware Acceleration",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cpu_get_memory_pressure",
+    "return_type": "int",
+    "brief": "Queries current OS memory pressure level (0 = normal, 1 = warn, 2 = critical).",
+    "params": [],
+    "returns": "",
+    "category": "Hardware Acceleration",
+    "header": "rcre.h"
+  },
+  {
     "name": "rcre_prof_now_ns",
     "return_type": "uint64_t",
     "brief": "RCRE Native Profiling & Telemetry Subsystem (ISO C23, zero-dependency)",
@@ -2479,6 +2686,1041 @@
     "returns": "",
     "category": "Generative Transformers",
     "header": "rcre_transformer.h"
+  },
+  {
+    "name": "rcre_gpt_bind_weights_zero_copy",
+    "return_type": "int",
+    "brief": "Binds an RCRE_GPTModel's internal layer weight pointers (wte, wpe,",
+    "params": [
+      {
+        "name": "model",
+        "type": "RCRE_GPTModel *",
+        "description": "Target initialized GPT model."
+      },
+      {
+        "name": "external_params",
+        "type": "const float *",
+        "description": "64-byte aligned read/write or read-only float buffer."
+      },
+      {
+        "name": "num_floats",
+        "type": "size_t",
+        "description": "Element count of external_params (must equal model->num_params)."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_INVALID_ARG on size or alignment mismatch.",
+    "category": "Generative Transformers",
+    "header": "rcre_transformer.h"
+  },
+  {
+    "name": "rcre_gpt_save_safetensors",
+    "return_type": "int",
+    "brief": "Serializes an RCRE_GPTModel's parameters into a 64-byte aligned",
+    "params": [
+      {
+        "name": "model",
+        "type": "const RCRE_GPTModel *",
+        "description": "Trained GPT model."
+      },
+      {
+        "name": "filepath",
+        "type": "const char *",
+        "description": "Destination .safetensors file path."
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena *",
+        "description": "Transient arena for JSON header assembly."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Generative Transformers",
+    "header": "rcre_transformer.h"
+  },
+  {
+    "name": "rcre_gpt_load_safetensors_zero_copy",
+    "return_type": "int",
+    "brief": "Memory-maps a .safetensors checkpoint and binds its 64-byte aligned",
+    "params": [
+      {
+        "name": "model",
+        "type": "RCRE_GPTModel *",
+        "description": "Target GPT model with matching RCRE_GPTConfig."
+      },
+      {
+        "name": "filepath",
+        "type": "const char *",
+        "description": "Source .safetensors file path."
+      },
+      {
+        "name": "out_archive",
+        "type": "struct RCRE_SafeTensorsArchive *",
+        "description": "Output archive handle (must stay open while model is used)."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Generative Transformers",
+    "header": "rcre_transformer.h"
+  },
+  {
+    "name": "rcre_sparse_csr_from_dense",
+    "return_type": "RCRE_CSRMatrix",
+    "brief": "Converts a dense 2D F32 tensor into a Compressed Sparse Row (CSR) matrix.",
+    "params": [
+      {
+        "name": "dense",
+        "type": "const RCRE_Tensor*",
+        "description": "Source 2D tensor [M, N] (F32)."
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "description": "Magnitude threshold: elements with |val| <= threshold are treated as zero."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Memory arena to allocate sparse arrays."
+      }
+    ],
+    "returns": "Newly constructed RCRE_CSRMatrix (arena-allocated).",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_csr_to_dense",
+    "return_type": "int",
+    "brief": "Reconstructs a dense 2D F32 tensor from a CSR matrix.",
+    "params": [
+      {
+        "name": "csr",
+        "type": "const RCRE_CSRMatrix*",
+        "description": "Source CSR matrix."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Memory arena for destination tensor data."
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": "Output tensor of shape [rows, cols] (F32)."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_bcsr4_from_dense",
+    "return_type": "RCRE_BCSR4Matrix",
+    "brief": "Converts a dense 2D F32 tensor into a 4x4 Block Compressed Sparse Row (BCSR4) matrix.",
+    "params": [
+      {
+        "name": "dense",
+        "type": "const RCRE_Tensor*",
+        "description": "Source 2D tensor [M, N] (F32)."
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "description": "Magnitude threshold: blocks with max(|val|) <= threshold are dropped."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Memory arena (values array is 64-byte aligned)."
+      }
+    ],
+    "returns": "Newly constructed RCRE_BCSR4Matrix.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_bcsr4_to_dense",
+    "return_type": "int",
+    "brief": "Reconstructs a dense 2D F32 tensor from a BCSR4 matrix.",
+    "params": [
+      {
+        "name": "bcsr",
+        "type": "const RCRE_BCSR4Matrix*",
+        "description": "Source BCSR4 matrix."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Memory arena for destination tensor data."
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": "Output tensor of shape [rows, cols] (F32)."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_csr_spmv",
+    "return_type": "int",
+    "brief": "Computes y = A * x using standard CSR representation.",
+    "params": [
+      {
+        "name": "A",
+        "type": "const RCRE_CSRMatrix*",
+        "description": "Source CSR matrix [M, N]."
+      },
+      {
+        "name": "x",
+        "type": "const float*",
+        "description": "Input dense vector of length N (F32)."
+      },
+      {
+        "name": "y",
+        "type": "float*",
+        "description": "Output dense vector of length M (F32)."
+      }
+    ],
+    "returns": "RCRE_OK on success.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_bcsr4_spmv",
+    "return_type": "int",
+    "brief": "Computes y = A * x using hardware-accelerated 4x4 BCSR representation.",
+    "params": [
+      {
+        "name": "A",
+        "type": "const RCRE_BCSR4Matrix*",
+        "description": "Source BCSR4 matrix [M, N]."
+      },
+      {
+        "name": "x",
+        "type": "const float*",
+        "description": "Input dense vector of length N (F32)."
+      },
+      {
+        "name": "y",
+        "type": "float*",
+        "description": "Output dense vector of length M (F32)."
+      }
+    ],
+    "returns": "RCRE_OK on success.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_prune_scalar",
+    "return_type": "int",
+    "brief": "Prunes a dense 2D tensor in-place to achieve a targeted scalar sparsity ratio.",
+    "params": [
+      {
+        "name": "tensor",
+        "type": "RCRE_Tensor*",
+        "description": "2D F32 tensor to prune."
+      },
+      {
+        "name": "target_sparsity",
+        "type": "float",
+        "description": "Desired fraction of zeros (e.g., 0.75f for 75% sparsity)."
+      },
+      {
+        "name": "out_threshold",
+        "type": "float*",
+        "description": "Pointer to receive the cutoff threshold applied (optional)."
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": "Transient memory arena for sorting/histogram computation."
+      }
+    ],
+    "returns": "RCRE_OK on success.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_prune_block4",
+    "return_type": "int",
+    "brief": "Prunes a dense 2D tensor in-place to achieve a targeted 4x4 block sparsity ratio.",
+    "params": [
+      {
+        "name": "tensor",
+        "type": "RCRE_Tensor*",
+        "description": "2D F32 tensor to prune."
+      },
+      {
+        "name": "target_block_sparsity",
+        "type": "float",
+        "description": "Desired fraction of zero blocks (e.g. 0.70f)."
+      },
+      {
+        "name": "out_threshold",
+        "type": "float*",
+        "description": "Pointer to receive the cutoff block norm applied (optional)."
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": "Transient memory arena."
+      }
+    ],
+    "returns": "RCRE_OK on success.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_analyze_tensor",
+    "return_type": "RCRE_SparsityStats",
+    "brief": "Computes detailed sparsity and compression statistics for a dense tensor.",
+    "params": [
+      {
+        "name": "tensor",
+        "type": "const RCRE_Tensor*",
+        "description": "Dense 2D F32 tensor."
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "description": "Magnitude threshold for scalar non-zeros."
+      }
+    ],
+    "returns": "Sparsity statistics including dense vs sparse memory footprint.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_bcsr4_save",
+    "return_type": "int",
+    "brief": "Serializes a BCSR4 matrix to disk.",
+    "params": [
+      {
+        "name": "bcsr",
+        "type": "const RCRE_BCSR4Matrix*",
+        "description": "Matrix to serialize."
+      },
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Destination binary file path."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_IO on failure.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_sparse_bcsr4_load",
+    "return_type": "int",
+    "brief": "Deserializes a BCSR4 matrix from disk into a memory arena.",
+    "params": [
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Source binary file path."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Destination memory arena."
+      },
+      {
+        "name": "out_bcsr",
+        "type": "RCRE_BCSR4Matrix*",
+        "description": "Pointer to receive loaded matrix."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_IO or RCRE_ERR_OUT_OF_MEMORY on failure.",
+    "category": "Sparse Matrices",
+    "header": "rcre_sparse.h"
+  },
+  {
+    "name": "rcre_io_mmap_open",
+    "return_type": "int",
+    "brief": "Maps a file from disk into virtual memory with zero heap allocations.",
+    "params": [
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Source file path on disk."
+      },
+      {
+        "name": "hint",
+        "type": "RCRE_IOHint",
+        "description": "OS page-cache advisory policy (sequential, random, streaming)."
+      },
+      {
+        "name": "out_map",
+        "type": "RCRE_MappedFile*",
+        "description": "Output mapped file descriptor."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_INVALID_ARG or RCRE_ERR_IO on failure.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_mmap_from_buffer",
+    "return_type": "int",
+    "brief": "Wraps an existing in-memory buffer (e.g., WASM ArrayBuffer) as a mapped file.",
+    "params": [
+      {
+        "name": "buf",
+        "type": "const void*",
+        "description": "Read-only memory pointer."
+      },
+      {
+        "name": "size",
+        "type": "size_t",
+        "description": "Byte length of buffer."
+      },
+      {
+        "name": "out_map",
+        "type": "RCRE_MappedFile*",
+        "description": "Output mapped file descriptor."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_INVALID_ARG on NULL/empty buffer.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_mmap_close",
+    "return_type": "void",
+    "brief": "Releases the virtual memory mapping and closes the file descriptor.",
+    "params": [
+      {
+        "name": "map",
+        "type": "RCRE_MappedFile*",
+        "description": "Mapped file descriptor to close."
+      }
+    ],
+    "returns": "",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_mmap_slice",
+    "return_type": "RCRE_Slice",
+    "brief": "Returns a zero-copy RCRE_Slice spanning the entire mapped file.",
+    "params": [
+      {
+        "name": "map",
+        "type": "const RCRE_MappedFile*",
+        "description": "Active mapped file descriptor."
+      }
+    ],
+    "returns": "RCRE_Slice viewing the mapped bytes, or empty slice if invalid.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_madvise_range",
+    "return_type": "int",
+    "brief": "Advises the OS kernel on upcoming access patterns for a byte sub-range.",
+    "params": [
+      {
+        "name": "map",
+        "type": "const RCRE_MappedFile*",
+        "description": "Active mapped file descriptor."
+      },
+      {
+        "name": "offset",
+        "type": "size_t",
+        "description": "Starting byte offset within the file."
+      },
+      {
+        "name": "length",
+        "type": "size_t",
+        "description": "Number of bytes in the sub-range."
+      },
+      {
+        "name": "hint",
+        "type": "RCRE_IOHint",
+        "description": "Desired paging policy for the sub-range."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_write_atomic",
+    "return_type": "int",
+    "brief": "Atomically writes a contiguous byte buffer to disk via temp-file rename.",
+    "params": [
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Destination file path."
+      },
+      {
+        "name": "data",
+        "type": "const void*",
+        "description": "Source byte buffer."
+      },
+      {
+        "name": "size",
+        "type": "size_t",
+        "description": "Number of bytes to write."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_IO on failure.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_slice_parse_f32",
+    "return_type": "bool",
+    "brief": "Parses an IEEE-754 single-precision float from a byte slice using",
+    "params": [
+      {
+        "name": "s",
+        "type": "RCRE_Slice",
+        "description": "Input byte slice containing ASCII floating-point representation."
+      },
+      {
+        "name": "out_val",
+        "type": "float*",
+        "description": "Output parsed float32 value."
+      }
+    ],
+    "returns": "true if valid float parsed, false on malformed input.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_load_csv_ex",
+    "return_type": "int",
+    "brief": "High-throughput memory-mapped & SIMD-accelerated CSV/TSV loader.",
+    "params": [
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Path to CSV/TSV file."
+      },
+      {
+        "name": "opts",
+        "type": "const RCRE_CSVOptions*",
+        "description": "Parsing options (delimiter, skip_header, max_rows, threadpool)."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Arena to allocate the output 2D F32 tensor."
+      },
+      {
+        "name": "out_tensor",
+        "type": "RCRE_Tensor*",
+        "description": "Output 2D F32 tensor [rows, cols]."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_IO or RCRE_ERR_OUT_OF_MEMORY on failure.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_parse_csv_slice",
+    "return_type": "int",
+    "brief": "Parses a CSV/TSV directly from an in-memory RCRE_Slice (zero file I/O).",
+    "params": [
+      {
+        "name": "csv_slice",
+        "type": "RCRE_Slice",
+        "description": "In-memory byte slice containing CSV/TSV text."
+      },
+      {
+        "name": "opts",
+        "type": "const RCRE_CSVOptions*",
+        "description": "Parsing options."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Arena to allocate the output 2D F32 tensor."
+      },
+      {
+        "name": "out_tensor",
+        "type": "RCRE_Tensor*",
+        "description": "Output 2D F32 tensor [rows, cols]."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_save_npy",
+    "return_type": "int",
+    "brief": "Serializes an RCRE_Tensor to a NumPy .npy file with strict 64-byte",
+    "params": [
+      {
+        "name": "tensor",
+        "type": "const RCRE_Tensor*",
+        "description": "Contiguous 1D-4D tensor (U8, I32, or F32) to serialize."
+      },
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Destination .npy file path."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_load_npy",
+    "return_type": "int",
+    "brief": "Loads a NumPy .npy file (v1.0 or v2.0) into a 64-byte aligned arena buffer.",
+    "params": [
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Source .npy file path."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Destination memory arena."
+      },
+      {
+        "name": "out_tensor",
+        "type": "RCRE_Tensor*",
+        "description": "Output tensor allocated inside arena."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_view_npy",
+    "return_type": "int",
+    "brief": "Creates a zero-copy RCRE_Tensor view (is_view = true) directly over",
+    "params": [
+      {
+        "name": "map",
+        "type": "const RCRE_MappedFile*",
+        "description": "Open memory-mapped .npy file (must outlive the returned view)."
+      },
+      {
+        "name": "out_view",
+        "type": "RCRE_Tensor*",
+        "description": "Output zero-copy tensor view."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_INVALID_ARG if payload is not 64B-aligned.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_safetensors_open",
+    "return_type": "int",
+    "brief": "Opens and validates a .safetensors archive via zero-copy mmap.",
+    "params": [
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Path to .safetensors file."
+      },
+      {
+        "name": "out_archive",
+        "type": "RCRE_SafeTensorsArchive*",
+        "description": "Output parsed archive handle."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_IO on corrupt/invalid archive.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_safetensors_open_from_buffer",
+    "return_type": "int",
+    "brief": "Opens and validates a .safetensors archive from an in-memory buffer.",
+    "params": [
+      {
+        "name": "buf",
+        "type": "const void*",
+        "description": "Pointer to .safetensors bytes in memory."
+      },
+      {
+        "name": "size",
+        "type": "size_t",
+        "description": "Total byte length of buffer."
+      },
+      {
+        "name": "out_archive",
+        "type": "RCRE_SafeTensorsArchive*",
+        "description": "Output parsed archive handle."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_IO on corrupt/invalid archive.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_safetensors_close",
+    "return_type": "void",
+    "brief": "Closes a mapped .safetensors archive and releases OS virtual pages.",
+    "params": [
+      {
+        "name": "archive",
+        "type": "RCRE_SafeTensorsArchive*",
+        "description": "Archive handle to close."
+      }
+    ],
+    "returns": "",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_safetensors_get_tensor",
+    "return_type": "int",
+    "brief": "Retrieves a tensor by name from an open .safetensors archive.",
+    "params": [
+      {
+        "name": "archive",
+        "type": "const RCRE_SafeTensorsArchive*",
+        "description": "Open .safetensors archive."
+      },
+      {
+        "name": "name",
+        "type": "const char*",
+        "description": "Null-terminated tensor name to look up."
+      },
+      {
+        "name": "fallback_arena",
+        "type": "RCRE_Arena*",
+        "description": "Optional arena used only if file offset is not 64B-aligned."
+      },
+      {
+        "name": "out_tensor",
+        "type": "RCRE_Tensor*",
+        "description": "Output tensor (zero-copy view or arena-copied)."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_INVALID_ARG if not found or unaligned without arena.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_safetensors_save",
+    "return_type": "int",
+    "brief": "Saves an array of named RCRE_Tensors to a 64-byte aligned .safetensors file.",
+    "params": [
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Destination .safetensors file path."
+      },
+      {
+        "name": "names",
+        "type": "const char* const*",
+        "description": "Array of tensor name strings [num_tensors]."
+      },
+      {
+        "name": "tensors",
+        "type": "const RCRE_Tensor*",
+        "description": "Array of contiguous RCRE_Tensors [num_tensors]."
+      },
+      {
+        "name": "num_tensors",
+        "type": "size_t",
+        "description": "Number of tensors to serialize (1 to 256)."
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": "Transient scratch arena for header construction."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_byte_shuffle_32",
+    "return_type": "void",
+    "brief": "Applies a SIMD-accelerated byte-shuffle transpose on 32-bit elements",
+    "params": [
+      {
+        "name": "src",
+        "type": "const void*",
+        "description": "Source array of num_elements 32-bit values (4 * num_elements bytes)."
+      },
+      {
+        "name": "dst",
+        "type": "void*",
+        "description": "Destination buffer (must not alias src, 4 * num_elements bytes)."
+      },
+      {
+        "name": "num_elements",
+        "type": "size_t",
+        "description": "Number of 32-bit elements."
+      }
+    ],
+    "returns": "",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_byte_unshuffle_32",
+    "return_type": "void",
+    "brief": "Reconstructs interleaved 32-bit elements from a byte-shuffled buffer.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const void*",
+        "description": "Byte-shuffled source buffer (4 * num_elements bytes)."
+      },
+      {
+        "name": "dst",
+        "type": "void*",
+        "description": "Destination array of num_elements 32-bit values."
+      },
+      {
+        "name": "num_elements",
+        "type": "size_t",
+        "description": "Number of 32-bit elements."
+      }
+    ],
+    "returns": "",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_compress_tensor",
+    "return_type": "int",
+    "brief": "Compresses a contiguous 32-bit tensor (F32/I32) using SIMD byte-shuffle",
+    "params": [
+      {
+        "name": "tensor",
+        "type": "const RCRE_Tensor*",
+        "description": "Contiguous F32 or I32 source tensor."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Destination arena to allocate compressed byte buffer."
+      },
+      {
+        "name": "out_slice",
+        "type": "RCRE_Slice*",
+        "description": "Output slice containing the self-describing compressed frame."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_decompress_tensor",
+    "return_type": "int",
+    "brief": "Decompresses a byte-shuffled compressed tensor frame into an arena.",
+    "params": [
+      {
+        "name": "compressed_frame",
+        "type": "RCRE_Slice",
+        "description": "Slice produced by rcre_io_compress_tensor."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Arena to allocate the reconstructed 64-byte aligned tensor."
+      },
+      {
+        "name": "out_tensor",
+        "type": "RCRE_Tensor*",
+        "description": "Output reconstructed tensor (0-ULP bit-exact)."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_stream_open_npy",
+    "return_type": "int",
+    "brief": "Opens an out-of-core ping-pong batch streamer over a .npy tensor file.",
+    "params": [
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": "Source .npy file path."
+      },
+      {
+        "name": "batch_rows",
+        "type": "size_t",
+        "description": "Number of outer-dimension rows per batch."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Arena from which two ping-pong batch buffers are sub-allocated."
+      },
+      {
+        "name": "out_stream",
+        "type": "RCRE_TensorStream*",
+        "description": "Output initialized tensor stream."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_stream_next",
+    "return_type": "bool",
+    "brief": "Fetches the next batch from an open RCRE_TensorStream into a 64-byte",
+    "params": [
+      {
+        "name": "stream",
+        "type": "RCRE_TensorStream*",
+        "description": "Active tensor stream."
+      },
+      {
+        "name": "out_batch",
+        "type": "RCRE_Tensor*",
+        "description": "Output tensor view wrapping the active ping-pong buffer."
+      }
+    ],
+    "returns": "true if a batch was read, false when end-of-stream is reached.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_stream_reset",
+    "return_type": "void",
+    "brief": "Rewinds an RCRE_TensorStream back to row 0 for a new training epoch.",
+    "params": [
+      {
+        "name": "stream",
+        "type": "RCRE_TensorStream*",
+        "description": "Active tensor stream."
+      }
+    ],
+    "returns": "",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_stream_close",
+    "return_type": "void",
+    "brief": "Closes an RCRE_TensorStream and unmaps its underlying file.",
+    "params": [
+      {
+        "name": "stream",
+        "type": "RCRE_TensorStream*",
+        "description": "Tensor stream to close."
+      }
+    ],
+    "returns": "",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_to_dlpack",
+    "return_type": "int",
+    "brief": "Exports an RCRE_Tensor to a zero-copy DLPack DLTensor descriptor.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": "Source RCRE_Tensor."
+      },
+      {
+        "name": "meta_arena",
+        "type": "RCRE_Arena*",
+        "description": "Arena to allocate the 64-bit shape/stride metadata arrays."
+      },
+      {
+        "name": "out_dl",
+        "type": "RCRE_DLTensor*",
+        "description": "Output DLPack tensor struct sharing src->data zero-copy."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_from_dlpack",
+    "return_type": "int",
+    "brief": "Imports a CPU DLPack DLTensor into a zero-copy RCRE_Tensor view.",
+    "params": [
+      {
+        "name": "dl",
+        "type": "const RCRE_DLTensor*",
+        "description": "Source DLPack tensor descriptor (device_type must be CPU)."
+      },
+      {
+        "name": "out_view",
+        "type": "RCRE_Tensor*",
+        "description": "Output zero-copy RCRE_Tensor view (is_view = true)."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_INVALID_ARG or UNSUPPORTED_OP on mismatch.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_to_arrow",
+    "return_type": "int",
+    "brief": "Exports a contiguous 1D RCRE_Tensor to the Apache Arrow C Data Interface.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": "Contiguous 1D RCRE_Tensor (U8, I32, or F32)."
+      },
+      {
+        "name": "meta_arena",
+        "type": "RCRE_Arena*",
+        "description": "Arena to allocate the 2-element buffers pointer array."
+      },
+      {
+        "name": "out_schema",
+        "type": "RCRE_ArrowSchema*",
+        "description": "Output ArrowSchema descriptor."
+      },
+      {
+        "name": "out_array",
+        "type": "RCRE_ArrowArray*",
+        "description": "Output ArrowArray descriptor pointing directly to src->data."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_from_arrow",
+    "return_type": "int",
+    "brief": "Imports a flat numeric column from the Apache Arrow C Data Interface",
+    "params": [
+      {
+        "name": "schema",
+        "type": "const RCRE_ArrowSchema*",
+        "description": "ArrowSchema describing the column type (\"f\", \"i\", or \"C\")."
+      },
+      {
+        "name": "array",
+        "type": "const RCRE_ArrowArray*",
+        "description": "ArrowArray holding the column buffer (null_count must be 0)."
+      },
+      {
+        "name": "out_view",
+        "type": "RCRE_Tensor*",
+        "description": "Output zero-copy 1D RCRE_Tensor view."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
   },
   {
     "name": "rcre_cam_default_config",

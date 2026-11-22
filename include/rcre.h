@@ -27,7 +27,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 1
-#define RCRE_VERSION_MINOR 1
+#define RCRE_VERSION_MINOR 2
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -815,6 +815,155 @@ RCRE_NODISCARD int rcre_ml_kmeans_fit_ex(const RCRE_Tensor* X, size_t k,
 RCRE_NODISCARD int rcre_ml_kmeans_predict(const RCRE_Tensor* X, const RCRE_Tensor* centroids,
                                           RCRE_Tensor* labels);
 
+/* ========================================================================= */
+/* e-means — mini-batch EMA k-means (ML-REQ-02, sibling of rcre_ml_kmeans_*) */
+/* ========================================================================= */
+
+/**
+ * @brief e-means for RCRE — mini-batch EMA k-means with scaling-law recipes.
+ *
+ * Implements Algorithm 1 of "e-means: outperforming k-means (in one-tenth
+ * the epochs)" (Bessa et al., arXiv 2611.09501, 2026): Euclidean, FP32
+ * model state, CPU, single process. Lloyd k-means remains available as
+ * `rcre_ml_kmeans_fit_ex` — the two are complementary (random-init EMA at a
+ * fixed epoch budget vs k-means++ Lloyd with convergence tolerance).
+ *
+ * Exactness contract (projects/rcre_emeans/docs/exactness.md):
+ *  - pooled runs are bit-identical run-to-run and across pool sizes (the
+ *    slab partition depends only on the batch size);
+ *  - the serial run (single slab) is a separately quality-guaranteed
+ *    configuration: final MSE within 0.5% and >= 99% label agreement vs a
+ *    pooled run at the same seed (F32 partial-sum regrouping feeds back
+ *    chaotically through the EMA system — 1 ULP is NOT the contract);
+ *  - batch sums: FP32, unbuffered, row order; objective and finalization
+ *    sums: FP64 (documented improvement over the reference's FP32);
+ *  - state machine: bit-exact port of the reference's FP32 operation order
+ *    (gated against the Python oracle in projects/rcre_emeans/ref/).
+ */
+
+/** Batch-size law selector. AUTO resolves by dimension: quality for
+ *  d <= 16, throughput above (the reference's "auto" behavior). */
+typedef enum {
+    RCRE_EM_BATCH_AUTO = 0,
+    RCRE_EM_BATCH_THROUGHPUT = 1,
+    RCRE_EM_BATCH_QUALITY = 2,
+} RCRE_EMBatchLaw;
+
+/**
+ * Resolved training plan (the reference's "recipe"). Exposed for
+ * observability: the auto-tuning is a formula, and the user can see what
+ * it produced for their (n, k, T).
+ */
+typedef struct RCRE_EMMeansRecipe {
+    size_t batch_size;       /* resolved statistical batch B            */
+    float  alpha0;           /* resolved peak EMA step (FP32)           */
+    double alpha0_full;      /* peak step, unrounded double (Eq. 5)     */
+    float  nepochs;          /* T as requested (fractional ok)          */
+    size_t epoch_rows[16];   /* rows per epoch (final is always n)      */
+    size_t n_epochs;         /* number of epochs (len of epoch_rows)    */
+    size_t steps_per_pass;   /* ceil(n / B)                             */
+    size_t total_steps;      /* M: total EMA updates over the run       */
+    float  unused_threshold; /* tau (0 = revival off)                   */
+    float  split_epsilon;    /* donor-split perturbation delta (1e-4)   */
+    float  init_usage;       /* N_j at init (2^-16)                     */
+    int    batch_law;        /* resolved law (RCRE_EMBatchLaw or -1 = manual) */
+    uint64_t seed;           /* seed used for shuffle/revival streams   */
+} RCRE_EMMeansRecipe;
+
+typedef struct RCRE_EMMeansParams {
+    float    nepochs;              /* T (default 5); fractional ok, <= 16 */
+    size_t   batch_size;           /* 0 = batch law (default)             */
+    float    alpha0;               /* <= 0 = step law (default); NaN err  */
+    int      batch_law;            /* RCRE_EMBatchLaw (default AUTO)      */
+    float    unused_threshold;     /* < 0 = auto (0.1, off for d <= 2);   */
+                                   /* 0 = revival off; > 0 fixed tau      */
+    bool     shuffle;              /* fresh per-epoch shuffle (default true) */
+    const RCRE_Tensor* init_centroids; /* [k,d] F32 or NULL = random rows */
+    size_t   max_points_per_centroid;  /* 0 = no cap; else train on a     */
+                                       /* random sorted subset of         */
+                                       /* cap*k rows (reference parity)   */
+    uint64_t seed;                 /* 0 = 1234 (reference default)        */
+    bool     capture_labels;       /* fill labels with last-epoch passes  */
+                                   /* (default true)                      */
+} RCRE_EMMeansParams;
+
+/**
+ * @brief Returns the default parameter struct: T = 5, batch and alpha0 from
+ *        the scaling laws, AUTO revival threshold (-1), shuffle on, random
+ *        init, label capture on, reference seed (1234). Override what you
+ *        need. (A zeroed struct means "batch law + step law + revival off";
+ *        use this constructor for the reference-default behavior.)
+ */
+RCRE_EMMeansParams rcre_ml_emeans_params_default(void);
+
+/**
+ * @brief Fills the e-means training plan without running training.
+ * @param X [n,d] F32 input (only n and d are needed; data may be NULL).
+ * @param k Number of clusters.
+ * @param params NULL = all defaults.
+ * @param out Resolved recipe (batch B, alpha0, epoch rows, total steps).
+ * @returns RCRE_OK or RCRE_ERR_INVALID_ARG.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_recipe(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* params,
+                                         RCRE_EMMeansRecipe* out);
+
+/**
+ * @brief Trains e-means on X with all-default parameters (T = nepochs).
+ *        Serial execution; B/alpha0 from the scaling laws.
+ * @param X [n,d] F32.
+ * @param k Number of clusters (1 <= k <= n).
+ * @param nepochs Epoch budget T (fractional supported, > 0, <= 16).
+ * @param centroids Output [k,d] F32 (last-epoch-mean finalization).
+ * @param labels Output [n,1] I32: last-epoch nearest-centroid id, or NULL.
+ *               Rows not visited in the final epoch (fractional T < 1) get -1.
+ * @param arena Scratch arena (permutation, batch stats, labels).
+ * @returns RCRE_OK or an RCRE_ERR_* code.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_fit(const RCRE_Tensor* X, size_t k, float nepochs,
+                                      RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                      RCRE_Arena* arena);
+
+/**
+ * @brief Trains e-means with full control (see RCRE_EMMeansParams).
+ * @param X [n,d] F32 (n >= 1, d >= 1, n < 2^32).
+ * @param k Number of clusters (1 <= k <= n).
+ * @param params NULL = all defaults.
+ * @param centroids Output [k,d] F32.
+ * @param labels Output [n,1] I32 (F32 also accepted), or NULL.
+ * @param out_inertia Optional: moving-pass mean squared distance of the
+ *                    last epoch (FP64 internally; the exact final MSE needs
+ *                    an rcre_ml_emeans_assign pass — the centroids still
+ *                    move during the last epoch).
+ * @param out_n_splits Optional: total dead-cluster revival splits performed.
+ * @param arena Scratch arena.
+ * @param pool Optional RCRE_ThreadPool (NULL = serial). Pooled runs are
+ *             bit-identical across pool sizes; serial vs pooled is a
+ *             quality-equivalence guarantee (see the header contract above).
+ * @returns RCRE_OK or an RCRE_ERR_* code.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_fit_ex(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* params,
+                                         RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                         float* out_inertia, int* out_n_splits,
+                                         RCRE_Arena* arena,
+                                         RCRE_ThreadPool* pool);
+
+/**
+ * @brief Exact nearest-centroid assignment of X against trained centroids.
+ *        Dual kernel: per-row true distance for k*d <= 16384, HAL GEMM
+ *        above. Costs roughly one epoch of FLOPs; use training labels
+ *        instead when the budget is tight (see the reference's README note).
+ * @param labels Output [n,1] I32 (F32 also accepted).
+ * @param out_mse Optional: mean squared distance to the assigned centroid
+ *                (FP64).
+ * @returns RCRE_OK or an RCRE_ERR_* code.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_assign(const RCRE_Tensor* X,
+                                         const RCRE_Tensor* centroids,
+                                         RCRE_Tensor* labels, float* out_mse,
+                                         RCRE_Arena* arena);
+
 typedef struct RCRE_DBSCANParams {
     float  eps;          /* Neighborhood radius distance epsilon */
     size_t min_samples;  /* Minimum points within eps to form a core point */
@@ -1004,6 +1153,13 @@ int rcre_cpu_get_memory_pressure(void);
 /* ========================================================================= */
 #ifndef RCRE_NO_TRANSFORMER
 #include "rcre_transformer.h"
+#endif
+
+/* ========================================================================= */
+/* High-Performance Scientific Data I/O & Zero-Copy Ecosystem Bridges         */
+/* ========================================================================= */
+#ifndef RCRE_NO_IO
+#include "rcre_io.h"
 #endif
 
 #ifdef __cplusplus

@@ -59,9 +59,37 @@ static void test_amalgamated_transformer(void) {
     rcre_gpt_free(model);
 }
 
+static void test_amalgamated_scientific_io(void) {
+    RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+
+    float val = 0.0f;
+    ASSERT_TRUE(rcre_slice_parse_f32(rcre_slice_from_cstr("-123.45e-2"), &val));
+    ASSERT_FLOAT_NEAR(-1.2345f, val, 1e-6f);
+
+    size_t shape[2] = {4, 4};
+    RCRE_Tensor t = rcre_tensor_create(shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    for (size_t i = 0; i < 16; ++i) rcre_tensor_f32_data(&t)[i] = (float)(i + 1);
+
+    const char* npy_path = "/tmp/rcre_amalg_test.npy";
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_save_npy(&t, npy_path));
+
+    RCRE_Tensor loaded = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_load_npy(npy_path, arena, &loaded));
+    ASSERT_MEM_EQ(t.data, loaded.data, 16 * sizeof(float));
+    remove(npy_path);
+
+    RCRE_DLTensor dl = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_to_dlpack(&t, arena, &dl));
+    ASSERT_TRUE(dl.data == t.data);
+
+    rcre_arena_destroy(arena);
+}
+
 int main(void) {
     test_suite_begin("RCRE Single-Header (dist/rcre.h) Amalgamation Self-Test");
     TEST_RUN(test_amalgamated_single_header);
     TEST_RUN(test_amalgamated_transformer);
+    TEST_RUN(test_amalgamated_scientific_io);
     return test_suite_report();
 }

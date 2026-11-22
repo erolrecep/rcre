@@ -32,6 +32,7 @@ C_FILES = [
     SRC_DIR / "core" / "threadpool.c",
     SRC_DIR / "core" / "prof.c",
     SRC_DIR / "core" / "sparse.c",
+    SRC_DIR / "core" / "io.c",
     SRC_DIR / "cv" / "color.c",
     SRC_DIR / "cv" / "geom.c",
     SRC_DIR / "cv" / "filter.c",
@@ -42,6 +43,7 @@ C_FILES = [
     SRC_DIR / "cv" / "nn.c",
     SRC_DIR / "ml" / "linear.c",
     SRC_DIR / "ml" / "cluster.c",
+    SRC_DIR / "ml" / "e_means.c",
     SRC_DIR / "ml" / "gbdt_infer.c",
     SRC_DIR / "ml" / "hnsw.c",
     SRC_DIR / "autograd" / "scalar_autograd.c",
@@ -65,7 +67,7 @@ def clean_file_content(content: str) -> str:
     for line in content.splitlines():
         # P4: also strip PATH-QUALIFIED local includes (e.g. "../core/rcre_rng.h")
         # that previously leaked into dist/rcre.h and broke out-of-tree builds.
-        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer)/)?(rcre\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|rcre_sparse\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h)[">]', line):
+        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer)/)?(rcre\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|rcre_sparse\.h|rcre_io\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h|e_means_internal\.h)[">]', line):
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -99,6 +101,10 @@ def main():
     transformer_clean = clean_file_content(transformer_header)
     header_content = header_content.replace('#include "rcre_transformer.h"', transformer_clean)
 
+    io_header = (INCLUDE_DIR / "rcre_io.h").read_text(encoding="utf-8")
+    io_clean = clean_file_content(io_header)
+    header_content = header_content.replace('#include "rcre_io.h"', io_clean)
+
     prof_header = (INCLUDE_DIR / "rcre_prof.h").read_text(encoding="utf-8")
     header_content = header_content + "\n" + "/* --- Profiling & Telemetry Subsystem (rcre_prof) --- */\n" + clean_file_content(prof_header) + "\n"
 
@@ -107,6 +113,7 @@ def main():
 
     hal_internal = (SRC_DIR / "hal" / "hal_internal.h").read_text(encoding="utf-8")
     ml_internal = (SRC_DIR / "ml" / "ml_internal.h").read_text(encoding="utf-8")
+    em_internal = (SRC_DIR / "ml" / "e_means_internal.h").read_text(encoding="utf-8")
     rng_internal = (SRC_DIR / "core" / "rcre_rng.h").read_text(encoding="utf-8")
     transformer_internal = (SRC_DIR / "transformer" / "transformer_internal.h").read_text(encoding="utf-8")
 
@@ -125,6 +132,9 @@ def main():
     out_lines.append("")
     out_lines.append("/* --- Internal Machine Learning Mathematical Primitives --- */")
     out_lines.append(clean_file_content(ml_internal))
+    out_lines.append("")
+    out_lines.append("/* --- e-means State Machine (test-visible internals) --- */")
+    out_lines.append(clean_file_content(em_internal))
     out_lines.append("")
     out_lines.append("/* --- Internal Random Number Generation --- */")
     out_lines.append(clean_file_content(rng_internal))

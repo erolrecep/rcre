@@ -6,35 +6,19 @@
 #include "transformer_internal.h"
 
 RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_CharTokenizer *tok, int batch_size, int seq_len) {
-    if (!tok || tok->vocab_size <= 0 || batch_size <= 0 || seq_len < 2) {
-        return nullptr;
-    }
-    FILE *f = fopen(filepath, "rb");
-    if (!f) {
+    if (!filepath || !tok || tok->vocab_size <= 0 || batch_size <= 0 || seq_len < 2) {
         return nullptr;
     }
 
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (file_size <= 0) {
-        fclose(f);
+    RCRE_MappedFile map;
+    if (rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map) != RCRE_OK) {
         return nullptr;
     }
 
-    char *raw_text = (char*)malloc((size_t)file_size);
-    if (!raw_text) {
-        fclose(f);
-        return nullptr;
-    }
-
-    size_t read_bytes = fread(raw_text, 1, (size_t)file_size, f);
-    fclose(f);
-
+    size_t read_bytes = map.size;
     RCRE_GPTDataLoader *loader = (RCRE_GPTDataLoader*)malloc(sizeof(RCRE_GPTDataLoader));
     if (!loader) {
-        free(raw_text);
+        rcre_io_mmap_close(&map);
         return nullptr;
     }
 
@@ -43,13 +27,13 @@ RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_
     loader->current_idx = 0;
     loader->tokens = (int*)malloc(sizeof(int) * read_bytes);
     if (!loader->tokens) {
-        free(raw_text);
+        rcre_io_mmap_close(&map);
         free(loader);
         return nullptr;
     }
 
-    int valid_tokens = rcre_char_tokenizer_encode(tok, raw_text, read_bytes, loader->tokens, (int)read_bytes);
-    free(raw_text);
+    int valid_tokens = rcre_char_tokenizer_encode(tok, (const char*)map.data, read_bytes, loader->tokens, (int)read_bytes);
+    rcre_io_mmap_close(&map);
 
     loader->num_tokens = (size_t)valid_tokens;
     if (loader->num_tokens <= (size_t)(seq_len + 1)) {

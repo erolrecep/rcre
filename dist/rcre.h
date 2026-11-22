@@ -32,7 +32,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 1
-#define RCRE_VERSION_MINOR 1
+#define RCRE_VERSION_MINOR 2
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -820,6 +820,155 @@ RCRE_NODISCARD int rcre_ml_kmeans_fit_ex(const RCRE_Tensor* X, size_t k,
 RCRE_NODISCARD int rcre_ml_kmeans_predict(const RCRE_Tensor* X, const RCRE_Tensor* centroids,
                                           RCRE_Tensor* labels);
 
+/* ========================================================================= */
+/* e-means — mini-batch EMA k-means (ML-REQ-02, sibling of rcre_ml_kmeans_*) */
+/* ========================================================================= */
+
+/**
+ * @brief e-means for RCRE — mini-batch EMA k-means with scaling-law recipes.
+ *
+ * Implements Algorithm 1 of "e-means: outperforming k-means (in one-tenth
+ * the epochs)" (Bessa et al., arXiv 2611.09501, 2026): Euclidean, FP32
+ * model state, CPU, single process. Lloyd k-means remains available as
+ * `rcre_ml_kmeans_fit_ex` — the two are complementary (random-init EMA at a
+ * fixed epoch budget vs k-means++ Lloyd with convergence tolerance).
+ *
+ * Exactness contract (projects/rcre_emeans/docs/exactness.md):
+ *  - pooled runs are bit-identical run-to-run and across pool sizes (the
+ *    slab partition depends only on the batch size);
+ *  - the serial run (single slab) is a separately quality-guaranteed
+ *    configuration: final MSE within 0.5% and >= 99% label agreement vs a
+ *    pooled run at the same seed (F32 partial-sum regrouping feeds back
+ *    chaotically through the EMA system — 1 ULP is NOT the contract);
+ *  - batch sums: FP32, unbuffered, row order; objective and finalization
+ *    sums: FP64 (documented improvement over the reference's FP32);
+ *  - state machine: bit-exact port of the reference's FP32 operation order
+ *    (gated against the Python oracle in projects/rcre_emeans/ref/).
+ */
+
+/** Batch-size law selector. AUTO resolves by dimension: quality for
+ *  d <= 16, throughput above (the reference's "auto" behavior). */
+typedef enum {
+    RCRE_EM_BATCH_AUTO = 0,
+    RCRE_EM_BATCH_THROUGHPUT = 1,
+    RCRE_EM_BATCH_QUALITY = 2,
+} RCRE_EMBatchLaw;
+
+/**
+ * Resolved training plan (the reference's "recipe"). Exposed for
+ * observability: the auto-tuning is a formula, and the user can see what
+ * it produced for their (n, k, T).
+ */
+typedef struct RCRE_EMMeansRecipe {
+    size_t batch_size;       /* resolved statistical batch B            */
+    float  alpha0;           /* resolved peak EMA step (FP32)           */
+    double alpha0_full;      /* peak step, unrounded double (Eq. 5)     */
+    float  nepochs;          /* T as requested (fractional ok)          */
+    size_t epoch_rows[16];   /* rows per epoch (final is always n)      */
+    size_t n_epochs;         /* number of epochs (len of epoch_rows)    */
+    size_t steps_per_pass;   /* ceil(n / B)                             */
+    size_t total_steps;      /* M: total EMA updates over the run       */
+    float  unused_threshold; /* tau (0 = revival off)                   */
+    float  split_epsilon;    /* donor-split perturbation delta (1e-4)   */
+    float  init_usage;       /* N_j at init (2^-16)                     */
+    int    batch_law;        /* resolved law (RCRE_EMBatchLaw or -1 = manual) */
+    uint64_t seed;           /* seed used for shuffle/revival streams   */
+} RCRE_EMMeansRecipe;
+
+typedef struct RCRE_EMMeansParams {
+    float    nepochs;              /* T (default 5); fractional ok, <= 16 */
+    size_t   batch_size;           /* 0 = batch law (default)             */
+    float    alpha0;               /* <= 0 = step law (default); NaN err  */
+    int      batch_law;            /* RCRE_EMBatchLaw (default AUTO)      */
+    float    unused_threshold;     /* < 0 = auto (0.1, off for d <= 2);   */
+                                   /* 0 = revival off; > 0 fixed tau      */
+    bool     shuffle;              /* fresh per-epoch shuffle (default true) */
+    const RCRE_Tensor* init_centroids; /* [k,d] F32 or NULL = random rows */
+    size_t   max_points_per_centroid;  /* 0 = no cap; else train on a     */
+                                       /* random sorted subset of         */
+                                       /* cap*k rows (reference parity)   */
+    uint64_t seed;                 /* 0 = 1234 (reference default)        */
+    bool     capture_labels;       /* fill labels with last-epoch passes  */
+                                   /* (default true)                      */
+} RCRE_EMMeansParams;
+
+/**
+ * @brief Returns the default parameter struct: T = 5, batch and alpha0 from
+ *        the scaling laws, AUTO revival threshold (-1), shuffle on, random
+ *        init, label capture on, reference seed (1234). Override what you
+ *        need. (A zeroed struct means "batch law + step law + revival off";
+ *        use this constructor for the reference-default behavior.)
+ */
+RCRE_EMMeansParams rcre_ml_emeans_params_default(void);
+
+/**
+ * @brief Fills the e-means training plan without running training.
+ * @param X [n,d] F32 input (only n and d are needed; data may be NULL).
+ * @param k Number of clusters.
+ * @param params NULL = all defaults.
+ * @param out Resolved recipe (batch B, alpha0, epoch rows, total steps).
+ * @returns RCRE_OK or RCRE_ERR_INVALID_ARG.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_recipe(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* params,
+                                         RCRE_EMMeansRecipe* out);
+
+/**
+ * @brief Trains e-means on X with all-default parameters (T = nepochs).
+ *        Serial execution; B/alpha0 from the scaling laws.
+ * @param X [n,d] F32.
+ * @param k Number of clusters (1 <= k <= n).
+ * @param nepochs Epoch budget T (fractional supported, > 0, <= 16).
+ * @param centroids Output [k,d] F32 (last-epoch-mean finalization).
+ * @param labels Output [n,1] I32: last-epoch nearest-centroid id, or NULL.
+ *               Rows not visited in the final epoch (fractional T < 1) get -1.
+ * @param arena Scratch arena (permutation, batch stats, labels).
+ * @returns RCRE_OK or an RCRE_ERR_* code.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_fit(const RCRE_Tensor* X, size_t k, float nepochs,
+                                      RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                      RCRE_Arena* arena);
+
+/**
+ * @brief Trains e-means with full control (see RCRE_EMMeansParams).
+ * @param X [n,d] F32 (n >= 1, d >= 1, n < 2^32).
+ * @param k Number of clusters (1 <= k <= n).
+ * @param params NULL = all defaults.
+ * @param centroids Output [k,d] F32.
+ * @param labels Output [n,1] I32 (F32 also accepted), or NULL.
+ * @param out_inertia Optional: moving-pass mean squared distance of the
+ *                    last epoch (FP64 internally; the exact final MSE needs
+ *                    an rcre_ml_emeans_assign pass — the centroids still
+ *                    move during the last epoch).
+ * @param out_n_splits Optional: total dead-cluster revival splits performed.
+ * @param arena Scratch arena.
+ * @param pool Optional RCRE_ThreadPool (NULL = serial). Pooled runs are
+ *             bit-identical across pool sizes; serial vs pooled is a
+ *             quality-equivalence guarantee (see the header contract above).
+ * @returns RCRE_OK or an RCRE_ERR_* code.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_fit_ex(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* params,
+                                         RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                         float* out_inertia, int* out_n_splits,
+                                         RCRE_Arena* arena,
+                                         RCRE_ThreadPool* pool);
+
+/**
+ * @brief Exact nearest-centroid assignment of X against trained centroids.
+ *        Dual kernel: per-row true distance for k*d <= 16384, HAL GEMM
+ *        above. Costs roughly one epoch of FLOPs; use training labels
+ *        instead when the budget is tight (see the reference's README note).
+ * @param labels Output [n,1] I32 (F32 also accepted).
+ * @param out_mse Optional: mean squared distance to the assigned centroid
+ *                (FP64).
+ * @returns RCRE_OK or an RCRE_ERR_* code.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_assign(const RCRE_Tensor* X,
+                                         const RCRE_Tensor* centroids,
+                                         RCRE_Tensor* labels, float* out_mse,
+                                         RCRE_Arena* arena);
+
 typedef struct RCRE_DBSCANParams {
     float  eps;          /* Neighborhood radius distance epsilon */
     size_t min_samples;  /* Minimum points within eps to form a core point */
@@ -1362,6 +1511,8 @@ bool rcre_vis_export_3d_clusters_html(const RCRE_Tensor* points, const size_t* a
 #define RCRE_TRANSFORMER_H
 
 
+struct RCRE_SafeTensorsArchive;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -1670,11 +1821,561 @@ int rcre_gpt_generate(
 bool rcre_gpt_save_checkpoint(const RCRE_GPTModel *model, const char *filepath);
 bool rcre_gpt_load_checkpoint(RCRE_GPTModel *model, const char *filepath);
 
+/**
+ * @brief Binds an RCRE_GPTModel's internal layer weight pointers (wte, wpe,
+ *        blocks[0..L-1], ln_f, head_w) directly to an external 64-byte aligned
+ *        memory buffer (e.g. a zero-copy mmap'd .safetensors or .npy view).
+ * @param model Target initialized GPT model.
+ * @param external_params 64-byte aligned read/write or read-only float buffer.
+ * @param num_floats Element count of external_params (must equal model->num_params).
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG on size or alignment mismatch.
+ */
+RCRE_NODISCARD int rcre_gpt_bind_weights_zero_copy(
+    RCRE_GPTModel *model,
+    const float *external_params,
+    size_t num_floats
+);
+
+/**
+ * @brief Serializes an RCRE_GPTModel's parameters into a 64-byte aligned
+ *        Hugging Face .safetensors archive ("gpt.params") via rcre_io.
+ * @param model Trained GPT model.
+ * @param filepath Destination .safetensors file path.
+ * @param scratch Transient arena for JSON header assembly.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_gpt_save_safetensors(
+    const RCRE_GPTModel *model,
+    const char *filepath,
+    RCRE_Arena *scratch
+);
+
+/**
+ * @brief Memory-maps a .safetensors checkpoint and binds its 64-byte aligned
+ *        weights directly into model with ZERO memory copies.
+ * @param model Target GPT model with matching RCRE_GPTConfig.
+ * @param filepath Source .safetensors file path.
+ * @param out_archive Output archive handle (must stay open while model is used).
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_gpt_load_safetensors_zero_copy(
+    RCRE_GPTModel *model,
+    const char *filepath,
+    struct RCRE_SafeTensorsArchive *out_archive
+);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* RCRE_TRANSFORMER_H */
+#endif
+
+/* ========================================================================= */
+/* High-Performance Scientific Data I/O & Zero-Copy Ecosystem Bridges         */
+/* ========================================================================= */
+#ifndef RCRE_NO_IO
+/**
+ * @file rcre_io.h
+ * @brief RCRE High-Performance Scientific Data I/O, Zero-Copy Memory Mapping,
+ *        SIMD Tabular Ingestion, Standard Tensor Containers (.npy / .safetensors),
+ *        SIMD Byte-Shuffle Block Compression, Out-of-Core Ping-Pong Streaming,
+ *        and Zero-Copy Cross-Framework ABI Bridges (DLPack v1.0 / Apache Arrow).
+ *
+ * Part of Recep's Code Run Everywhere (RCRE).
+ * Strict ISO C23 compliant, zero external dependencies.
+ */
+
+#ifndef RCRE_IO_H
+#define RCRE_IO_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Virtual Memory Mapping & OS Page-Cache Control (IO-REQ-01)             */
+/* ========================================================================= */
+
+typedef enum {
+    RCRE_IO_HINT_DEFAULT    = 0, /* Standard OS page cache behavior               */
+    RCRE_IO_HINT_SEQUENTIAL = 1, /* Aggressive sequential prefetch (MADV_WILLNEED)*/
+    RCRE_IO_HINT_RANDOM     = 2, /* Random access (disable readahead thrashing)   */
+    RCRE_IO_HINT_STREAMING  = 3  /* Out-of-core streaming (evict/bypass cache)    */
+} RCRE_IOHint;
+
+typedef struct RCRE_MappedFile {
+    const uint8_t* data;         /* Page-aligned (4KB/16KB) read-only base ptr    */
+    size_t         size;         /* Exact file size in bytes                      */
+    intptr_t       os_handle;    /* Underlying OS descriptor/handle (-1 if mem)   */
+    RCRE_IOHint    hint;         /* Active kernel paging hint                     */
+    bool           is_mapped;    /* True if backed by OS mmap / heap fallback     */
+    bool           is_heap_buf;  /* True if fallback heap buffer (non-mmap OS)    */
+} RCRE_MappedFile;
+
+/**
+ * @brief Maps a file from disk into virtual memory with zero heap allocations.
+ * @param filepath Source file path on disk.
+ * @param hint OS page-cache advisory policy (sequential, random, streaming).
+ * @param out_map Output mapped file descriptor.
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG or RCRE_ERR_IO on failure.
+ */
+RCRE_NODISCARD int rcre_io_mmap_open(
+    const char* filepath,
+    RCRE_IOHint hint,
+    RCRE_MappedFile* out_map
+);
+
+/**
+ * @brief Wraps an existing in-memory buffer (e.g., WASM ArrayBuffer) as a mapped file.
+ * @param buf Read-only memory pointer.
+ * @param size Byte length of buffer.
+ * @param out_map Output mapped file descriptor.
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG on NULL/empty buffer.
+ */
+RCRE_NODISCARD int rcre_io_mmap_from_buffer(
+    const void* buf,
+    size_t size,
+    RCRE_MappedFile* out_map
+);
+
+/**
+ * @brief Releases the virtual memory mapping and closes the file descriptor.
+ * @param map Mapped file descriptor to close.
+ */
+void rcre_io_mmap_close(RCRE_MappedFile* map);
+
+/**
+ * @brief Returns a zero-copy RCRE_Slice spanning the entire mapped file.
+ * @param map Active mapped file descriptor.
+ * @return RCRE_Slice viewing the mapped bytes, or empty slice if invalid.
+ */
+RCRE_NODISCARD RCRE_Slice rcre_io_mmap_slice(const RCRE_MappedFile* map);
+
+/**
+ * @brief Advises the OS kernel on upcoming access patterns for a byte sub-range.
+ * @param map Active mapped file descriptor.
+ * @param offset Starting byte offset within the file.
+ * @param length Number of bytes in the sub-range.
+ * @param hint Desired paging policy for the sub-range.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_madvise_range(
+    const RCRE_MappedFile* map,
+    size_t offset,
+    size_t length,
+    RCRE_IOHint hint
+);
+
+/**
+ * @brief Atomically writes a contiguous byte buffer to disk via temp-file rename.
+ * @param filepath Destination file path.
+ * @param data Source byte buffer.
+ * @param size Number of bytes to write.
+ * @return RCRE_OK on success, RCRE_ERR_IO on failure.
+ */
+RCRE_NODISCARD int rcre_io_write_atomic(
+    const char* filepath,
+    const void* data,
+    size_t size
+);
+
+/* ========================================================================= */
+/* 2. Fast Floating-Point & SIMD Tabular CSV/TSV Ingestion (IO-REQ-02)       */
+/* ========================================================================= */
+
+/**
+ * @brief Parses an IEEE-754 single-precision float from a byte slice using
+ *        the Clinger / Eisel-Lemire fast path (zero heap, locale-independent).
+ * @param s Input byte slice containing ASCII floating-point representation.
+ * @param out_val Output parsed float32 value.
+ * @return true if valid float parsed, false on malformed input.
+ */
+RCRE_NODISCARD bool rcre_slice_parse_f32(RCRE_Slice s, float* out_val);
+
+typedef struct RCRE_CSVOptions {
+    uint8_t          delimiter;      /* ',' or '\t', or 0 for auto (',' or '\t') */
+    bool             skip_header;    /* Skip first row if true                   */
+    bool             strict_numbers; /* Reject non-numeric tokens if true        */
+    size_t           max_rows;       /* 0 = read all rows                        */
+    RCRE_ThreadPool* pool;           /* Optional threadpool for parallel parsing */
+} RCRE_CSVOptions;
+
+/**
+ * @brief High-throughput memory-mapped & SIMD-accelerated CSV/TSV loader.
+ * @param filepath Path to CSV/TSV file.
+ * @param opts Parsing options (delimiter, skip_header, max_rows, threadpool).
+ * @param arena Arena to allocate the output 2D F32 tensor.
+ * @param out_tensor Output 2D F32 tensor [rows, cols].
+ * @return RCRE_OK on success, RCRE_ERR_IO or RCRE_ERR_OUT_OF_MEMORY on failure.
+ */
+RCRE_NODISCARD int rcre_io_load_csv_ex(
+    const char* filepath,
+    const RCRE_CSVOptions* opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+/**
+ * @brief Parses a CSV/TSV directly from an in-memory RCRE_Slice (zero file I/O).
+ * @param csv_slice In-memory byte slice containing CSV/TSV text.
+ * @param opts Parsing options.
+ * @param arena Arena to allocate the output 2D F32 tensor.
+ * @param out_tensor Output 2D F32 tensor [rows, cols].
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_parse_csv_slice(
+    RCRE_Slice csv_slice,
+    const RCRE_CSVOptions* opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+/* ========================================================================= */
+/* 3. NumPy (.npy v1.0 / v2.0) Serialization & Zero-Copy Views (IO-REQ-03)   */
+/* ========================================================================= */
+
+/**
+ * @brief Serializes an RCRE_Tensor to a NumPy .npy file with strict 64-byte
+ *        header padding so the payload is always 64-byte aligned on disk.
+ * @param tensor Contiguous 1D-4D tensor (U8, I32, or F32) to serialize.
+ * @param filepath Destination .npy file path.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_save_npy(
+    const RCRE_Tensor* tensor,
+    const char* filepath
+);
+
+/**
+ * @brief Loads a NumPy .npy file (v1.0 or v2.0) into a 64-byte aligned arena buffer.
+ * @param filepath Source .npy file path.
+ * @param arena Destination memory arena.
+ * @param out_tensor Output tensor allocated inside arena.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_load_npy(
+    const char* filepath,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+/**
+ * @brief Creates a zero-copy RCRE_Tensor view (is_view = true) directly over
+ *        an open RCRE_MappedFile containing a 64-byte aligned .npy file.
+ * @param map Open memory-mapped .npy file (must outlive the returned view).
+ * @param out_view Output zero-copy tensor view.
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG if payload is not 64B-aligned.
+ */
+RCRE_NODISCARD int rcre_io_view_npy(
+    const RCRE_MappedFile* map,
+    RCRE_Tensor* out_view
+);
+
+/* ========================================================================= */
+/* 4. Multi-Tensor Safetensors (.safetensors) Container Engine (IO-REQ-04)   */
+/* ========================================================================= */
+
+#define RCRE_SAFETENSORS_MAX_TENSORS 256
+
+typedef struct RCRE_SafeTensorEntry {
+    RCRE_Slice  name;          /* Zero-copy slice into JSON header               */
+    RCRE_DType  dtype;         /* U8, I32, or F32                                */
+    uint8_t     ndim;          /* Rank (1 to 4)                                  */
+    size_t      shape[4];      /* Dimensions                                     */
+    size_t      data_offset;   /* Relative byte offset from data section start   */
+    size_t      data_nbytes;   /* Validated byte length of payload               */
+} RCRE_SafeTensorEntry;
+
+typedef struct RCRE_SafeTensorsArchive {
+    RCRE_MappedFile      map;
+    size_t               header_nbytes;    /* JSON header size N                 */
+    size_t               data_base_offset; /* 8 + N (64-byte aligned by RCRE)    */
+    size_t               num_tensors;
+    RCRE_SafeTensorEntry entries[RCRE_SAFETENSORS_MAX_TENSORS];
+} RCRE_SafeTensorsArchive;
+
+/**
+ * @brief Opens and validates a .safetensors archive via zero-copy mmap.
+ * @param filepath Path to .safetensors file.
+ * @param out_archive Output parsed archive handle.
+ * @return RCRE_OK on success, RCRE_ERR_IO on corrupt/invalid archive.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_open(
+    const char* filepath,
+    RCRE_SafeTensorsArchive* out_archive
+);
+
+/**
+ * @brief Opens and validates a .safetensors archive from an in-memory buffer.
+ * @param buf Pointer to .safetensors bytes in memory.
+ * @param size Total byte length of buffer.
+ * @param out_archive Output parsed archive handle.
+ * @return RCRE_OK on success, RCRE_ERR_IO on corrupt/invalid archive.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_open_from_buffer(
+    const void* buf,
+    size_t size,
+    RCRE_SafeTensorsArchive* out_archive
+);
+
+/**
+ * @brief Closes a mapped .safetensors archive and releases OS virtual pages.
+ * @param archive Archive handle to close.
+ */
+void rcre_io_safetensors_close(RCRE_SafeTensorsArchive* archive);
+
+/**
+ * @brief Retrieves a tensor by name from an open .safetensors archive.
+ *        Returns a zero-copy view (is_view = true) whenever the tensor payload
+ *        is 64-byte aligned in memory; otherwise copies into fallback_arena.
+ * @param archive Open .safetensors archive.
+ * @param name Null-terminated tensor name to look up.
+ * @param fallback_arena Optional arena used only if file offset is not 64B-aligned.
+ * @param out_tensor Output tensor (zero-copy view or arena-copied).
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG if not found or unaligned without arena.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    RCRE_Arena* fallback_arena,
+    RCRE_Tensor* out_tensor
+);
+
+/**
+ * @brief Saves an array of named RCRE_Tensors to a 64-byte aligned .safetensors file.
+ * @param filepath Destination .safetensors file path.
+ * @param names Array of tensor name strings [num_tensors].
+ * @param tensors Array of contiguous RCRE_Tensors [num_tensors].
+ * @param num_tensors Number of tensors to serialize (1 to 256).
+ * @param scratch Transient scratch arena for header construction.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_save(
+    const char* filepath,
+    const char* const* names,
+    const RCRE_Tensor* tensors,
+    size_t num_tensors,
+    RCRE_Arena* scratch
+);
+
+/* ========================================================================= */
+/* 5. SIMD Byte-Shuffle Codec & Out-of-Core Ping-Pong Streamer (IO-REQ-05)   */
+/* ========================================================================= */
+
+/**
+ * @brief Applies a SIMD-accelerated byte-shuffle transpose on 32-bit elements
+ *        (F32/I32), grouping byte 0, byte 1, byte 2, and byte 3 into contiguous
+ *        streams to maximize downstream compression ratio and throughput.
+ * @param src Source array of num_elements 32-bit values (4 * num_elements bytes).
+ * @param dst Destination buffer (must not alias src, 4 * num_elements bytes).
+ * @param num_elements Number of 32-bit elements.
+ */
+void rcre_io_byte_shuffle_32(const void* src, void* dst, size_t num_elements);
+
+/**
+ * @brief Reconstructs interleaved 32-bit elements from a byte-shuffled buffer.
+ * @param src Byte-shuffled source buffer (4 * num_elements bytes).
+ * @param dst Destination array of num_elements 32-bit values.
+ * @param num_elements Number of 32-bit elements.
+ */
+void rcre_io_byte_unshuffle_32(const void* src, void* dst, size_t num_elements);
+
+/**
+ * @brief Compresses a contiguous 32-bit tensor (F32/I32) using SIMD byte-shuffle
+ *        followed by a zero-dependency LZ4-class run/match block compressor.
+ * @param tensor Contiguous F32 or I32 source tensor.
+ * @param arena Destination arena to allocate compressed byte buffer.
+ * @param out_slice Output slice containing the self-describing compressed frame.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_compress_tensor(
+    const RCRE_Tensor* tensor,
+    RCRE_Arena* arena,
+    RCRE_Slice* out_slice
+);
+
+/**
+ * @brief Decompresses a byte-shuffled compressed tensor frame into an arena.
+ * @param compressed_frame Slice produced by rcre_io_compress_tensor.
+ * @param arena Arena to allocate the reconstructed 64-byte aligned tensor.
+ * @param out_tensor Output reconstructed tensor (0-ULP bit-exact).
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_decompress_tensor(
+    RCRE_Slice compressed_frame,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+typedef struct RCRE_TensorStream {
+    RCRE_MappedFile map;
+    RCRE_DType      dtype;
+    RCRE_Layout     layout;
+    uint8_t         ndim;
+    size_t          full_shape[4];
+    size_t          row_elements;    /* Product of shape[1..ndim-1]              */
+    size_t          row_bytes;       /* row_elements * sizeof(dtype)             */
+    size_t          total_rows;      /* full_shape[0]                            */
+    size_t          batch_rows;      /* Maximum rows per streamed batch          */
+    size_t          current_row;     /* Next row cursor                          */
+    size_t          data_offset;     /* Byte offset to row 0 in file             */
+    uint8_t*        ping_pong_buf[2];/* Dual 64B-aligned arena buffers           */
+    uint8_t         active_slot;     /* Toggles 0 <-> 1 on each batch            */
+} RCRE_TensorStream;
+
+/**
+ * @brief Opens an out-of-core ping-pong batch streamer over a .npy tensor file.
+ * @param filepath Source .npy file path.
+ * @param batch_rows Number of outer-dimension rows per batch.
+ * @param arena Arena from which two ping-pong batch buffers are sub-allocated.
+ * @param out_stream Output initialized tensor stream.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_stream_open_npy(
+    const char* filepath,
+    size_t batch_rows,
+    RCRE_Arena* arena,
+    RCRE_TensorStream* out_stream
+);
+
+/**
+ * @brief Fetches the next batch from an open RCRE_TensorStream into a 64-byte
+ *        aligned ping-pong buffer and advises the OS kernel to evict consumed pages.
+ * @param stream Active tensor stream.
+ * @param out_batch Output tensor view wrapping the active ping-pong buffer.
+ * @return true if a batch was read, false when end-of-stream is reached.
+ */
+RCRE_NODISCARD bool rcre_io_stream_next(
+    RCRE_TensorStream* stream,
+    RCRE_Tensor* out_batch
+);
+
+/**
+ * @brief Rewinds an RCRE_TensorStream back to row 0 for a new training epoch.
+ * @param stream Active tensor stream.
+ */
+void rcre_io_stream_reset(RCRE_TensorStream* stream);
+
+/**
+ * @brief Closes an RCRE_TensorStream and unmaps its underlying file.
+ * @param stream Tensor stream to close.
+ */
+void rcre_io_stream_close(RCRE_TensorStream* stream);
+
+/* ========================================================================= */
+/* 6. Zero-Copy Cross-Framework C ABI Bridges: DLPack & Arrow (IO-REQ-06)    */
+/* ========================================================================= */
+
+typedef enum {
+    RCRE_DL_DEVICE_CPU  = 1,
+    RCRE_DL_DEVICE_CUDA = 2
+} RCRE_DLDeviceType;
+
+typedef enum {
+    RCRE_DL_INT   = 0,
+    RCRE_DL_UINT  = 1,
+    RCRE_DL_FLOAT = 2
+} RCRE_DLDataTypeCode;
+
+typedef struct RCRE_DLTensor {
+    void*     data;
+    int32_t   device_type; /* RCRE_DL_DEVICE_CPU (1)                          */
+    int32_t   device_id;   /* 0                                               */
+    int32_t   ndim;        /* 1 to 4                                          */
+    uint8_t   dtype_code;  /* RCRE_DL_INT (0), RCRE_DL_UINT (1), FLOAT (2)    */
+    uint8_t   dtype_bits;  /* 8 or 32                                         */
+    uint16_t  dtype_lanes; /* 1                                               */
+    int64_t*  shape;       /* Pointer to int64_t[ndim]                        */
+    int64_t*  strides;     /* Pointer to int64_t[ndim] in elements            */
+    uint64_t  byte_offset; /* 0                                               */
+} RCRE_DLTensor;
+
+/**
+ * @brief Exports an RCRE_Tensor to a zero-copy DLPack DLTensor descriptor.
+ * @param src Source RCRE_Tensor.
+ * @param meta_arena Arena to allocate the 64-bit shape/stride metadata arrays.
+ * @param out_dl Output DLPack tensor struct sharing src->data zero-copy.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_to_dlpack(
+    const RCRE_Tensor* src,
+    RCRE_Arena* meta_arena,
+    RCRE_DLTensor* out_dl
+);
+
+/**
+ * @brief Imports a CPU DLPack DLTensor into a zero-copy RCRE_Tensor view.
+ * @param dl Source DLPack tensor descriptor (device_type must be CPU).
+ * @param out_view Output zero-copy RCRE_Tensor view (is_view = true).
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG or UNSUPPORTED_OP on mismatch.
+ */
+RCRE_NODISCARD int rcre_io_from_dlpack(
+    const RCRE_DLTensor* dl,
+    RCRE_Tensor* out_view
+);
+
+/* Apache Arrow C Data Interface (ABI-compatible plain C structs) */
+typedef struct RCRE_ArrowSchema {
+    const char*                format;      /* "f" = F32, "i" = I32, "C" = U8 */
+    const char*                name;
+    const char*                metadata;
+    int64_t                    flags;
+    int64_t                    n_children;
+    struct RCRE_ArrowSchema**  children;
+    struct RCRE_ArrowSchema*   dictionary;
+    void (*release)(struct RCRE_ArrowSchema*);
+    void*                      private_data;
+} RCRE_ArrowSchema;
+
+typedef struct RCRE_ArrowArray {
+    int64_t                   length;
+    int64_t                   null_count;
+    int64_t                   offset;
+    int64_t                   n_buffers;
+    int64_t                   n_children;
+    const void**              buffers;     /* buffers[0]=validity, buffers[1]=data */
+    struct RCRE_ArrowArray**  children;
+    struct RCRE_ArrowArray*   dictionary;
+    void (*release)(struct RCRE_ArrowArray*);
+    void*                     private_data;
+} RCRE_ArrowArray;
+
+/**
+ * @brief Exports a contiguous 1D RCRE_Tensor to the Apache Arrow C Data Interface.
+ * @param src Contiguous 1D RCRE_Tensor (U8, I32, or F32).
+ * @param meta_arena Arena to allocate the 2-element buffers pointer array.
+ * @param out_schema Output ArrowSchema descriptor.
+ * @param out_array Output ArrowArray descriptor pointing directly to src->data.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_to_arrow(
+    const RCRE_Tensor* src,
+    RCRE_Arena* meta_arena,
+    RCRE_ArrowSchema* out_schema,
+    RCRE_ArrowArray* out_array
+);
+
+/**
+ * @brief Imports a flat numeric column from the Apache Arrow C Data Interface
+ *        into a zero-copy 1D RCRE_Tensor view.
+ * @param schema ArrowSchema describing the column type ("f", "i", or "C").
+ * @param array ArrowArray holding the column buffer (null_count must be 0).
+ * @param out_view Output zero-copy 1D RCRE_Tensor view.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_from_arrow(
+    const RCRE_ArrowSchema* schema,
+    const RCRE_ArrowArray* array,
+    RCRE_Tensor* out_view
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_IO_H */
 #endif
 
 #ifdef __cplusplus
@@ -2257,6 +2958,180 @@ static inline float rcre_rand_f32(uint64_t* state) {
 }
 
 #endif /* RCRE_ML_INTERNAL_H */
+
+/* --- e-means State Machine (test-visible internals) --- */
+/**
+ * @file e_means_internal.h
+ * @brief e-means internal state machine (test-visible).
+ *
+ * The three-phase split (init / run-batch / update / finalize) mirrors the
+ * reference's begin/accumulate/update/end_epoch/finalize surface. The
+ * inject entry point is the strict-parity hook: the C state machine is
+ * driven with (sums, counts) streams produced by the Python oracle
+ * (ref/ref_emeans.py) and must reproduce its FP32 (c_j, N_j) trajectory
+ * bit-for-bit (0 ULP). The full fit path produces its own statistics via
+ * assignment instead of injection.
+ *
+ * Documented operation-order contract (docs/exactness.md):
+ *  - batch sums s_j: FP32, unbuffered, rows in processing order (the
+ *    full-run path groups by chunk/slab — fixed for a given (n, k, B);
+ *    the injected path is exactly row order);
+ *  - EMA: N *= decay (all k, FP32), then per touched j in index order:
+ *    t = alpha*n, mass = N + t, mean = s/n, w = t/mass,
+ *    c += w*(mean - c), c = mean when w == 1 (all FP32, no FMA);
+ *  - alpha(t) computed in double (Eq. 5), cast to FP32 once at use;
+ *    decay = (float)(1.0 - alpha_double);
+ *  - revival threshold: total = sequential FP32 sum over j (index order),
+ *    thr = (total * tau) / k in FP32; Gumbel keys: (double)logf(N_j) -
+ *    log(-log(U_j)), U stream consumed for ALL k per check;
+ *  - split: child written first (reads original donor), then donor;
+ *    delta pattern [1,-1,1,-1,...]*1e-4; nextafter on coord 0 when
+ *    donor/child collapse bit-wise;
+ *  - finalization: FP64 pass sums/counts (documented improvement over the
+ *    reference's FP32 pass sums), final division in FP32.
+ */
+
+#ifndef E_MEANS_INTERNAL_H
+#define E_MEANS_INTERNAL_H
+
+
+#define EM_INIT_USAGE_EXP    16               /* N_j(0) = 2^-16 (shipped reference) */
+#define EM_SPLIT_EPSILON     1e-4f            /* donor-split delta (shipped code)   */
+#define EM_UNUSED_TAU        0.1f             /* auto revival threshold             */
+#define EM_NO_REVIVAL_MAX_D  2                /* revival auto-off at d <= 2         */
+#define EM_AUTO_QUALITY_MAX_D 16              /* auto quality law at d <= 16        */
+#define EM_CHECK_EVERY       5                /* revival check cadence (updates)    */
+#define EM_ALPHA_MIN_FACTOR  0.1              /* cosine floor (Eq. 5)               */
+#define EM_DMAT_BUDGET       (16u * 1024u * 1024u) /* chunk*k FP32 cap             */
+#define EM_EXACT_DOTS_MAX    16384ul              /* k*d cap for the exact kernel   */
+#define EM_MAX_STAT_BUFFERS  16               /* per-slab stats buffers             */
+#define EM_MIN_SLAB_ROWS     64               /* don't split chunks below this     */
+#define EM_MAX_EPOCHS        16               /* fixed recipe array                 */
+#define EM_MAX_T             16.0f            /* nepochs cap (16 whole passes)      */
+#define EM_MAX_N             ((size_t)1 << 32)/* uint32 permutation cap             */
+
+/* ========================================================================= */
+/* State                                                                     */
+/* ========================================================================= */
+
+typedef struct EMState {
+    /* geometry */
+    const float* X;
+    size_t n, d, k;          /* n = active rows (subset-capped)              */
+    size_t n_total;          /* full input rows (labels cover all)           */
+
+    /* model (FP32) */
+    float*  c;               /* [k][d] positions                             */
+    float*  N;               /* [k]    masses                                */
+
+    /* recipe */
+    RCRE_EMMeansRecipe recipe;
+    double alpha0_f64;       /* peak step in double (Eq. 5)                  */
+
+    /* run bookkeeping */
+    size_t update_idx;       /* t: 0-based global update index               */
+    size_t epoch_idx;
+    size_t epoch_cursor;
+    bool   last_epoch;
+    bool   capturing;        /* write labels during this batch               */
+    bool   do_shuffle;
+
+    /* active-row id array; per-epoch Fisher-Yates permutation of it */
+    uint32_t* order;
+
+    /* finalization (FP64) */
+    double* pass_sums;       /* [k][d], active on last epoch                 */
+    double* pass_counts;     /* [k]                                          */
+
+    /* batch scratch */
+    float*   cc;             /* [k] centroid norm-squares (per snapshot)     */
+    float*   Dmat;           /* [chunk][k] gemm output (NULL: exact kernel)  */
+    float*   gather;         /* [chunk][d] gathered rows (NULL: exact kernel) */
+    size_t   chunk;          /* assignment chunk rows (adaptive)             */
+    bool     use_exact_dots; /* exact per-row FP32 dots (k*d <= cap)         */
+    float*   batch_s;        /* [k][d] FP32 batch sums                       */
+    float*   batch_n;        /* [k]    FP32 batch counts                     */
+    int32_t* labels;         /* [n_total] last-epoch labels (-1 default)     */
+
+    /* per-slab stats (parallel path; serial uses slab 0) */
+    float**    wsum;         /* [nbuf][k*d]                                  */
+    uint32_t*  wcnt;         /* [nbuf][k]                                    */
+    double*    wobj;         /* [nbuf] slab objectives                       */
+    size_t     nbuf;         /* allocated slab buffers (16 or 1)             */
+
+    /* RNG streams */
+    uint64_t rng_shuf;       /* per-epoch Fisher-Yates                       */
+    uint64_t rng_revive;     /* revival Gumbel U stream                      */
+    uint64_t rng_init;       /* random-row init                              */
+
+    /* reporting */
+    double objective;        /* moving-pass F64 objective (informational)    */
+    double obj_last;         /* last-epoch moving-pass objective             */
+    size_t obj_last_rows;    /* rows of the last epoch                       */
+    int    n_splits;         /* total revival splits (observability)         */
+
+    /* injected revival U stream (strict parity; NULL = own RNG) */
+    const double* inject_U;
+    size_t        inject_U_pos;
+    size_t        inject_U_len;
+
+    /* parallel */
+    RCRE_ThreadPool* pool;
+
+    /* scratch owner (internal allocations: revival scratch, subset sort) */
+    RCRE_Arena* arena;
+} EMState;
+
+/* ========================================================================= */
+/* Recipe helpers (unit-tested directly)                                     */
+/* ========================================================================= */
+
+/** Round a positive double to the nearest power of two (ties -> higher). */
+size_t em_round_pow2(double v);
+
+/** Alpha schedule (Eq. 5): peak alpha0_f64, cosine to 0.1*alpha0. t 0-based. */
+double em_scheduled_alpha(double alpha0_f64, size_t t, size_t total);
+
+/** Fractional-epoch row count, reference ties-to-even rounding. */
+size_t em_epoch_remainder(float nepochs, size_t n);
+
+/** Resolve the full recipe from problem size + params. Mirrors the
+ *  reference's _resolve_recipe (shipped-code constants). */
+RCRE_NODISCARD int em_resolve_recipe(size_t n, size_t k, size_t d,
+                                     const RCRE_EMMeansParams* params,
+                                     RCRE_EMMeansRecipe* out);
+
+/* ========================================================================= */
+/* State machine                                                             */
+/* ========================================================================= */
+
+RCRE_NODISCARD int em_state_init(EMState* st, const RCRE_Tensor* X, size_t k,
+                                 const RCRE_EMMeansParams* params,
+                                 RCRE_Arena* arena, RCRE_ThreadPool* pool);
+
+/** Apply one batch's statistics with the EMA update, finalization
+ *  accumulation and revival check. `objective` is the batch's F64 sum of
+ *  assigned distances (informational). Mirrors the reference's update().
+ *  Strict-parity entry point (injected streams never touch the model). */
+RCRE_NODISCARD int em_state_update(EMState* st, const float* sums,
+                                   const float* counts, double objective);
+
+/** Run one full batch of `m` row ids against the current centroid snapshot:
+ *  chunked gemm + argmin, slab stats, merge, update. Used by the fit loop. */
+RCRE_NODISCARD int em_state_run_batch(EMState* st, const uint32_t* rows,
+                                      size_t m, bool capture);
+
+/** Fisher-Yates permutation of the epoch's order array (per-epoch seed).
+ *  No-op when shuffle is disabled. */
+void em_state_shuffle_epoch(EMState* st);
+
+/** Finalization: last-epoch means for non-empty clusters. */
+RCRE_NODISCARD int em_state_finalize(EMState* st);
+
+/** Recompute cc[] = ||c_j||^2 (call after any centroid move). */
+void em_state_recompute_cc(EMState* st);
+
+#endif /* E_MEANS_INTERNAL_H */
 
 /* --- Internal Random Number Generation --- */
 /**
@@ -6465,6 +7340,2393 @@ int rcre_sparse_bcsr4_load(
     return RCRE_OK;
 }
 
+/* --- Source: io.c --- */
+/**
+ * @file io.c
+ * @brief RCRE High-Performance Scientific Data I/O Engine (ISO C23)
+ *
+ * Implements IO-REQ-01 through IO-REQ-06:
+ *  - Cross-platform virtual memory file mapping (mmap / madvise / F_NOCACHE)
+ *  - Atomic file persistence with telemetry hooks into rcre_prof
+ *  - Clinger / Eisel-Lemire 0-ULP fast float32 slice parser
+ *  - SIMD-accelerated & threadpool-parallel CSV/TSV tabular loader
+ *  - NumPy (.npy v1.0 & v2.0) 64-byte aligned writer, loader & zero-copy viewer
+ *  - Hugging Face (.safetensors) zero-allocation parser, zero-copy viewer & 64B writer
+ *  - SIMD Byte-Shuffle filter (NEON / AVX2 / WASM SIMD128 / Scalar) & LZ4-class block codec
+ *  - Out-of-core ping-pong arena double-buffered .npy streamer
+ *  - Zero-copy DLPack v1.0 & Apache Arrow C Data Interface bridges
+ */
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <limits.h>
+#include <stdatomic.h>
+
+#if defined(__APPLE__) || defined(__linux__) || defined(__unix__)
+#define RCRE_IO_HAVE_POSIX 1
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
+
+/* ========================================================================= */
+/* Internal Checked Arithmetic, Endianness & Telemetry Helpers               */
+/* ========================================================================= */
+
+static inline bool rcre_io_mul_overflow(size_t a, size_t b, size_t* out) {
+    if (a == 0 || b == 0) {
+        *out = 0;
+        return false;
+    }
+    if (a > SIZE_MAX / b) {
+        return true;
+    }
+    *out = a * b;
+    return false;
+}
+
+static inline bool rcre_io_add_overflow(size_t a, size_t b, size_t* out) {
+    if (b > SIZE_MAX - a) {
+        return true;
+    }
+    *out = a + b;
+    return false;
+}
+
+static inline uint16_t rcre_io_read_u16_le(const uint8_t* p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static inline uint32_t rcre_io_read_u32_le(const uint8_t* p) {
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static inline uint64_t rcre_io_read_u64_le(const uint8_t* p) {
+    return (uint64_t)p[0] |
+           ((uint64_t)p[1] << 8) |
+           ((uint64_t)p[2] << 16) |
+           ((uint64_t)p[3] << 24) |
+           ((uint64_t)p[4] << 32) |
+           ((uint64_t)p[5] << 40) |
+           ((uint64_t)p[6] << 48) |
+           ((uint64_t)p[7] << 56);
+}
+
+static inline void rcre_io_write_u16_le(uint8_t* p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xFFU);
+    p[1] = (uint8_t)((v >> 8) & 0xFFU);
+}
+
+static inline void rcre_io_write_u32_le(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFFU);
+    p[1] = (uint8_t)((v >> 8) & 0xFFU);
+    p[2] = (uint8_t)((v >> 16) & 0xFFU);
+    p[3] = (uint8_t)((v >> 24) & 0xFFU);
+}
+
+static inline void rcre_io_write_u64_le(uint8_t* p, uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+        p[i] = (uint8_t)((v >> (i * 8)) & 0xFFULL);
+    }
+}
+
+static inline void rcre_io_record_telemetry(bool is_write, uint64_t bytes) {
+    RCRE_ProfContext* prof = rcre_prof_global();
+    if (prof) {
+        rcre_prof_io_record(prof, is_write, bytes);
+    }
+}
+
+static inline bool rcre_io_is_space(uint8_t c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+/* ========================================================================= */
+/* 1. Virtual Memory Mapping & OS Page-Cache Control (IO-REQ-01)             */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_io_mmap_open(
+    const char* filepath,
+    RCRE_IOHint hint,
+    RCRE_MappedFile* out_map
+) {
+    if (!filepath || !out_map) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_map, 0, sizeof(RCRE_MappedFile));
+    out_map->os_handle = -1;
+
+#if defined(RCRE_IO_HAVE_POSIX)
+    int fd = open(filepath, O_RDONLY);
+    if (fd < 0) {
+        return RCRE_ERR_IO;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+        close(fd);
+        return RCRE_ERR_IO;
+    }
+
+    size_t file_size = (size_t)st.st_size;
+
+#if defined(__APPLE__) && defined(F_NOCACHE)
+    if (hint == RCRE_IO_HINT_STREAMING) {
+        (void)fcntl(fd, F_NOCACHE, 1);
+    }
+#endif
+
+    void* addr = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        return RCRE_ERR_IO;
+    }
+
+    out_map->data        = (const uint8_t*)addr;
+    out_map->size        = file_size;
+    out_map->os_handle   = (intptr_t)fd;
+    out_map->hint        = hint;
+    out_map->is_mapped   = true;
+    out_map->is_heap_buf = false;
+
+    (void)rcre_io_madvise_range(out_map, 0, file_size, hint);
+    rcre_io_record_telemetry(false, (uint64_t)file_size);
+    return RCRE_OK;
+#else
+    FILE* f = fopen(filepath, "rb");
+    if (!f) {
+        return RCRE_ERR_IO;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return RCRE_ERR_IO;
+    }
+    long fsize = ftell(f);
+    if (fsize <= 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return RCRE_ERR_IO;
+    }
+    size_t file_size = (size_t)fsize;
+    size_t aligned_cap = (file_size + 63) & ~((size_t)63);
+    uint8_t* buf = (uint8_t*)aligned_alloc(64, aligned_cap);
+    if (!buf) {
+        fclose(f);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    if (fread(buf, 1, file_size, f) != file_size) {
+        free(buf);
+        fclose(f);
+        return RCRE_ERR_IO;
+    }
+    fclose(f);
+
+    out_map->data        = buf;
+    out_map->size        = file_size;
+    out_map->os_handle   = -1;
+    out_map->hint        = hint;
+    out_map->is_mapped   = false;
+    out_map->is_heap_buf = true;
+    rcre_io_record_telemetry(false, (uint64_t)file_size);
+    return RCRE_OK;
+#endif
+}
+
+RCRE_NODISCARD int rcre_io_mmap_from_buffer(
+    const void* buf,
+    size_t size,
+    RCRE_MappedFile* out_map
+) {
+    if (!buf || size == 0 || !out_map) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_map, 0, sizeof(RCRE_MappedFile));
+    out_map->data        = (const uint8_t*)buf;
+    out_map->size        = size;
+    out_map->os_handle   = -1;
+    out_map->hint        = RCRE_IO_HINT_DEFAULT;
+    out_map->is_mapped   = false;
+    out_map->is_heap_buf = false;
+    return RCRE_OK;
+}
+
+void rcre_io_mmap_close(RCRE_MappedFile* map) {
+    if (!map) {
+        return;
+    }
+#if defined(RCRE_IO_HAVE_POSIX)
+    if (map->is_mapped && map->data && map->size > 0) {
+        (void)munmap((void*)(uintptr_t)map->data, map->size);
+    }
+    if (map->os_handle >= 0) {
+        (void)close((int)map->os_handle);
+    }
+#endif
+    if (map->is_heap_buf && map->data) {
+        free((void*)(uintptr_t)map->data);
+    }
+    memset(map, 0, sizeof(RCRE_MappedFile));
+    map->os_handle = -1;
+}
+
+RCRE_NODISCARD RCRE_Slice rcre_io_mmap_slice(const RCRE_MappedFile* map) {
+    if (!map || !map->data || map->size == 0) {
+        return rcre_slice_empty();
+    }
+    return rcre_slice_from_parts(map->data, map->size);
+}
+
+RCRE_NODISCARD int rcre_io_madvise_range(
+    const RCRE_MappedFile* map,
+    size_t offset,
+    size_t length,
+    RCRE_IOHint hint
+) {
+    if (!map || !map->data || map->size == 0 || offset >= map->size) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (!map->is_mapped) {
+        return RCRE_OK;
+    }
+    if (length == 0 || offset + length > map->size) {
+        length = map->size - offset;
+    }
+
+#if defined(RCRE_IO_HAVE_POSIX) && defined(POSIX_MADV_NORMAL)
+    long page_sz = sysconf(_SC_PAGESIZE);
+    size_t page_mask = (page_sz > 0) ? ((size_t)page_sz - 1) : 4095;
+    size_t aligned_off = offset & ~page_mask;
+    size_t aligned_len = length + (offset - aligned_off);
+
+    int advice = POSIX_MADV_NORMAL;
+    switch (hint) {
+        case RCRE_IO_HINT_SEQUENTIAL:
+            advice = POSIX_MADV_SEQUENTIAL;
+            (void)posix_madvise((void*)(uintptr_t)(map->data + aligned_off), aligned_len, POSIX_MADV_WILLNEED);
+            break;
+        case RCRE_IO_HINT_RANDOM:
+            advice = POSIX_MADV_RANDOM;
+            break;
+        case RCRE_IO_HINT_STREAMING:
+            advice = POSIX_MADV_DONTNEED;
+            break;
+        default:
+            advice = POSIX_MADV_NORMAL;
+            break;
+    }
+    (void)posix_madvise((void*)(uintptr_t)(map->data + aligned_off), aligned_len, advice);
+#else
+    (void)length;
+    (void)hint;
+#endif
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_write_atomic(
+    const char* filepath,
+    const void* data,
+    size_t size
+) {
+    if (!filepath || (!data && size > 0)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t path_len = strlen(filepath);
+    if (path_len == 0 || path_len > 4000) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    char tmp_path[4096];
+#if defined(RCRE_IO_HAVE_POSIX)
+    int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", filepath, (int)getpid());
+#else
+    int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filepath);
+#endif
+    if (n <= 0 || (size_t)n >= sizeof(tmp_path)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    FILE* f = fopen(tmp_path, "wb");
+    if (!f) {
+        return RCRE_ERR_IO;
+    }
+
+    if (size > 0) {
+        if (fwrite(data, 1, size, f) != size) {
+            fclose(f);
+            (void)remove(tmp_path);
+            return RCRE_ERR_IO;
+        }
+    }
+
+    if (fflush(f) != 0) {
+        fclose(f);
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+
+#if defined(RCRE_IO_HAVE_POSIX)
+    (void)fsync(fileno(f));
+#endif
+    fclose(f);
+
+    if (rename(tmp_path, filepath) != 0) {
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+
+    rcre_io_record_telemetry(true, (uint64_t)size);
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 2. Clinger / Eisel-Lemire Fast Float32 Slice Parser (IO-REQ-02)           */
+/* ========================================================================= */
+
+static const double rcre_io_pow10_exact[23] = {
+    1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,
+    1e8,  1e9,  1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+    1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22
+};
+
+static inline uint8_t rcre_io_ascii_lower(uint8_t c) {
+    return (c >= 'A' && c <= 'Z') ? (uint8_t)(c + ('a' - 'A')) : c;
+}
+
+static bool rcre_io_slice_eq_ci(RCRE_Slice s, const char* lower_lit, size_t lit_len) {
+    if (s.len != lit_len || !s.data) {
+        return false;
+    }
+    for (size_t i = 0; i < lit_len; ++i) {
+        if (rcre_io_ascii_lower(s.data[i]) != (uint8_t)lower_lit[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+RCRE_NODISCARD bool rcre_slice_parse_f32(RCRE_Slice s, float* out_val) {
+    if (!out_val || !s.data || s.len == 0) {
+        return false;
+    }
+
+    s = rcre_slice_trim_ascii(s);
+    if (s.len == 0) {
+        return false;
+    }
+
+    size_t idx = 0;
+    bool neg = false;
+    if (s.data[idx] == '-') {
+        neg = true;
+        idx++;
+    } else if (s.data[idx] == '+') {
+        idx++;
+    }
+
+    if (idx >= s.len) {
+        return false;
+    }
+
+    /* Check special IEEE-754 tokens: nan, inf, infinity */
+    uint8_t first_lower = rcre_io_ascii_lower(s.data[idx]);
+    if (first_lower == 'n' || first_lower == 'i') {
+        RCRE_Slice tail = rcre_slice_sub(s, idx, s.len);
+        if (rcre_io_slice_eq_ci(tail, "nan", 3)) {
+            *out_val = NAN;
+            return true;
+        }
+        if (rcre_io_slice_eq_ci(tail, "inf", 3) || rcre_io_slice_eq_ci(tail, "infinity", 8)) {
+            *out_val = neg ? -INFINITY : INFINITY;
+            return true;
+        }
+        return false;
+    }
+
+    uint64_t mantissa = 0;
+    int32_t exp10 = 0;
+    size_t total_digits = 0;
+    size_t sig_digits = 0;
+    bool seen_dot = false;
+    bool truncated_nonzero = false;
+
+    while (idx < s.len) {
+        uint8_t c = s.data[idx];
+        if (c >= '0' && c <= '9') {
+            total_digits++;
+            uint8_t digit = (uint8_t)(c - '0');
+            if (mantissa == 0 && digit == 0) {
+                if (seen_dot) {
+                    exp10--;
+                }
+            } else {
+                if (sig_digits < 15) {
+                    mantissa = mantissa * 10ULL + (uint64_t)digit;
+                    sig_digits++;
+                    if (seen_dot) {
+                        exp10--;
+                    }
+                } else {
+                    if (!seen_dot) {
+                        exp10++;
+                    }
+                    if (digit != 0) {
+                        truncated_nonzero = true;
+                    }
+                    sig_digits++;
+                }
+            }
+            idx++;
+        } else if (c == '.' && !seen_dot) {
+            seen_dot = true;
+            idx++;
+        } else {
+            break;
+        }
+    }
+
+    if (total_digits == 0) {
+        return false;
+    }
+
+    /* Parse optional scientific exponent (e/E[+-]digits) */
+    if (idx < s.len && (s.data[idx] == 'e' || s.data[idx] == 'E')) {
+        idx++;
+        bool exp_neg = false;
+        if (idx < s.len && (s.data[idx] == '-' || s.data[idx] == '+')) {
+            exp_neg = (s.data[idx] == '-');
+            idx++;
+        }
+        if (idx >= s.len) {
+            return false;
+        }
+        int32_t e_val = 0;
+        size_t e_digits = 0;
+        while (idx < s.len && s.data[idx] >= '0' && s.data[idx] <= '9') {
+            if (e_val < 100000) {
+                e_val = e_val * 10 + (int32_t)(s.data[idx] - '0');
+            }
+            e_digits++;
+            idx++;
+        }
+        if (e_digits == 0) {
+            return false;
+        }
+        exp10 += exp_neg ? -e_val : e_val;
+    }
+
+    /* Reject trailing non-numeric characters */
+    if (idx != s.len) {
+        return false;
+    }
+
+    if (mantissa == 0) {
+        *out_val = neg ? -0.0f : 0.0f;
+        return true;
+    }
+
+    /* Clinger / Eisel-Lemire Fast Exact Path:
+     * In binary64 (53-bit significand), any 15-digit decimal significand
+     * (< 10^15 < 2^53) and 10^|k| for |k| <= 22 are 100% exact.
+     * Single binary64 mul/div has at most 0.5 ULP_f64 error; if the lower
+     * 29 bits of the binary64 result do not lie on the float32 midpoint
+     * (0x10000000), casting to float32 is provably 0-ULP exact. */
+    if (!truncated_nonzero && sig_digits <= 15 && exp10 >= -22 && exp10 <= 22) {
+        double d = (double)mantissa;
+        if (exp10 > 0) {
+            d *= rcre_io_pow10_exact[exp10];
+        } else if (exp10 < 0) {
+            d /= rcre_io_pow10_exact[-exp10];
+        }
+        uint64_t dbits = 0;
+        memcpy(&dbits, &d, sizeof(uint64_t));
+        /* Verify result is not within 1 f64 ULP of a float32 halfway tie */
+        if (((dbits + 1ULL) & 0x1FFFFFFEULL) != 0x10000000ULL) {
+            float res = (float)d;
+            *out_val = neg ? -res : res;
+            return true;
+        }
+    }
+
+    /* Exact fallback for extreme exponents (|exp10| > 22), >15 significant
+     * digits, or near-midpoint ties. */
+    char stack_buf[128];
+    if (s.len < sizeof(stack_buf)) {
+        memcpy(stack_buf, s.data, s.len);
+        stack_buf[s.len] = '\0';
+        char* endp = nullptr;
+        float v = strtof(stack_buf, &endp);
+        if (endp == stack_buf + s.len) {
+            *out_val = v;
+            return true;
+        }
+    }
+
+    /* Ultra-long token fallback (>127 chars of leading/trailing zeros) */
+    double d_approx = (double)mantissa * pow(10.0, (double)exp10);
+    float f_approx = (float)d_approx;
+    *out_val = neg ? -f_approx : f_approx;
+    return true;
+}
+
+/* ========================================================================= */
+/* 3. SIMD-Accelerated & Threadpool-Parallel CSV/TSV Loader (IO-REQ-02)      */
+/* ========================================================================= */
+
+static inline bool rcre_io_is_csv_delim(uint8_t c, uint8_t delim) {
+    if (delim == 0) {
+        return c == ',' || c == '\t';
+    }
+    return c == delim;
+}
+
+/* Extracts the next non-EOF line from cursor, stripping trailing '\r'. */
+static bool rcre_io_csv_next_line(RCRE_Slice* cursor, RCRE_Slice* out_line) {
+    if (!cursor || !cursor->data || cursor->len == 0) {
+        return false;
+    }
+
+    size_t nl = rcre_slice_find_byte(*cursor, '\n');
+    RCRE_Slice line;
+    if (nl == RCRE_NPOS) {
+        line = *cursor;
+        *cursor = rcre_slice_empty();
+    } else {
+        line = rcre_slice_sub(*cursor, 0, nl);
+        *cursor = rcre_slice_sub(*cursor, nl + 1, cursor->len);
+    }
+
+    if (line.len > 0 && line.data[line.len - 1] == '\r') {
+        line.len--;
+    }
+
+    *out_line = line;
+    return true;
+}
+
+/* Counts fields in a CSV/TSV row using consecutive-delimiter skipping
+ * matching strtok_r semantics while executing in zero-copy read-only memory. */
+static size_t rcre_io_csv_count_cols(RCRE_Slice line, uint8_t delim) {
+    size_t cols = 0;
+    size_t i = 0;
+    while (i < line.len) {
+        while (i < line.len && rcre_io_is_csv_delim(line.data[i], delim)) {
+            i++;
+        }
+        if (i >= line.len) {
+            break;
+        }
+        cols++;
+        while (i < line.len && !rcre_io_is_csv_delim(line.data[i], delim)) {
+            i++;
+        }
+    }
+    return cols;
+}
+
+/* Parses a single CSV/TSV row into dst_row[0..expected_cols-1]. */
+static bool rcre_io_csv_parse_row(
+    RCRE_Slice line,
+    uint8_t delim,
+    bool strict_numbers,
+    size_t expected_cols,
+    float* dst_row
+) {
+    size_t c = 0;
+    size_t i = 0;
+
+    while (i < line.len) {
+        while (i < line.len && rcre_io_is_csv_delim(line.data[i], delim)) {
+            i++;
+        }
+        if (i >= line.len) {
+            break;
+        }
+        size_t tok_start = i;
+        if (delim != 0) {
+            size_t rel = rcre_hal.find_byte(line.data + i, line.len - i, delim);
+            i = (rel == RCRE_NPOS) ? line.len : (i + rel);
+        } else {
+            while (i < line.len && line.data[i] != ',' && line.data[i] != '\t') {
+                i++;
+            }
+        }
+
+        if (c >= expected_cols) {
+            return false; /* Too many columns (ragged row) */
+        }
+
+        RCRE_Slice tok = { .data = line.data + tok_start, .len = i - tok_start };
+        float val = 0.0f;
+        if (!rcre_slice_parse_f32(tok, &val)) {
+            if (strict_numbers) {
+                return false;
+            }
+            val = 0.0f;
+        }
+        dst_row[c++] = val;
+    }
+
+    return c == expected_cols;
+}
+
+typedef struct {
+    const RCRE_Slice* lines;
+    size_t            total_rows;
+    size_t            cols;
+    size_t            rows_per_task;
+    uint8_t           delim;
+    bool              strict_numbers;
+    float*            dst_data;
+    atomic_int        failed;
+} RCRE_IOCSVParallelCtx;
+
+static void rcre_io_csv_parallel_worker(void* arg, size_t task_id) {
+    RCRE_IOCSVParallelCtx* ctx = (RCRE_IOCSVParallelCtx*)arg;
+    if (atomic_load_explicit(&ctx->failed, memory_order_relaxed) != 0) {
+        return;
+    }
+
+    size_t r_start = task_id * ctx->rows_per_task;
+    if (r_start >= ctx->total_rows) {
+        return;
+    }
+    size_t r_end = r_start + ctx->rows_per_task;
+    if (r_end > ctx->total_rows) {
+        r_end = ctx->total_rows;
+    }
+
+    for (size_t r = r_start; r < r_end; ++r) {
+        if (!rcre_io_csv_parse_row(
+                ctx->lines[r],
+                ctx->delim,
+                ctx->strict_numbers,
+                ctx->cols,
+                ctx->dst_data + r * ctx->cols)) {
+            atomic_store_explicit(&ctx->failed, 1, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+RCRE_NODISCARD int rcre_io_parse_csv_slice(
+    RCRE_Slice csv_slice,
+    const RCRE_CSVOptions* opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!arena || !out_tensor || !csv_slice.data || csv_slice.len == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_tensor, 0, sizeof(RCRE_Tensor));
+
+    RCRE_CSVOptions default_opts = {
+        .delimiter      = 0,
+        .skip_header    = false,
+        .strict_numbers = false,
+        .max_rows       = 0,
+        .pool           = nullptr
+    };
+    const RCRE_CSVOptions* cfg = opts ? opts : &default_opts;
+
+    RCRE_Slice cursor = csv_slice;
+    RCRE_Slice line = rcre_slice_empty();
+
+    if (cfg->skip_header) {
+        if (!rcre_io_csv_next_line(&cursor, &line)) {
+            return RCRE_ERR_IO;
+        }
+    }
+
+    RCRE_Slice data_start = cursor;
+    if (!rcre_io_csv_next_line(&cursor, &line)) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t cols = rcre_io_csv_count_cols(line, cfg->delimiter);
+    if (cols == 0) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t rows = 1;
+    if (cfg->max_rows == 0 || rows < cfg->max_rows) {
+        while (rcre_io_csv_next_line(&cursor, &line)) {
+            if (line.len == 0 && cursor.len == 0) {
+                break;
+            }
+            rows++;
+            if (cfg->max_rows > 0 && rows >= cfg->max_rows) {
+                break;
+            }
+        }
+    }
+
+    size_t shape[2] = { rows, cols };
+    RCRE_Tensor t = rcre_tensor_create(shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!t.data) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    float* td = rcre_tensor_f32_data(&t);
+
+    /* Fast Parallel Path if ThreadPool provided and batch is nontrivial */
+    if (cfg->pool && rows >= 64) {
+        RCRE_ArenaTemp temp = rcre_arena_temp_begin(arena);
+        RCRE_Slice* line_index = (RCRE_Slice*)rcre_arena_alloc(arena, rows * sizeof(RCRE_Slice), alignof(RCRE_Slice));
+        if (line_index) {
+            RCRE_Slice p_cur = data_start;
+            size_t indexed = 0;
+            while (indexed < rows && rcre_io_csv_next_line(&p_cur, &line_index[indexed])) {
+                indexed++;
+            }
+            if (indexed == rows) {
+                size_t num_tasks = 16;
+                size_t rows_per_task = (rows + num_tasks - 1) / num_tasks;
+                RCRE_IOCSVParallelCtx pctx = {
+                    .lines          = line_index,
+                    .total_rows     = rows,
+                    .cols           = cols,
+                    .rows_per_task  = rows_per_task,
+                    .delim          = cfg->delimiter,
+                    .strict_numbers = cfg->strict_numbers,
+                    .dst_data       = td,
+                    .failed         = 0
+                };
+                rcre_threadpool_parallel_for(cfg->pool, num_tasks, rcre_io_csv_parallel_worker, &pctx);
+                rcre_arena_temp_end(temp);
+
+                if (atomic_load(&pctx.failed) != 0) {
+                    return RCRE_ERR_IO;
+                }
+                *out_tensor = t;
+                return RCRE_OK;
+            }
+        }
+        rcre_arena_temp_end(temp);
+    }
+
+    /* Single-Threaded Zero-Allocation Stream Parse */
+    RCRE_Slice s_cur = data_start;
+    for (size_t r = 0; r < rows; ++r) {
+        if (!rcre_io_csv_next_line(&s_cur, &line)) {
+            return RCRE_ERR_IO;
+        }
+        if (!rcre_io_csv_parse_row(line, cfg->delimiter, cfg->strict_numbers, cols, td + r * cols)) {
+            return RCRE_ERR_IO;
+        }
+    }
+
+    *out_tensor = t;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_load_csv_ex(
+    const char* filepath,
+    const RCRE_CSVOptions* opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!filepath || !arena || !out_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_MappedFile map;
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    rc = rcre_io_parse_csv_slice(rcre_io_mmap_slice(&map), opts, arena, out_tensor);
+    rcre_io_mmap_close(&map);
+    return rc;
+}
+
+/* ========================================================================= */
+/* 4. NumPy (.npy v1.0 / v2.0) Serialization & Zero-Copy Views (IO-REQ-03)   */
+/* ========================================================================= */
+
+static const uint8_t rcre_io_npy_magic[6] = { 0x93, 'N', 'U', 'M', 'P', 'Y' };
+
+static const char* rcre_io_dtype_to_npy_descr(RCRE_DType dtype) {
+    switch (dtype) {
+        case RCRE_DTYPE_U8:  return "|u1";
+        case RCRE_DTYPE_I32: return "<i4";
+        case RCRE_DTYPE_F32: return "<f4";
+        default:             return nullptr;
+    }
+}
+
+static bool rcre_io_npy_descr_to_dtype(RCRE_Slice descr, RCRE_DType* out_dtype) {
+    if (rcre_slice_eq_cstr(descr, "|u1") || rcre_slice_eq_cstr(descr, "<u1") || rcre_slice_eq_cstr(descr, "u1")) {
+        *out_dtype = RCRE_DTYPE_U8;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<i4") || rcre_slice_eq_cstr(descr, "=i4") || rcre_slice_eq_cstr(descr, "i4")) {
+        *out_dtype = RCRE_DTYPE_I32;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<f4") || rcre_slice_eq_cstr(descr, "=f4") || rcre_slice_eq_cstr(descr, "f4")) {
+        *out_dtype = RCRE_DTYPE_F32;
+        return true;
+    }
+    return false;
+}
+
+RCRE_NODISCARD int rcre_io_save_npy(
+    const RCRE_Tensor* tensor,
+    const char* filepath
+) {
+    if (!tensor || !tensor->data || !filepath || tensor->ndim == 0 || tensor->ndim > 4) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (!rcre_tensor_is_contiguous(tensor)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    const char* descr = rcre_io_dtype_to_npy_descr(tensor->dtype);
+    if (!descr) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    char dict_buf[256];
+    int pos = snprintf(dict_buf, sizeof(dict_buf),
+                       "{'descr': '%s', 'fortran_order': False, 'shape': (", descr);
+    if (pos <= 0 || (size_t)pos >= sizeof(dict_buf)) {
+        return RCRE_ERR_IO;
+    }
+
+    for (uint8_t i = 0; i < tensor->ndim; ++i) {
+        int n = snprintf(dict_buf + pos, sizeof(dict_buf) - (size_t)pos,
+                         (i == 0) ? "%zu" : ", %zu", tensor->shape[i]);
+        if (n <= 0 || (size_t)(pos + n) >= sizeof(dict_buf)) {
+            return RCRE_ERR_IO;
+        }
+        pos += n;
+    }
+
+    int tail_n = snprintf(dict_buf + pos, sizeof(dict_buf) - (size_t)pos,
+                          (tensor->ndim == 1) ? ",), }" : "), }");
+    if (tail_n <= 0 || (size_t)(pos + tail_n) >= sizeof(dict_buf)) {
+        return RCRE_ERR_IO;
+    }
+    size_t dict_len = (size_t)(pos + tail_n);
+
+    /* Pad v1.0 preamble (10 bytes) + dict_len + padding + '\n' to an exact
+     * multiple of 64 bytes so the array payload starts at offset 64 * k. */
+    size_t raw_total = 10 + dict_len + 1;
+    size_t aligned_total = (raw_total + 63) & ~((size_t)63);
+    size_t header_len = aligned_total - 10;
+
+    uint8_t header_block[512];
+    if (aligned_total > sizeof(header_block)) {
+        return RCRE_ERR_IO;
+    }
+
+    memcpy(header_block, rcre_io_npy_magic, 6);
+    header_block[6] = 1; /* major v1 */
+    header_block[7] = 0; /* minor v0 */
+    rcre_io_write_u16_le(&header_block[8], (uint16_t)header_len);
+    memcpy(&header_block[10], dict_buf, dict_len);
+
+    size_t pad_bytes = header_len - dict_len - 1;
+    memset(&header_block[10 + dict_len], ' ', pad_bytes);
+    header_block[aligned_total - 1] = '\n';
+
+    size_t payload_bytes = rcre_tensor_nbytes(tensor);
+
+    char tmp_path[4096];
+#if defined(RCRE_IO_HAVE_POSIX)
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", filepath, (int)getpid());
+#else
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filepath);
+#endif
+    if (tn <= 0 || (size_t)tn >= sizeof(tmp_path)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    FILE* f = fopen(tmp_path, "wb");
+    if (!f) {
+        return RCRE_ERR_IO;
+    }
+
+    if (fwrite(header_block, 1, aligned_total, f) != aligned_total ||
+        (payload_bytes > 0 && fwrite(tensor->data, 1, payload_bytes, f) != payload_bytes)) {
+        fclose(f);
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+
+    if (fflush(f) != 0) {
+        fclose(f);
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+#if defined(RCRE_IO_HAVE_POSIX)
+    (void)fsync(fileno(f));
+#endif
+    fclose(f);
+
+    if (rename(tmp_path, filepath) != 0) {
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+
+    rcre_io_record_telemetry(true, (uint64_t)(aligned_total + payload_bytes));
+    return RCRE_OK;
+}
+
+/* Internal zero-allocation .npy header parser */
+static int rcre_io_parse_npy_header(
+    RCRE_Slice file_slice,
+    RCRE_DType* out_dtype,
+    uint8_t* out_ndim,
+    size_t out_shape[4],
+    size_t* out_data_offset,
+    size_t* out_data_nbytes
+) {
+    if (!file_slice.data || file_slice.len < 10) {
+        return RCRE_ERR_IO;
+    }
+    if (memcmp(file_slice.data, rcre_io_npy_magic, 6) != 0) {
+        return RCRE_ERR_IO;
+    }
+
+    uint8_t major = file_slice.data[6];
+    uint8_t minor = file_slice.data[7];
+    (void)minor;
+
+    size_t preamble_len = 0;
+    size_t header_len = 0;
+    if (major == 1) {
+        preamble_len = 10;
+        header_len = (size_t)rcre_io_read_u16_le(&file_slice.data[8]);
+    } else if (major == 2 || major == 3) {
+        if (file_slice.len < 12) {
+            return RCRE_ERR_IO;
+        }
+        preamble_len = 12;
+        header_len = (size_t)rcre_io_read_u32_le(&file_slice.data[8]);
+    } else {
+        return RCRE_ERR_IO;
+    }
+
+    size_t data_offset = 0;
+    if (header_len == 0 || rcre_io_add_overflow(preamble_len, header_len, &data_offset) ||
+        data_offset > file_slice.len) {
+        return RCRE_ERR_IO;
+    }
+
+    RCRE_Slice hdr = rcre_slice_sub(file_slice, preamble_len, data_offset);
+
+    /* 1. Extract 'descr' */
+    RCRE_SlicePair p_descr = rcre_slice_split_once(hdr, rcre_slice_from_cstr("'descr'"));
+    if (!p_descr.found) {
+        p_descr = rcre_slice_split_once(hdr, rcre_slice_from_cstr("\"descr\""));
+        if (!p_descr.found) return RCRE_ERR_IO;
+    }
+    RCRE_SlicePair p_colon = rcre_slice_split_once_byte(p_descr.tail, ':');
+    if (!p_colon.found) return RCRE_ERR_IO;
+    RCRE_Slice descr_rest = rcre_slice_trim_ascii(p_colon.tail);
+    if (descr_rest.len < 3 || (descr_rest.data[0] != '\'' && descr_rest.data[0] != '"')) {
+        return RCRE_ERR_IO;
+    }
+    uint8_t quote_ch = descr_rest.data[0];
+    RCRE_Slice descr_body = rcre_slice_sub(descr_rest, 1, descr_rest.len);
+    size_t q_end = rcre_slice_find_byte(descr_body, quote_ch);
+    if (q_end == RCRE_NPOS) return RCRE_ERR_IO;
+    RCRE_Slice descr_val = rcre_slice_sub(descr_body, 0, q_end);
+    if (!rcre_io_npy_descr_to_dtype(descr_val, out_dtype)) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    /* 2. Verify 'fortran_order': False */
+    RCRE_SlicePair p_fort = rcre_slice_split_once(hdr, rcre_slice_from_cstr("'fortran_order'"));
+    if (!p_fort.found) {
+        p_fort = rcre_slice_split_once(hdr, rcre_slice_from_cstr("\"fortran_order\""));
+        if (!p_fort.found) return RCRE_ERR_IO;
+    }
+    RCRE_SlicePair p_fcolon = rcre_slice_split_once_byte(p_fort.tail, ':');
+    if (!p_fcolon.found) return RCRE_ERR_IO;
+    RCRE_Slice fort_val = rcre_slice_trim_ascii(p_fcolon.tail);
+    if (!rcre_slice_starts_with(fort_val, rcre_slice_from_cstr("False"))) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    /* 3. Extract 'shape': (d0, d1, ...) */
+    RCRE_SlicePair p_shape = rcre_slice_split_once(hdr, rcre_slice_from_cstr("'shape'"));
+    if (!p_shape.found) {
+        p_shape = rcre_slice_split_once(hdr, rcre_slice_from_cstr("\"shape\""));
+        if (!p_shape.found) return RCRE_ERR_IO;
+    }
+    size_t lparen = rcre_slice_find_byte(p_shape.tail, '(');
+    size_t rparen = rcre_slice_find_byte(p_shape.tail, ')');
+    if (lparen == RCRE_NPOS || rparen == RCRE_NPOS || lparen >= rparen) {
+        return RCRE_ERR_IO;
+    }
+
+    RCRE_Slice shape_tuple = rcre_slice_sub(p_shape.tail, lparen + 1, rparen);
+    uint8_t ndim = 0;
+    size_t numel = 1;
+    memset(out_shape, 0, 4 * sizeof(size_t));
+
+    while (shape_tuple.len > 0) {
+        RCRE_SlicePair sp = rcre_slice_split_once_byte(shape_tuple, ',');
+        RCRE_Slice item = rcre_slice_trim_ascii(sp.head);
+        shape_tuple = sp.tail;
+        if (item.len == 0) {
+            continue;
+        }
+        if (ndim >= 4) {
+            return RCRE_ERR_UNSUPPORTED_OP;
+        }
+        uint64_t dim_u64 = 0;
+        if (!rcre_slice_parse_u64(item, &dim_u64) || dim_u64 == 0 || dim_u64 > (uint64_t)SIZE_MAX) {
+            return RCRE_ERR_IO;
+        }
+        size_t dim = (size_t)dim_u64;
+        if (rcre_io_mul_overflow(numel, dim, &numel)) {
+            return RCRE_ERR_IO;
+        }
+        out_shape[ndim++] = dim;
+    }
+
+    if (ndim == 0) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t elem_size = rcre_dtype_size(*out_dtype);
+    size_t data_nbytes = 0;
+    if (rcre_io_mul_overflow(numel, elem_size, &data_nbytes)) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t expected_file_size = 0;
+    if (rcre_io_add_overflow(data_offset, data_nbytes, &expected_file_size) ||
+        expected_file_size != file_slice.len) {
+        return RCRE_ERR_IO;
+    }
+
+    *out_ndim = ndim;
+    *out_data_offset = data_offset;
+    *out_data_nbytes = data_nbytes;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_view_npy(
+    const RCRE_MappedFile* map,
+    RCRE_Tensor* out_view
+) {
+    if (!map || !map->data || map->size == 0 || !out_view) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_view, 0, sizeof(RCRE_Tensor));
+
+    RCRE_DType dtype = RCRE_DTYPE_F32;
+    uint8_t ndim = 0;
+    size_t shape[4] = {0};
+    size_t data_offset = 0;
+    size_t data_nbytes = 0;
+
+    int rc = rcre_io_parse_npy_header(rcre_io_mmap_slice(map), &dtype, &ndim, shape, &data_offset, &data_nbytes);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    const uint8_t* payload_ptr = map->data + data_offset;
+    /* Enforce 64-byte SIMD alignment invariant on zero-copy views */
+    if (((uintptr_t)payload_ptr & 63U) != 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_Layout layout = (ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    *out_view = rcre_tensor_from_buffer((void*)(uintptr_t)payload_ptr, shape, ndim, dtype, layout);
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_load_npy(
+    const char* filepath,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!filepath || !arena || !out_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_tensor, 0, sizeof(RCRE_Tensor));
+
+    RCRE_MappedFile map;
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    RCRE_DType dtype = RCRE_DTYPE_F32;
+    uint8_t ndim = 0;
+    size_t shape[4] = {0};
+    size_t data_offset = 0;
+    size_t data_nbytes = 0;
+
+    rc = rcre_io_parse_npy_header(rcre_io_mmap_slice(&map), &dtype, &ndim, shape, &data_offset, &data_nbytes);
+    if (rc != RCRE_OK) {
+        rcre_io_mmap_close(&map);
+        return rc;
+    }
+
+    RCRE_Layout layout = (ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    RCRE_Tensor t = rcre_tensor_create(shape, ndim, dtype, layout, arena);
+    if (!t.data) {
+        rcre_io_mmap_close(&map);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    memcpy(t.data, map.data + data_offset, data_nbytes);
+    rcre_io_mmap_close(&map);
+    *out_tensor = t;
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 5. Multi-Tensor Safetensors (.safetensors) Container Engine (IO-REQ-04)   */
+/* ========================================================================= */
+
+static const char* rcre_io_dtype_to_st_str(RCRE_DType dtype) {
+    switch (dtype) {
+        case RCRE_DTYPE_U8:  return "U8";
+        case RCRE_DTYPE_I32: return "I32";
+        case RCRE_DTYPE_F32: return "F32";
+        default:             return nullptr;
+    }
+}
+
+static bool rcre_io_st_str_to_dtype(RCRE_Slice s, RCRE_DType* out_dtype) {
+    if (rcre_slice_eq_cstr(s, "F32")) {
+        *out_dtype = RCRE_DTYPE_F32;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "I32")) {
+        *out_dtype = RCRE_DTYPE_I32;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "U8")) {
+        *out_dtype = RCRE_DTYPE_U8;
+        return true;
+    }
+    return false;
+}
+
+static void rcre_io_json_skip_ws(RCRE_Slice s, size_t* pos) {
+    while (*pos < s.len && rcre_io_is_space(s.data[*pos])) {
+        (*pos)++;
+    }
+}
+
+static bool rcre_io_json_parse_string(RCRE_Slice s, size_t* pos, RCRE_Slice* out_str) {
+    rcre_io_json_skip_ws(s, pos);
+    if (*pos >= s.len || s.data[*pos] != '"') {
+        return false;
+    }
+    (*pos)++;
+    size_t start = *pos;
+    while (*pos < s.len) {
+        uint8_t c = s.data[*pos];
+        if (c == '\\') {
+            *pos += 2;
+            if (*pos > s.len) return false;
+            continue;
+        }
+        if (c == '"') {
+            *out_str = rcre_slice_sub(s, start, *pos);
+            (*pos)++;
+            return true;
+        }
+        (*pos)++;
+    }
+    return false;
+}
+
+static bool rcre_io_json_skip_value(RCRE_Slice s, size_t* pos) {
+    rcre_io_json_skip_ws(s, pos);
+    if (*pos >= s.len) return false;
+    uint8_t c = s.data[*pos];
+    if (c == '"') {
+        RCRE_Slice dummy;
+        return rcre_io_json_parse_string(s, pos, &dummy);
+    }
+    if (c == '{' || c == '[') {
+        uint8_t open_ch = c;
+        uint8_t close_ch = (c == '{') ? '}' : ']';
+        int depth = 1;
+        (*pos)++;
+        while (*pos < s.len && depth > 0) {
+            if (s.data[*pos] == '"') {
+                RCRE_Slice dummy;
+                if (!rcre_io_json_parse_string(s, pos, &dummy)) return false;
+                continue;
+            }
+            if (s.data[*pos] == open_ch) depth++;
+            else if (s.data[*pos] == close_ch) depth--;
+            (*pos)++;
+        }
+        return depth == 0;
+    }
+    while (*pos < s.len && s.data[*pos] != ',' && s.data[*pos] != '}' &&
+           s.data[*pos] != ']' && !rcre_io_is_space(s.data[*pos])) {
+        (*pos)++;
+    }
+    return true;
+}
+
+static bool rcre_io_json_parse_u64_array(
+    RCRE_Slice s,
+    size_t* pos,
+    size_t* out_vals,
+    size_t max_count,
+    size_t* out_count
+) {
+    rcre_io_json_skip_ws(s, pos);
+    if (*pos >= s.len || s.data[*pos] != '[') {
+        return false;
+    }
+    (*pos)++;
+    size_t count = 0;
+
+    for (;;) {
+        rcre_io_json_skip_ws(s, pos);
+        if (*pos >= s.len) return false;
+        if (s.data[*pos] == ']') {
+            (*pos)++;
+            *out_count = count;
+            return true;
+        }
+        if (count > 0) {
+            if (s.data[*pos] != ',') return false;
+            (*pos)++;
+            rcre_io_json_skip_ws(s, pos);
+        }
+        size_t num_start = *pos;
+        while (*pos < s.len && s.data[*pos] >= '0' && s.data[*pos] <= '9') {
+            (*pos)++;
+        }
+        if (*pos == num_start || count >= max_count) {
+            return false;
+        }
+        uint64_t val = 0;
+        if (!rcre_slice_parse_u64(rcre_slice_sub(s, num_start, *pos), &val) ||
+            val > (uint64_t)SIZE_MAX) {
+            return false;
+        }
+        out_vals[count++] = (size_t)val;
+    }
+}
+
+static int rcre_io_safetensors_parse_archive(RCRE_SafeTensorsArchive* arch) {
+    if (!arch || !arch->map.data || arch->map.size < 8) {
+        return RCRE_ERR_IO;
+    }
+
+    uint64_t hdr_len_u64 = rcre_io_read_u64_le(arch->map.data);
+    /* Reject empty or excessively large (> 100 MiB) headers */
+    if (hdr_len_u64 == 0 || hdr_len_u64 > (100ULL * 1024ULL * 1024ULL)) {
+        return RCRE_ERR_IO;
+    }
+    size_t hdr_len = (size_t)hdr_len_u64;
+    size_t data_base = 0;
+    if (rcre_io_add_overflow(8, hdr_len, &data_base) || data_base > arch->map.size) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t payload_limit = arch->map.size - data_base;
+    arch->header_nbytes    = hdr_len;
+    arch->data_base_offset = data_base;
+    arch->num_tensors      = 0;
+
+    RCRE_Slice json = rcre_slice_from_parts(arch->map.data + 8, hdr_len);
+    size_t pos = 0;
+    rcre_io_json_skip_ws(json, &pos);
+    if (pos >= json.len || json.data[pos] != '{') {
+        return RCRE_ERR_IO;
+    }
+    pos++;
+
+    for (;;) {
+        rcre_io_json_skip_ws(json, &pos);
+        if (pos >= json.len) return RCRE_ERR_IO;
+        if (json.data[pos] == '}') {
+            pos++;
+            break;
+        }
+        if (arch->num_tensors > 0 || pos > 1) {
+            if (json.data[pos] == ',') {
+                pos++;
+                rcre_io_json_skip_ws(json, &pos);
+            }
+        }
+
+        RCRE_Slice key_name;
+        if (!rcre_io_json_parse_string(json, &pos, &key_name)) {
+            return RCRE_ERR_IO;
+        }
+        rcre_io_json_skip_ws(json, &pos);
+        if (pos >= json.len || json.data[pos] != ':') {
+            return RCRE_ERR_IO;
+        }
+        pos++;
+
+        if (rcre_slice_eq_cstr(key_name, "__metadata__")) {
+            if (!rcre_io_json_skip_value(json, &pos)) {
+                return RCRE_ERR_IO;
+            }
+            continue;
+        }
+
+        if (arch->num_tensors >= RCRE_SAFETENSORS_MAX_TENSORS || key_name.len == 0) {
+            return RCRE_ERR_IO;
+        }
+
+        rcre_io_json_skip_ws(json, &pos);
+        if (pos >= json.len || json.data[pos] != '{') {
+            return RCRE_ERR_IO;
+        }
+        pos++;
+
+        bool has_dtype = false;
+        bool has_shape = false;
+        bool has_offsets = false;
+        RCRE_SafeTensorEntry entry;
+        memset(&entry, 0, sizeof(entry));
+        entry.name = key_name;
+
+        for (;;) {
+            rcre_io_json_skip_ws(json, &pos);
+            if (pos >= json.len) return RCRE_ERR_IO;
+            if (json.data[pos] == '}') {
+                pos++;
+                break;
+            }
+            if (json.data[pos] == ',') {
+                pos++;
+                rcre_io_json_skip_ws(json, &pos);
+            }
+
+            RCRE_Slice field_name;
+            if (!rcre_io_json_parse_string(json, &pos, &field_name)) {
+                return RCRE_ERR_IO;
+            }
+            rcre_io_json_skip_ws(json, &pos);
+            if (pos >= json.len || json.data[pos] != ':') {
+                return RCRE_ERR_IO;
+            }
+            pos++;
+
+            if (rcre_slice_eq_cstr(field_name, "dtype")) {
+                RCRE_Slice dtype_str;
+                if (!rcre_io_json_parse_string(json, &pos, &dtype_str) ||
+                    !rcre_io_st_str_to_dtype(dtype_str, &entry.dtype)) {
+                    return RCRE_ERR_IO;
+                }
+                has_dtype = true;
+            } else if (rcre_slice_eq_cstr(field_name, "shape")) {
+                size_t dim_count = 0;
+                if (!rcre_io_json_parse_u64_array(json, &pos, entry.shape, 4, &dim_count) ||
+                    dim_count == 0 || dim_count > 4) {
+                    return RCRE_ERR_IO;
+                }
+                entry.ndim = (uint8_t)dim_count;
+                has_shape = true;
+            } else if (rcre_slice_eq_cstr(field_name, "data_offsets")) {
+                size_t offs[2] = {0, 0};
+                size_t off_count = 0;
+                if (!rcre_io_json_parse_u64_array(json, &pos, offs, 2, &off_count) ||
+                    off_count != 2 || offs[0] > offs[1] || offs[1] > payload_limit) {
+                    return RCRE_ERR_IO;
+                }
+                entry.data_offset = offs[0];
+                entry.data_nbytes = offs[1] - offs[0];
+                has_offsets = true;
+            } else {
+                if (!rcre_io_json_skip_value(json, &pos)) {
+                    return RCRE_ERR_IO;
+                }
+            }
+        }
+
+        if (!has_dtype || !has_shape || !has_offsets) {
+            return RCRE_ERR_IO;
+        }
+
+        /* Verify exact byte size matches prod(shape) * sizeof(dtype) */
+        size_t numel = 1;
+        for (uint8_t d = 0; d < entry.ndim; ++d) {
+            if (entry.shape[d] == 0 || rcre_io_mul_overflow(numel, entry.shape[d], &numel)) {
+                return RCRE_ERR_IO;
+            }
+        }
+        size_t expected_bytes = 0;
+        if (rcre_io_mul_overflow(numel, rcre_dtype_size(entry.dtype), &expected_bytes) ||
+            expected_bytes != entry.data_nbytes) {
+            return RCRE_ERR_IO;
+        }
+
+        /* Check for duplicate tensor names or overlapping byte intervals */
+        size_t cur_begin = entry.data_offset;
+        size_t cur_end   = entry.data_offset + entry.data_nbytes;
+        for (size_t prev = 0; prev < arch->num_tensors; ++prev) {
+            if (rcre_slice_eq(arch->entries[prev].name, entry.name)) {
+                return RCRE_ERR_IO;
+            }
+            size_t p_begin = arch->entries[prev].data_offset;
+            size_t p_end   = p_begin + arch->entries[prev].data_nbytes;
+            if (cur_begin < p_end && p_begin < cur_end) {
+                return RCRE_ERR_IO; /* Overlapping tensor slices */
+            }
+        }
+
+        arch->entries[arch->num_tensors++] = entry;
+    }
+
+    rcre_io_json_skip_ws(json, &pos);
+    if (pos != json.len || arch->num_tensors == 0) {
+        return RCRE_ERR_IO;
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_open(
+    const char* filepath,
+    RCRE_SafeTensorsArchive* out_archive
+) {
+    if (!filepath || !out_archive) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_archive, 0, sizeof(RCRE_SafeTensorsArchive));
+
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_RANDOM, &out_archive->map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    rc = rcre_io_safetensors_parse_archive(out_archive);
+    if (rc != RCRE_OK) {
+        rcre_io_mmap_close(&out_archive->map);
+        return rc;
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_open_from_buffer(
+    const void* buf,
+    size_t size,
+    RCRE_SafeTensorsArchive* out_archive
+) {
+    if (!buf || size == 0 || !out_archive) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_archive, 0, sizeof(RCRE_SafeTensorsArchive));
+
+    int rc = rcre_io_mmap_from_buffer(buf, size, &out_archive->map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    rc = rcre_io_safetensors_parse_archive(out_archive);
+    if (rc != RCRE_OK) {
+        rcre_io_mmap_close(&out_archive->map);
+        return rc;
+    }
+    return RCRE_OK;
+}
+
+void rcre_io_safetensors_close(RCRE_SafeTensorsArchive* archive) {
+    if (!archive) {
+        return;
+    }
+    rcre_io_mmap_close(&archive->map);
+    memset(archive, 0, sizeof(RCRE_SafeTensorsArchive));
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    RCRE_Arena* fallback_arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!archive || !archive->map.data || !name || !out_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_tensor, 0, sizeof(RCRE_Tensor));
+
+    RCRE_Slice target_name = rcre_slice_from_cstr(name);
+    const RCRE_SafeTensorEntry* found = nullptr;
+    for (size_t i = 0; i < archive->num_tensors; ++i) {
+        if (rcre_slice_eq(archive->entries[i].name, target_name)) {
+            found = &archive->entries[i];
+            break;
+        }
+    }
+    if (!found) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    const uint8_t* ptr = archive->map.data + archive->data_base_offset + found->data_offset;
+    RCRE_Layout layout = (found->ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+
+    if (((uintptr_t)ptr & 63U) == 0) {
+        *out_tensor = rcre_tensor_from_buffer((void*)(uintptr_t)ptr, found->shape, found->ndim, found->dtype, layout);
+        return RCRE_OK;
+    }
+
+    if (!fallback_arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_Tensor copy_t = rcre_tensor_create(found->shape, found->ndim, found->dtype, layout, fallback_arena);
+    if (!copy_t.data) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memcpy(copy_t.data, ptr, found->data_nbytes);
+    *out_tensor = copy_t;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_save(
+    const char* filepath,
+    const char* const* names,
+    const RCRE_Tensor* tensors,
+    size_t num_tensors,
+    RCRE_Arena* scratch
+) {
+    if (!filepath || !names || !tensors || !scratch ||
+        num_tensors == 0 || num_tensors > RCRE_SAFETENSORS_MAX_TENSORS) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_ArenaTemp temp = rcre_arena_temp_begin(scratch);
+    RCRE_StrBuilder sb = rcre_sb_init(scratch, 512);
+    (void)rcre_sb_append_byte(&sb, '{');
+
+    size_t current_offset = 0;
+    for (size_t i = 0; i < num_tensors; ++i) {
+        const char* tname = names[i];
+        const RCRE_Tensor* t = &tensors[i];
+        if (!tname || tname[0] == '\0' || !t->data || t->ndim == 0 || t->ndim > 4 ||
+            !rcre_tensor_is_contiguous(t)) {
+            rcre_arena_temp_end(temp);
+            return RCRE_ERR_INVALID_ARG;
+        }
+
+        const char* dt_str = rcre_io_dtype_to_st_str(t->dtype);
+        if (!dt_str) {
+            rcre_arena_temp_end(temp);
+            return RCRE_ERR_UNSUPPORTED_OP;
+        }
+
+        size_t nbytes = rcre_tensor_nbytes(t);
+        size_t next_offset = 0;
+        if (rcre_io_add_overflow(current_offset, nbytes, &next_offset)) {
+            rcre_arena_temp_end(temp);
+            return RCRE_ERR_INVALID_ARG;
+        }
+
+        if (i > 0) {
+            (void)rcre_sb_append_byte(&sb, ',');
+        }
+        (void)rcre_sb_append_byte(&sb, '"');
+        (void)rcre_sb_append_cstr(&sb, tname);
+        (void)rcre_sb_append_cstr(&sb, "\":{\"dtype\":\"");
+        (void)rcre_sb_append_cstr(&sb, dt_str);
+        (void)rcre_sb_append_cstr(&sb, "\",\"shape\":[");
+        for (uint8_t d = 0; d < t->ndim; ++d) {
+            if (d > 0) (void)rcre_sb_append_byte(&sb, ',');
+            (void)rcre_sb_append_u64(&sb, (uint64_t)t->shape[d]);
+        }
+        (void)rcre_sb_append_cstr(&sb, "],\"data_offsets\":[");
+        (void)rcre_sb_append_u64(&sb, (uint64_t)current_offset);
+        (void)rcre_sb_append_byte(&sb, ',');
+        (void)rcre_sb_append_u64(&sb, (uint64_t)next_offset);
+        (void)rcre_sb_append_cstr(&sb, "]}");
+
+        current_offset = next_offset;
+    }
+
+    (void)rcre_sb_append_byte(&sb, '}');
+
+    /* Pad JSON header with trailing spaces (' ') so that (8 + header_len)
+     * lands on an exact 64-byte boundary for zero-copy SIMD mmap views. */
+    size_t raw_preamble = 8 + sb.len;
+    size_t aligned_preamble = (raw_preamble + 63) & ~((size_t)63);
+    size_t pad_spaces = aligned_preamble - raw_preamble;
+    for (size_t p = 0; p < pad_spaces; ++p) {
+        (void)rcre_sb_append_byte(&sb, ' ');
+    }
+
+    RCRE_Slice hdr_slice = rcre_sb_to_slice(&sb);
+    if (!hdr_slice.data || hdr_slice.len == 0) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    char tmp_path[4096];
+#if defined(RCRE_IO_HAVE_POSIX)
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", filepath, (int)getpid());
+#else
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filepath);
+#endif
+    if (tn <= 0 || (size_t)tn >= sizeof(tmp_path)) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    FILE* f = fopen(tmp_path, "wb");
+    if (!f) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_IO;
+    }
+
+    uint8_t len_prefix[8];
+    rcre_io_write_u64_le(len_prefix, (uint64_t)hdr_slice.len);
+
+    if (fwrite(len_prefix, 1, 8, f) != 8 ||
+        fwrite(hdr_slice.data, 1, hdr_slice.len, f) != hdr_slice.len) {
+        fclose(f);
+        (void)remove(tmp_path);
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_IO;
+    }
+
+    for (size_t i = 0; i < num_tensors; ++i) {
+        size_t nb = rcre_tensor_nbytes(&tensors[i]);
+        if (nb > 0 && fwrite(tensors[i].data, 1, nb, f) != nb) {
+            fclose(f);
+            (void)remove(tmp_path);
+            rcre_arena_temp_end(temp);
+            return RCRE_ERR_IO;
+        }
+    }
+
+    if (fflush(f) != 0) {
+        fclose(f);
+        (void)remove(tmp_path);
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_IO;
+    }
+#if defined(RCRE_IO_HAVE_POSIX)
+    (void)fsync(fileno(f));
+#endif
+    fclose(f);
+    rcre_arena_temp_end(temp);
+
+    if (rename(tmp_path, filepath) != 0) {
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+
+    rcre_io_record_telemetry(true, (uint64_t)(8 + hdr_slice.len + current_offset));
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 6. SIMD Byte-Shuffle Codec & Out-of-Core Ping-Pong Streamer (IO-REQ-05)   */
+/* ========================================================================= */
+
+void rcre_io_byte_shuffle_32(const void* src, void* dst, size_t num_elements) {
+    if (!src || !dst || num_elements == 0) {
+        return;
+    }
+
+    const uint8_t* s = (const uint8_t*)src;
+    uint8_t* d0 = (uint8_t*)dst;
+    uint8_t* d1 = d0 + num_elements;
+    uint8_t* d2 = d1 + num_elements;
+    uint8_t* d3 = d2 + num_elements;
+
+    size_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 15 < num_elements; i += 16) {
+        uint8x16x4_t v = vld4q_u8(s + i * 4);
+        vst1q_u8(d0 + i, v.val[0]);
+        vst1q_u8(d1 + i, v.val[1]);
+        vst1q_u8(d2 + i, v.val[2]);
+        vst1q_u8(d3 + i, v.val[3]);
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+    const __m128i shuf_mask = _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+    for (; i + 3 < num_elements; i += 4) {
+        __m128i v = _mm_loadu_si128((const __m128i*)(s + i * 4));
+        __m128i t = _mm_shuffle_epi8(v, shuf_mask);
+        uint32_t lane0 = (uint32_t)_mm_extract_epi32(t, 0);
+        uint32_t lane1 = (uint32_t)_mm_extract_epi32(t, 1);
+        uint32_t lane2 = (uint32_t)_mm_extract_epi32(t, 2);
+        uint32_t lane3 = (uint32_t)_mm_extract_epi32(t, 3);
+        memcpy(d0 + i, &lane0, 4);
+        memcpy(d1 + i, &lane1, 4);
+        memcpy(d2 + i, &lane2, 4);
+        memcpy(d3 + i, &lane3, 4);
+    }
+#elif defined(__wasm_simd128__)
+    for (; i + 3 < num_elements; i += 4) {
+        v128_t v = wasm_v128_load(s + i * 4);
+        v128_t t = wasm_i8x16_shuffle(v, v, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+        uint32_t lane0 = (uint32_t)wasm_i32x4_extract_lane(t, 0);
+        uint32_t lane1 = (uint32_t)wasm_i32x4_extract_lane(t, 1);
+        uint32_t lane2 = (uint32_t)wasm_i32x4_extract_lane(t, 2);
+        uint32_t lane3 = (uint32_t)wasm_i32x4_extract_lane(t, 3);
+        memcpy(d0 + i, &lane0, 4);
+        memcpy(d1 + i, &lane1, 4);
+        memcpy(d2 + i, &lane2, 4);
+        memcpy(d3 + i, &lane3, 4);
+    }
+#endif
+
+    for (; i < num_elements; ++i) {
+        d0[i] = s[i * 4 + 0];
+        d1[i] = s[i * 4 + 1];
+        d2[i] = s[i * 4 + 2];
+        d3[i] = s[i * 4 + 3];
+    }
+}
+
+void rcre_io_byte_unshuffle_32(const void* src, void* dst, size_t num_elements) {
+    if (!src || !dst || num_elements == 0) {
+        return;
+    }
+
+    const uint8_t* s0 = (const uint8_t*)src;
+    const uint8_t* s1 = s0 + num_elements;
+    const uint8_t* s2 = s1 + num_elements;
+    const uint8_t* s3 = s2 + num_elements;
+    uint8_t* d = (uint8_t*)dst;
+
+    size_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 15 < num_elements; i += 16) {
+        uint8x16x4_t v;
+        v.val[0] = vld1q_u8(s0 + i);
+        v.val[1] = vld1q_u8(s1 + i);
+        v.val[2] = vld1q_u8(s2 + i);
+        v.val[3] = vld1q_u8(s3 + i);
+        vst4q_u8(d + i * 4, v);
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+    const __m128i unshuf_mask = _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+    for (; i + 3 < num_elements; i += 4) {
+        uint32_t lane0, lane1, lane2, lane3;
+        memcpy(&lane0, s0 + i, 4);
+        memcpy(&lane1, s1 + i, 4);
+        memcpy(&lane2, s2 + i, 4);
+        memcpy(&lane3, s3 + i, 4);
+        __m128i v = _mm_setr_epi32((int)lane0, (int)lane1, (int)lane2, (int)lane3);
+        __m128i t = _mm_shuffle_epi8(v, unshuf_mask);
+        _mm_storeu_si128((__m128i*)(d + i * 4), t);
+    }
+#elif defined(__wasm_simd128__)
+    for (; i + 3 < num_elements; i += 4) {
+        int32_t lane0, lane1, lane2, lane3;
+        memcpy(&lane0, s0 + i, 4);
+        memcpy(&lane1, s1 + i, 4);
+        memcpy(&lane2, s2 + i, 4);
+        memcpy(&lane3, s3 + i, 4);
+        v128_t v = wasm_i32x4_make(lane0, lane1, lane2, lane3);
+        v128_t t = wasm_i8x16_shuffle(v, v, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+        wasm_v128_store(d + i * 4, t);
+    }
+#endif
+
+    for (; i < num_elements; ++i) {
+        d[i * 4 + 0] = s0[i];
+        d[i * 4 + 1] = s1[i];
+        d[i * 4 + 2] = s2[i];
+        d[i * 4 + 3] = s3[i];
+    }
+}
+
+/*
+ * RCRE Compressed Tensor Frame Format ("RCRZ", 64-byte header):
+ *  - bytes 0..3:   Magic "RCRZ"
+ *  - bytes 4..7:   Version (1)
+ *  - bytes 8..11:  dtype (RCRE_DType)
+ *  - bytes 12..15: ndim (1..4)
+ *  - bytes 16..47: shape[4] as uint64_le
+ *  - bytes 48..55: uncompressed_bytes as uint64_le
+ *  - bytes 56..63: compressed_payload_bytes as uint64_le
+ *
+ * Payload encoding on byte-shuffled buffer:
+ *  Zero-dependency LZ4-architecture token + literal + 16-bit offset match stream.
+ */
+static size_t rcre_io_lz_compress(const uint8_t* src, size_t src_len, uint8_t* dst) {
+    if (src_len == 0) {
+        return 0;
+    }
+
+    uint32_t hash_table[1024];
+    memset(hash_table, 0, sizeof(hash_table));
+
+    size_t anchor = 0;
+    size_t cur = 0;
+    size_t d_pos = 0;
+    const size_t match_limit = (src_len > 12) ? (src_len - 5) : 0;
+
+    while (cur < match_limit) {
+        uint32_t v = rcre_io_read_u32_le(src + cur);
+        uint32_t h = (v * 2654435761U) >> 22;
+        size_t ref = (size_t)hash_table[h];
+        hash_table[h] = (uint32_t)cur;
+
+        size_t dist = cur - ref;
+        if (dist > 0 && dist <= 65535 && rcre_io_read_u32_le(src + ref) == v) {
+            /* Found >= 4-byte match */
+            size_t lit_len = cur - anchor;
+            size_t m_len = 4;
+            while (cur + m_len < src_len && src[ref + m_len] == src[cur + m_len]) {
+                m_len++;
+            }
+
+            size_t m_code = m_len - 4;
+            uint8_t lit_nib = (lit_len >= 15) ? 15 : (uint8_t)lit_len;
+            uint8_t mat_nib = (m_code >= 15)  ? 15 : (uint8_t)m_code;
+            dst[d_pos++] = (uint8_t)((lit_nib << 4) | mat_nib);
+
+            if (lit_len >= 15) {
+                size_t rem = lit_len - 15;
+                while (rem >= 255) {
+                    dst[d_pos++] = 255;
+                    rem -= 255;
+                }
+                dst[d_pos++] = (uint8_t)rem;
+            }
+
+            if (lit_len > 0) {
+                memcpy(dst + d_pos, src + anchor, lit_len);
+                d_pos += lit_len;
+            }
+
+            rcre_io_write_u16_le(dst + d_pos, (uint16_t)dist);
+            d_pos += 2;
+
+            if (m_code >= 15) {
+                size_t rem = m_code - 15;
+                while (rem >= 255) {
+                    dst[d_pos++] = 255;
+                    rem -= 255;
+                }
+                dst[d_pos++] = (uint8_t)rem;
+            }
+
+            cur += m_len;
+            anchor = cur;
+            continue;
+        }
+        cur++;
+    }
+
+    /* Emit final trailing literal sequence */
+    size_t tail_lit = src_len - anchor;
+    uint8_t lit_nib = (tail_lit >= 15) ? 15 : (uint8_t)tail_lit;
+    dst[d_pos++] = (uint8_t)(lit_nib << 4);
+    if (tail_lit >= 15) {
+        size_t rem = tail_lit - 15;
+        while (rem >= 255) {
+            dst[d_pos++] = 255;
+            rem -= 255;
+        }
+        dst[d_pos++] = (uint8_t)rem;
+    }
+    if (tail_lit > 0) {
+        memcpy(dst + d_pos, src + anchor, tail_lit);
+        d_pos += tail_lit;
+    }
+    return d_pos;
+}
+
+static bool rcre_io_lz_decompress(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_cap) {
+    size_t s_pos = 0;
+    size_t d_pos = 0;
+
+    while (s_pos < src_len) {
+        uint8_t token = src[s_pos++];
+        size_t lit_len = (size_t)(token >> 4);
+        if (lit_len == 15) {
+            uint8_t s_byte = 0;
+            do {
+                if (s_pos >= src_len) return false;
+                s_byte = src[s_pos++];
+                if (rcre_io_add_overflow(lit_len, (size_t)s_byte, &lit_len)) return false;
+            } while (s_byte == 255);
+        }
+
+        if (s_pos + lit_len > src_len || d_pos + lit_len > dst_cap) {
+            return false;
+        }
+        if (lit_len > 0) {
+            memcpy(dst + d_pos, src + s_pos, lit_len);
+            s_pos += lit_len;
+            d_pos += lit_len;
+        }
+
+        /* Last sequence in block ends immediately after literals */
+        if (s_pos == src_len) {
+            break;
+        }
+
+        if (s_pos + 2 > src_len) {
+            return false;
+        }
+        size_t offset = (size_t)rcre_io_read_u16_le(src + s_pos);
+        s_pos += 2;
+        if (offset == 0 || offset > d_pos) {
+            return false;
+        }
+
+        size_t m_code = (size_t)(token & 0x0FU);
+        if (m_code == 15) {
+            uint8_t s_byte = 0;
+            do {
+                if (s_pos >= src_len) return false;
+                s_byte = src[s_pos++];
+                if (rcre_io_add_overflow(m_code, (size_t)s_byte, &m_code)) return false;
+            } while (s_byte == 255);
+        }
+        size_t match_len = m_code + 4;
+        if (d_pos + match_len > dst_cap) {
+            return false;
+        }
+
+        size_t ref = d_pos - offset;
+        if (offset >= match_len) {
+            memcpy(dst + d_pos, dst + ref, match_len);
+            d_pos += match_len;
+        } else {
+            for (size_t i = 0; i < match_len; ++i) {
+                dst[d_pos++] = dst[ref + i];
+            }
+        }
+    }
+
+    return d_pos == dst_cap;
+}
+
+RCRE_NODISCARD int rcre_io_compress_tensor(
+    const RCRE_Tensor* tensor,
+    RCRE_Arena* arena,
+    RCRE_Slice* out_slice
+) {
+    if (!tensor || !tensor->data || !arena || !out_slice ||
+        tensor->ndim == 0 || tensor->ndim > 4 || !rcre_tensor_is_contiguous(tensor)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (tensor->dtype != RCRE_DTYPE_F32 && tensor->dtype != RCRE_DTYPE_I32) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t numel = rcre_tensor_numel(tensor);
+    size_t raw_bytes = numel * 4;
+    if (numel == 0 || raw_bytes == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    /* Worst-case RLE size is raw_bytes + ceil(raw_bytes / 128) + 64 header */
+    size_t max_comp = 64 + raw_bytes + (raw_bytes / 128) + 16;
+    uint8_t* out_buf = (uint8_t*)rcre_arena_alloc(arena, max_comp, 64);
+    if (!out_buf) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    RCRE_ArenaTemp temp = rcre_arena_temp_begin(arena);
+    uint8_t* shuffled = (uint8_t*)rcre_arena_alloc(arena, raw_bytes, 64);
+    if (!shuffled) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    rcre_io_byte_shuffle_32(tensor->data, shuffled, numel);
+    size_t comp_payload = rcre_io_lz_compress(shuffled, raw_bytes, out_buf + 64);
+    rcre_arena_temp_end(temp);
+
+    memset(out_buf, 0, 64);
+    memcpy(out_buf, "RCRZ", 4);
+    rcre_io_write_u32_le(out_buf + 4, 1U);
+    rcre_io_write_u32_le(out_buf + 8, (uint32_t)tensor->dtype);
+    rcre_io_write_u32_le(out_buf + 12, (uint32_t)tensor->ndim);
+    for (uint8_t d = 0; d < tensor->ndim; ++d) {
+        rcre_io_write_u64_le(out_buf + 16 + d * 8, (uint64_t)tensor->shape[d]);
+    }
+    rcre_io_write_u64_le(out_buf + 48, (uint64_t)raw_bytes);
+    rcre_io_write_u64_le(out_buf + 56, (uint64_t)comp_payload);
+
+    *out_slice = rcre_slice_from_parts(out_buf, 64 + comp_payload);
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_decompress_tensor(
+    RCRE_Slice compressed_frame,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!compressed_frame.data || compressed_frame.len < 64 || !arena || !out_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_tensor, 0, sizeof(RCRE_Tensor));
+
+    const uint8_t* hdr = compressed_frame.data;
+    if (memcmp(hdr, "RCRZ", 4) != 0 || rcre_io_read_u32_le(hdr + 4) != 1U) {
+        return RCRE_ERR_IO;
+    }
+
+    RCRE_DType dtype = (RCRE_DType)rcre_io_read_u32_le(hdr + 8);
+    uint32_t ndim_u32 = rcre_io_read_u32_le(hdr + 12);
+    if ((dtype != RCRE_DTYPE_F32 && dtype != RCRE_DTYPE_I32) || ndim_u32 == 0 || ndim_u32 > 4) {
+        return RCRE_ERR_IO;
+    }
+    uint8_t ndim = (uint8_t)ndim_u32;
+
+    size_t shape[4] = {0};
+    size_t numel = 1;
+    for (uint8_t d = 0; d < ndim; ++d) {
+        uint64_t dim_u64 = rcre_io_read_u64_le(hdr + 16 + d * 8);
+        if (dim_u64 == 0 || dim_u64 > (uint64_t)SIZE_MAX ||
+            rcre_io_mul_overflow(numel, (size_t)dim_u64, &numel)) {
+            return RCRE_ERR_IO;
+        }
+        shape[d] = (size_t)dim_u64;
+    }
+
+    uint64_t raw_bytes_u64  = rcre_io_read_u64_le(hdr + 48);
+    uint64_t comp_bytes_u64 = rcre_io_read_u64_le(hdr + 56);
+    size_t expected_raw = 0;
+    if (rcre_io_mul_overflow(numel, 4, &expected_raw) ||
+        raw_bytes_u64 != (uint64_t)expected_raw ||
+        64ULL + comp_bytes_u64 != (uint64_t)compressed_frame.len) {
+        return RCRE_ERR_IO;
+    }
+
+    RCRE_Layout layout = (ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    RCRE_Tensor t = rcre_tensor_create(shape, ndim, dtype, layout, arena);
+    if (!t.data) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    RCRE_ArenaTemp temp = rcre_arena_temp_begin(arena);
+    uint8_t* shuffled = (uint8_t*)rcre_arena_alloc(arena, expected_raw, 64);
+    if (!shuffled) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    if (!rcre_io_lz_decompress(hdr + 64, (size_t)comp_bytes_u64, shuffled, expected_raw)) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_IO;
+    }
+
+    rcre_io_byte_unshuffle_32(shuffled, t.data, numel);
+    rcre_arena_temp_end(temp);
+
+    *out_tensor = t;
+    return RCRE_OK;
+}
+
+/* --- Out-of-Core Ping-Pong Arena Double-Buffered Streamer --- */
+
+RCRE_NODISCARD int rcre_io_stream_open_npy(
+    const char* filepath,
+    size_t batch_rows,
+    RCRE_Arena* arena,
+    RCRE_TensorStream* out_stream
+) {
+    if (!filepath || batch_rows == 0 || !arena || !out_stream) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_stream, 0, sizeof(RCRE_TensorStream));
+
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &out_stream->map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    size_t data_nbytes = 0;
+    rc = rcre_io_parse_npy_header(
+        rcre_io_mmap_slice(&out_stream->map),
+        &out_stream->dtype,
+        &out_stream->ndim,
+        out_stream->full_shape,
+        &out_stream->data_offset,
+        &data_nbytes
+    );
+    if (rc != RCRE_OK) {
+        rcre_io_mmap_close(&out_stream->map);
+        return rc;
+    }
+
+    size_t row_elems = 1;
+    for (uint8_t d = 1; d < out_stream->ndim; ++d) {
+        row_elems *= out_stream->full_shape[d];
+    }
+    size_t row_bytes = row_elems * rcre_dtype_size(out_stream->dtype);
+    size_t buf_bytes = 0;
+    if (rcre_io_mul_overflow(batch_rows, row_bytes, &buf_bytes)) {
+        rcre_io_mmap_close(&out_stream->map);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    out_stream->ping_pong_buf[0] = (uint8_t*)rcre_arena_alloc(arena, buf_bytes, 64);
+    out_stream->ping_pong_buf[1] = (uint8_t*)rcre_arena_alloc(arena, buf_bytes, 64);
+    if (!out_stream->ping_pong_buf[0] || !out_stream->ping_pong_buf[1]) {
+        rcre_io_mmap_close(&out_stream->map);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    out_stream->layout       = (out_stream->ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    out_stream->row_elements = row_elems;
+    out_stream->row_bytes    = row_bytes;
+    out_stream->total_rows   = out_stream->full_shape[0];
+    out_stream->batch_rows   = batch_rows;
+    out_stream->current_row  = 0;
+    out_stream->active_slot  = 0;
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD bool rcre_io_stream_next(
+    RCRE_TensorStream* stream,
+    RCRE_Tensor* out_batch
+) {
+    if (!stream || !stream->map.data || !out_batch || stream->current_row >= stream->total_rows) {
+        return false;
+    }
+
+    size_t rem_rows = stream->total_rows - stream->current_row;
+    size_t cur_rows = (rem_rows < stream->batch_rows) ? rem_rows : stream->batch_rows;
+    size_t copy_bytes = cur_rows * stream->row_bytes;
+    size_t file_off = stream->data_offset + stream->current_row * stream->row_bytes;
+
+    uint8_t slot = stream->active_slot;
+    uint8_t* dst = stream->ping_pong_buf[slot];
+    memcpy(dst, stream->map.data + file_off, copy_bytes);
+
+    /* Advise kernel to prefetch next batch and release previous pages */
+    size_t next_off = file_off + copy_bytes;
+    if (next_off < stream->map.size) {
+        (void)rcre_io_madvise_range(&stream->map, next_off, copy_bytes, RCRE_IO_HINT_SEQUENTIAL);
+    }
+
+    size_t batch_shape[4] = {0};
+    memcpy(batch_shape, stream->full_shape, stream->ndim * sizeof(size_t));
+    batch_shape[0] = cur_rows;
+
+    *out_batch = rcre_tensor_from_buffer(dst, batch_shape, stream->ndim, stream->dtype, stream->layout);
+
+    stream->current_row += cur_rows;
+    stream->active_slot ^= 1U;
+    return true;
+}
+
+void rcre_io_stream_reset(RCRE_TensorStream* stream) {
+    if (stream) {
+        stream->current_row = 0;
+        stream->active_slot = 0;
+    }
+}
+
+void rcre_io_stream_close(RCRE_TensorStream* stream) {
+    if (!stream) {
+        return;
+    }
+    rcre_io_mmap_close(&stream->map);
+    memset(stream, 0, sizeof(RCRE_TensorStream));
+}
+
+/* ========================================================================= */
+/* 7. Zero-Copy Cross-Framework C ABI Bridges: DLPack & Arrow (IO-REQ-06)    */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_io_to_dlpack(
+    const RCRE_Tensor* src,
+    RCRE_Arena* meta_arena,
+    RCRE_DLTensor* out_dl
+) {
+    if (!src || !src->data || !meta_arena || !out_dl || src->ndim == 0 || src->ndim > 4) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_dl, 0, sizeof(RCRE_DLTensor));
+
+    uint8_t code = 0;
+    uint8_t bits = 0;
+    switch (src->dtype) {
+        case RCRE_DTYPE_U8:  code = (uint8_t)RCRE_DL_UINT;  bits = 8;  break;
+        case RCRE_DTYPE_I32: code = (uint8_t)RCRE_DL_INT;   bits = 32; break;
+        case RCRE_DTYPE_F32: code = (uint8_t)RCRE_DL_FLOAT; bits = 32; break;
+        default: return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    int64_t* dl_shape   = (int64_t*)rcre_arena_alloc(meta_arena, src->ndim * sizeof(int64_t), alignof(int64_t));
+    int64_t* dl_strides = (int64_t*)rcre_arena_alloc(meta_arena, src->ndim * sizeof(int64_t), alignof(int64_t));
+    if (!dl_shape || !dl_strides) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    for (uint8_t i = 0; i < src->ndim; ++i) {
+        dl_shape[i]   = (int64_t)src->shape[i];
+        dl_strides[i] = (int64_t)src->strides[i];
+    }
+
+    out_dl->data        = src->data;
+    out_dl->device_type = (int32_t)RCRE_DL_DEVICE_CPU;
+    out_dl->device_id   = 0;
+    out_dl->ndim        = (int32_t)src->ndim;
+    out_dl->dtype_code  = code;
+    out_dl->dtype_bits  = bits;
+    out_dl->dtype_lanes = 1;
+    out_dl->shape       = dl_shape;
+    out_dl->strides     = dl_strides;
+    out_dl->byte_offset = 0;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_from_dlpack(
+    const RCRE_DLTensor* dl,
+    RCRE_Tensor* out_view
+) {
+    if (!dl || !dl->data || !dl->shape || !out_view || dl->ndim <= 0 || dl->ndim > 4) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (dl->device_type != (int32_t)RCRE_DL_DEVICE_CPU || dl->dtype_lanes != 1) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    RCRE_DType dtype = RCRE_DTYPE_F32;
+    if (dl->dtype_code == (uint8_t)RCRE_DL_UINT && dl->dtype_bits == 8) {
+        dtype = RCRE_DTYPE_U8;
+    } else if (dl->dtype_code == (uint8_t)RCRE_DL_INT && dl->dtype_bits == 32) {
+        dtype = RCRE_DTYPE_I32;
+    } else if (dl->dtype_code == (uint8_t)RCRE_DL_FLOAT && dl->dtype_bits == 32) {
+        dtype = RCRE_DTYPE_F32;
+    } else {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t shape[4] = {0};
+    for (int32_t i = 0; i < dl->ndim; ++i) {
+        if (dl->shape[i] <= 0) {
+            return RCRE_ERR_INVALID_ARG;
+        }
+        shape[i] = (size_t)dl->shape[i];
+    }
+
+    uint8_t* base_ptr = (uint8_t*)dl->data + dl->byte_offset;
+    RCRE_Layout layout = (dl->ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    RCRE_Tensor view = rcre_tensor_from_buffer(base_ptr, shape, (uint8_t)dl->ndim, dtype, layout);
+
+    if (dl->strides) {
+        for (int32_t i = 0; i < dl->ndim; ++i) {
+            view.strides[i] = (ptrdiff_t)dl->strides[i];
+        }
+    }
+
+    *out_view = view;
+    return RCRE_OK;
+}
+
+static void rcre_io_arrow_noop_release_schema(RCRE_ArrowSchema* schema) {
+    if (schema) {
+        schema->release = nullptr;
+    }
+}
+
+static void rcre_io_arrow_noop_release_array(RCRE_ArrowArray* array) {
+    if (array) {
+        array->release = nullptr;
+    }
+}
+
+RCRE_NODISCARD int rcre_io_to_arrow(
+    const RCRE_Tensor* src,
+    RCRE_Arena* meta_arena,
+    RCRE_ArrowSchema* out_schema,
+    RCRE_ArrowArray* out_array
+) {
+    if (!src || !src->data || !meta_arena || !out_schema || !out_array ||
+        src->ndim != 1 || !rcre_tensor_is_contiguous(src)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_schema, 0, sizeof(RCRE_ArrowSchema));
+    memset(out_array, 0, sizeof(RCRE_ArrowArray));
+
+    const char* fmt = nullptr;
+    switch (src->dtype) {
+        case RCRE_DTYPE_U8:  fmt = "C"; break;
+        case RCRE_DTYPE_I32: fmt = "i"; break;
+        case RCRE_DTYPE_F32: fmt = "f"; break;
+        default: return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    const void** bufs = (const void**)rcre_arena_alloc(meta_arena, 2 * sizeof(void*), alignof(void*));
+    if (!bufs) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    bufs[0] = nullptr;   /* No null validity bitmap (null_count == 0) */
+    bufs[1] = src->data; /* Zero-copy data buffer pointer             */
+
+    out_schema->format       = fmt;
+    out_schema->name         = src->label ? src->label : "rcre_col";
+    out_schema->flags        = 0;
+    out_schema->n_children   = 0;
+    out_schema->release      = rcre_io_arrow_noop_release_schema;
+
+    out_array->length        = (int64_t)src->shape[0];
+    out_array->null_count    = 0;
+    out_array->offset        = 0;
+    out_array->n_buffers     = 2;
+    out_array->n_children    = 0;
+    out_array->buffers       = bufs;
+    out_array->release       = rcre_io_arrow_noop_release_array;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_from_arrow(
+    const RCRE_ArrowSchema* schema,
+    const RCRE_ArrowArray* array,
+    RCRE_Tensor* out_view
+) {
+    if (!schema || !schema->format || !array || !array->buffers || !out_view ||
+        array->n_buffers < 2 || !array->buffers[1] || array->length <= 0 || array->null_count != 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_DType dtype = RCRE_DTYPE_F32;
+    if (strcmp(schema->format, "f") == 0) {
+        dtype = RCRE_DTYPE_F32;
+    } else if (strcmp(schema->format, "i") == 0) {
+        dtype = RCRE_DTYPE_I32;
+    } else if (strcmp(schema->format, "C") == 0) {
+        dtype = RCRE_DTYPE_U8;
+    } else {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t elem_sz = rcre_dtype_size(dtype);
+    uint8_t* ptr = (uint8_t*)(uintptr_t)array->buffers[1] + ((size_t)array->offset * elem_sz);
+    size_t shape[1] = { (size_t)array->length };
+    *out_view = rcre_tensor_from_buffer(ptr, shape, 1, dtype, RCRE_LAYOUT_TABULAR);
+    return RCRE_OK;
+}
+
 /* --- Source: color.c --- */
 /**
  * @file color.c
@@ -10379,6 +13641,920 @@ RCRE_NODISCARD int rcre_ml_pca_inverse_transform(const RCRE_Tensor* X_proj, cons
 }
 
 
+/* --- Source: e_means.c --- */
+/**
+ * @file e_means.c
+ * @brief e-means (Bessa et al. 2026) as an RCRE ML operator.
+ *
+ * Implements Algorithm 1 of "e-means: outperforming k-means (in one-tenth
+ * the epochs)" (arXiv 2611.09501), reference implementation:
+ * faiss/contrib/e_means (base.py, e_means.py). Scope of this port
+ * (see docs/exactness.md for the full contract and deviations):
+ *
+ *   - Euclidean, FP32 model state, CPU, single process;
+ *   - the shipped reference's constants are ground truth (the paper's
+ *     Table 2 reports a different fit — the code comments say so);
+ *   - finalization sums in FP64 (reference uses FP32; documented
+ *     improvement — the final answer is the last-epoch mean);
+ *   - RNG: RCRE splitmix64 streams (reference: MT19937) — trajectories
+ *     are therefore not bit-comparable in default mode; strict parity is
+ *     gated at the state-machine level with injected streams.
+ *
+ * Threading: batches are processed in chunks (chunk*k <= 16 MB of Dmat);
+ * a chunk is partitioned into up to 16 contiguous slabs, each owning a
+ * disjoint Dmat/gather row range and one FP32 stats buffer; slabs run on
+ * the RCRE threadpool and their partials merge in slab (row) order. The
+ * partition depends only on (m, k, B) — never on the pool size — so the
+ * result is bit-identical across runs and pool sizes; serial vs parallel
+ * differs only in FP32 addition grouping at slab boundaries (<= 1 ULP).
+ */
+
+
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
+
+/* ========================================================================= */
+/* Shipped reference constants (faiss/contrib/e_means/base.py).              */
+/* Batch laws B = C_B * k^bk * n^bn * T^bt; step law                          */
+/* alpha0 = C_a * k^ak * B^aB * n^an * T^aT clamped to [1e-4, 1].             */
+/* ========================================================================= */
+
+typedef struct EMLaw { double cb, bk, bn, bt; } EMLaw;
+static const EMLaw EM_LAW_THROUGHPUT = { 0.035134,   0.134749, 0.876473, 0.813344 };
+static const EMLaw EM_LAW_QUALITY    = { 0.00439175, 0.134749, 0.876473, 0.813344 };
+static const double EM_STEP_LAW[5] = { 0.8244, -0.4617, 0.9003, -0.4498, -0.1057 };
+
+/* ========================================================================= */
+/* Recipe helpers                                                            */
+/* ========================================================================= */
+
+size_t em_round_pow2(double v) {
+    if (v <= 1.0) return 1;
+    double low  = pow(2.0, floor(log2(v)));
+    double high = 2.0 * low;
+    return (size_t)(v / low < high / v ? low : high);
+}
+
+double em_scheduled_alpha(double alpha0_f64, size_t t, size_t total) {
+    double f = (double)(t < total ? t : total) / (double)(total > 1 ? total : 1);
+    double cosine = 0.5 * (1.0 + cos(M_PI * f));
+    return alpha0_f64 * (EM_ALPHA_MIN_FACTOR + (1.0 - EM_ALPHA_MIN_FACTOR) * cosine);
+}
+
+size_t em_epoch_remainder(float nepochs, size_t n) {
+    /* Python round() on ((T - floor(T)) * n): exact half-to-even on the
+     * double value (the reference's _epoch_rows uses built-in round). */
+    double whole = floor((double)nepochs);
+    double v = ((double)nepochs - whole) * (double)n;
+    double f = floor(v);
+    double diff = v - f;
+    if (diff > 0.5) return (size_t)(f + 1.0);
+    if (diff < 0.5) return (size_t)f;
+    return ((size_t)f % 2 == 0) ? (size_t)f : (size_t)f + 1; /* tie -> even */
+}
+
+RCRE_NODISCARD int em_resolve_recipe(size_t n, size_t k, size_t d,
+                                     const RCRE_EMMeansParams* p,
+                                     RCRE_EMMeansRecipe* out) {
+    if (!out || n == 0 || k == 0) return RCRE_ERR_INVALID_ARG;
+    if (p && p->alpha0 != 0.0f && !isfinite((double)p->alpha0))
+        return RCRE_ERR_INVALID_ARG; /* explicit NaN alpha0 (0 = law) */
+
+    float nepochs = (p && p->nepochs > 0.0f) ? p->nepochs : 5.0f;
+    if (!(nepochs > 0.0f) || nepochs > EM_MAX_T || !isfinite((double)nepochs))
+        return RCRE_ERR_INVALID_ARG;
+
+    int      law     = p ? p->batch_law : RCRE_EM_BATCH_AUTO;
+    bool     b_given = (p != NULL) && p->batch_size > 0;
+    bool     a_given = (p != NULL) && p->alpha0 > 0.0f;
+    uint64_t seed    = (p && p->seed != 0) ? p->seed : 1234ULL;
+
+    /* Revival threshold: -1 = auto (0.1, off for d <= 2); else fixed. */
+    float tau = (p == NULL) ? -1.0f : p->unused_threshold;
+    if (tau < 0.0f) tau = (d <= EM_NO_REVIVAL_MAX_D) ? 0.0f : EM_UNUSED_TAU;
+    if (tau < 0.0f || !isfinite((double)tau)) return RCRE_ERR_INVALID_ARG;
+
+    /* Batch: manual or law. The law's "auto" resolves by dimension. */
+    int resolved_law;
+    size_t B = 0;
+    if (b_given) {
+        resolved_law = -1; /* manual */
+        B = p->batch_size;
+    } else {
+        if (law == RCRE_EM_BATCH_AUTO)
+            law = (d <= EM_AUTO_QUALITY_MAX_D) ? RCRE_EM_BATCH_QUALITY
+                                               : RCRE_EM_BATCH_THROUGHPUT;
+        if (law != RCRE_EM_BATCH_THROUGHPUT && law != RCRE_EM_BATCH_QUALITY)
+            return RCRE_ERR_INVALID_ARG;
+        resolved_law = law;
+        const EMLaw* L = (law == RCRE_EM_BATCH_QUALITY) ? &EM_LAW_QUALITY
+                                                        : &EM_LAW_THROUGHPUT;
+        double raw_b = L->cb * pow((double)k, L->bk) * pow((double)n, L->bn)
+                     * pow((double)nepochs, L->bt);
+        B = em_round_pow2(raw_b);
+        if (law == RCRE_EM_BATCH_THROUGHPUT) {
+            size_t cap = em_round_pow2((double)n / 2.0);
+            if (B > cap) B = cap;
+        } else {
+            size_t cap = n / 2;
+            if (B > cap) B = cap;
+        }
+    }
+    if (B > n) B = n;
+    if (B < 1) B = 1;
+
+    /* Step: manual or step law at the resolved batch. */
+    double a0;
+    if (!a_given) {
+        a0 = EM_STEP_LAW[0] * pow((double)k, EM_STEP_LAW[1])
+           * pow((double)B, EM_STEP_LAW[2])
+           * pow((double)n, EM_STEP_LAW[3])
+           * pow((double)nepochs, EM_STEP_LAW[4]);
+        if (a0 < 1e-4) a0 = 1e-4;
+        if (a0 > 1.0) a0 = 1.0;
+    } else {
+        a0 = (double)p->alpha0;
+        if (a0 <= 0.0 || !isfinite(a0)) return RCRE_ERR_INVALID_ARG;
+    }
+
+    /* Epoch rows: whole passes, rounded fractional prefix, full closing
+     * pass. T < 1 yields a single partial pass. */
+    size_t whole = (size_t)floor((double)nepochs);
+    size_t rem   = em_epoch_remainder(nepochs, n);
+    size_t ne = 0;
+    if (whole == 0) {
+        out->epoch_rows[0] = rem;
+        ne = 1;
+    } else {
+        for (size_t i = 0; i + 1 < whole; i++) out->epoch_rows[ne++] = n;
+        if (rem > 0) out->epoch_rows[ne++] = rem;
+        out->epoch_rows[ne++] = n;
+    }
+    if (ne > EM_MAX_EPOCHS) return RCRE_ERR_INVALID_ARG;
+
+    size_t steps_per_pass = (n + B - 1) / B;
+    size_t total_steps = 0;
+    for (size_t i = 0; i < ne; i++)
+        total_steps += (out->epoch_rows[i] + B - 1) / B;
+
+    out->batch_size       = B;
+    out->alpha0           = (float)a0;
+    out->alpha0_full      = a0;
+    out->nepochs          = nepochs;
+    out->n_epochs         = ne;
+    out->steps_per_pass   = steps_per_pass;
+    out->total_steps      = total_steps;
+    out->unused_threshold = tau;
+    out->split_epsilon    = EM_SPLIT_EPSILON;
+    out->init_usage       = ldexp(1.0f, -EM_INIT_USAGE_EXP);
+    out->batch_law        = resolved_law;
+    out->seed             = seed;
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* Model internals                                                           */
+/* ========================================================================= */
+
+void em_state_recompute_cc(EMState* st) {
+    /* Exact sequential FP32 dot (index order, mul+add, no FMA — the build
+     * uses -ffp-contract=off). Bit-identical to the oracle's cc_of; do NOT
+     * route through rcre_hal.dot_f32 (NEON/FMA differ at the ULP level). */
+    for (size_t j = 0; j < st->k; j++) {
+        const float* cj = st->c + j * st->d;
+        float acc = 0.0f;
+        for (size_t dd = 0; dd < st->d; dd++) acc += cj[dd] * cj[dd];
+        st->cc[j] = acc;
+    }
+}
+
+void em_state_shuffle_epoch(EMState* st) {
+    if (!st->do_shuffle) return;
+    /* Reference's _epoch_seed: (seed * 1000003 + epoch) mod 2^32. The
+     * stream is splitmix64 here (not MT19937) — different order, same
+     * uniformity; documented (docs/exactness.md). */
+    st->rng_shuf = (st->recipe.seed * 1000003ULL + (uint64_t)st->epoch_idx)
+                   % 4294967296ULL;
+    uint32_t* o = st->order;
+    for (size_t i = st->n - 1; i > 0; i--) {
+        uint64_t r = rcre_splitmix64(&st->rng_shuf);
+        size_t j = (size_t)(r % (i + 1));
+        uint32_t tmp = o[i]; o[i] = o[j]; o[j] = tmp;
+    }
+}
+
+/* ========================================================================= */
+/* Dead-cluster revival (Appendix H.1)                                       */
+/* ========================================================================= */
+
+/* One Gumbel uniform for cluster j: injected stream (strict parity) or the
+ * run's own splitmix64 stream. Consumed for ALL k per check — the
+ * reference draws a k-vector per check, so the stream position must match
+ * even for non-donor entries. */
+static double em_gumbel_u(EMState* st, size_t j) {
+    (void)j;
+    if (st->inject_U != NULL) {
+        if (st->inject_U_pos >= st->inject_U_len) return 0.5;
+        return st->inject_U[st->inject_U_pos++];
+    }
+    uint64_t r = rcre_splitmix64(&st->rng_revive);
+    return (double)(r >> 11) * (1.0 / 9007199254740992.0); /* [0,1) */
+}
+
+/* Max-heap of (key, cluster) for the donor selection: build in O(k),
+ * pop nsplit tops. Tie rule: larger key first, then smaller cluster index
+ * (the reference argsorts F64 keys; exact ties have measure zero and the
+ * parity tests assert a key margin). */
+typedef struct EMHeapNode { double key; size_t j; } EMHeapNode;
+
+static void em_heap_swap(EMHeapNode* h, size_t a, size_t b) {
+    EMHeapNode t = h[a]; h[a] = h[b]; h[b] = t;
+}
+static int em_heap_gt(const EMHeapNode* a, const EMHeapNode* b) {
+    if (a->key != b->key) return a->key > b->key;
+    return a->j < b->j;
+}
+static void em_heap_sift_down(EMHeapNode* h, size_t i, size_t sz) {
+    for (;;) {
+        size_t l = 2 * i + 1, r = l + 1, m = i;
+        if (l < sz && em_heap_gt(&h[l], &h[m])) m = l;
+        if (r < sz && em_heap_gt(&h[r], &h[m])) m = r;
+        if (m == i) return;
+        em_heap_swap(h, i, m);
+        i = m;
+    }
+}
+
+static void em_revive(EMState* st) {
+    if (st->recipe.unused_threshold <= 0.0f) return;
+
+    size_t* targets = (size_t*)rcre_arena_alloc(st->arena, st->k * sizeof(size_t), 8);
+    size_t* donors  = (size_t*)rcre_arena_alloc(st->arena, st->k * sizeof(size_t), 8);
+    if (!targets || !donors) return; /* OOM: skip revival this check */
+
+    /* Consume this check's U vector for ALL k FIRST — the reference draws
+     * the full k-vector per check regardless of whether any split happens,
+     * so the stream position must stay aligned with the oracle. */
+    double* U = (double*)rcre_arena_alloc(st->arena, st->k * sizeof(double), 8);
+    if (!U) return;
+    for (size_t j = 0; j < st->k; j++) U[j] = em_gumbel_u(st, j);
+
+    /* threshold: sequential FP32 sum (index order), then F32 mul/div —
+     * the reference's _numpy_unused_threshold in scalar FP32. */
+    float total = 0.0f;
+    for (size_t j = 0; j < st->k; j++) total += st->N[j];
+    float thr = (total * st->recipe.unused_threshold) / (float)st->k;
+
+    size_t ntargets = 0, ndonors = 0;
+    for (size_t j = 0; j < st->k; j++) {
+        if (st->N[j] < thr) {
+            targets[ntargets++] = j;
+        } else if (st->N[j] > 0.0f) {
+            donors[ndonors++] = j;
+        }
+    }
+    size_t nsplit = ntargets < ndonors ? ntargets : ndonors;
+    if (nsplit == 0) return;
+
+    /* Gumbel keys over the donors (reference: uniform = max(U, tiny);
+     * key = log(N) - log(-log(uniform)); the log(N) term is FP32 in the
+     * reference because usage is an FP32 array). */
+    EMHeapNode* heap = (EMHeapNode*)rcre_arena_alloc(
+        st->arena, ndonors * sizeof(EMHeapNode), 8);
+    if (!heap) return;
+
+    const double tiny = 2.2250738585072014e-308; /* DBL_MIN */
+    for (size_t i = 0; i < ndonors; i++) {
+        size_t dj = donors[i];
+        double u = U[dj] < tiny ? tiny : U[dj];
+        double ln_n = (double)logf(st->N[dj]); /* FP32 log, then promote */
+        heap[i].key = ln_n - log(-log(u));
+        heap[i].j = dj;
+    }
+    for (size_t i = ndonors / 2; i-- > 0;) em_heap_sift_down(heap, i, ndonors);
+
+    for (size_t i = 0; i < nsplit; i++) {
+        EMHeapNode top = heap[0];
+        heap[0] = heap[ndonors - 1];
+        ndonors--;
+        em_heap_sift_down(heap, 0, ndonors);
+        size_t dj = top.j;
+        size_t tj = targets[i];
+
+        /* Eq. 8: alternating perturbation, delta = 1e-4 (shipped code).
+         * The child (dead slot) reads the ORIGINAL donor row, so it is
+         * written first; the donor then overwrites in place. */
+        const float* cd_src = st->c + dj * st->d;
+        float* cd = (float*)cd_src;
+        float* ct = st->c + tj * st->d;
+        for (size_t dd = 0; dd < st->d; dd++) {
+            float off = EM_SPLIT_EPSILON * (((dd & 1u) == 0u) ? 1.0f : -1.0f);
+            ct[dd] = cd_src[dd] * (1.0f + off);
+        }
+        for (size_t dd = 0; dd < st->d; dd++) {
+            float off = EM_SPLIT_EPSILON * (((dd & 1u) == 0u) ? 1.0f : -1.0f);
+            cd[dd] = cd_src[dd] * (1.0f - off);
+        }
+
+        /* _separate_splits: bit-identical children (zero centroids etc.)
+         * get a nextafter nudge on coordinate 0. */
+        bool collapsed = true;
+        for (size_t dd = 0; dd < st->d; dd++)
+            if (cd[dd] != ct[dd]) { collapsed = false; break; }
+        if (collapsed) {
+            float v = ct[0];
+            float nb = nextafterf(v, INFINITY);
+            if (!isfinite(nb)) nb = nextafterf(v, -INFINITY);
+            ct[0] = nb;
+        }
+
+        /* Donor mass halves; each child gets half. */
+        float half = st->N[dj] / 2.0f;
+        st->N[dj] = half;
+        st->N[tj] = half;
+        st->n_splits++;
+    }
+}
+
+/* ========================================================================= */
+/* EMA update (reference _apply_statistics, ids = NULL path)                 */
+/* ========================================================================= */
+
+RCRE_NODISCARD int em_state_update(EMState* st, const float* sums,
+                                   const float* counts, double objective) {
+    double alpha_d = em_scheduled_alpha(st->alpha0_f64, st->update_idx,
+                                        st->recipe.total_steps);
+    float alpha = (float)alpha_d;
+    float decay = (float)(1.0 - alpha_d);
+    st->objective += objective;
+    if (st->last_epoch) st->obj_last += objective;
+
+    /* Last-epoch finalization accumulation (FP64 — documented improvement
+     * over the reference's FP32 pass sums). */
+    if (st->last_epoch) {
+        for (size_t j = 0; j < st->k; j++)
+            st->pass_counts[j] += (double)counts[j];
+        for (size_t j = 0; j < st->k; j++) {
+            const float* srow = sums + j * st->d;
+            double* prow = st->pass_sums + j * st->d;
+            for (size_t dd = 0; dd < st->d; dd++)
+                prow[dd] += (double)srow[dd];
+        }
+    }
+
+    /* EMA in the reference's FP32 operation order. */
+    bool replace = (alpha_d == 1.0); /* reference: alpha == 1 corner */
+    if (!replace)
+        for (size_t j = 0; j < st->k; j++)
+            st->N[j] = st->N[j] * decay;
+
+    for (size_t j = 0; j < st->k; j++) {
+        float n_j = counts[j];
+        if (n_j <= 0.0f) continue;
+        float t = alpha * n_j;
+        /* Reference: retained = 0 when replacing (alpha == 1), so
+         * mass = n_j exactly there, not N_j + n_j. */
+        float mass = (replace ? 0.0f : st->N[j]) + t;
+        float weight = t / mass;
+        float* cj = st->c + j * st->d;
+        const float* sj = sums + j * st->d;
+        for (size_t dd = 0; dd < st->d; dd++) {
+            float mean = sj[dd] / n_j;
+            float pos = cj[dd] + weight * (mean - cj[dd]);
+            if (weight == 1.0f) pos = mean; /* exact-override (alpha == 1) */
+            cj[dd] = pos;
+        }
+        st->N[j] = mass;
+    }
+
+    /* Revival check cadence: after the 5th, 10th, ... update. */
+    if ((st->update_idx + 1) % EM_CHECK_EVERY == 0) em_revive(st);
+
+    em_state_recompute_cc(st);
+    st->update_idx++;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int em_state_finalize(EMState* st) {
+    for (size_t j = 0; j < st->k; j++) {
+        if (st->pass_counts[j] <= 0.0) continue; /* keep position */
+        float cnt = (float)st->pass_counts[j];
+        const double* ps = st->pass_sums + j * st->d;
+        float* cj = st->c + j * st->d;
+        for (size_t dd = 0; dd < st->d; dd++)
+            cj[dd] = (float)ps[dd] / cnt;
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* State init                                                                */
+/* ========================================================================= */
+
+static int em_uint32_cmp(const void* a, const void* b) {
+    uint32_t x = *(const uint32_t*)a, y = *(const uint32_t*)b;
+    return (x > y) - (x < y);
+}
+
+RCRE_NODISCARD int em_state_init(EMState* st, const RCRE_Tensor* X, size_t k,
+                                 const RCRE_EMMeansParams* p,
+                                 RCRE_Arena* arena, RCRE_ThreadPool* pool) {
+    memset(st, 0, sizeof(*st));
+    if (!X || !X->data || !arena) return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || X->dtype != RCRE_DTYPE_F32) return RCRE_ERR_INVALID_ARG;
+    size_t n_total = X->shape[0], d = X->shape[1];
+    if (n_total == 0 || d == 0 || k == 0 || k > n_total || n_total >= EM_MAX_N)
+        return RCRE_ERR_INVALID_ARG;
+    st->X = (const float*)X->data;
+    st->d = d;
+    st->k = k;
+    st->n_total = n_total;
+    st->arena = arena;
+    st->pool = pool;
+    st->nbuf = pool ? EM_MAX_STAT_BUFFERS : 1;
+    /* Exact assignment kernel for small k*d (bit-identical to the oracle,
+     * row-independent); gemm kernel above the threshold. */
+    st->use_exact_dots = (k * d) <= EM_EXACT_DOTS_MAX;
+
+    /* Recipe on the (possibly capped) active size. */
+    size_t cap = p ? p->max_points_per_centroid : 0;
+    size_t n = n_total;
+    if (cap > 0 && n_total > cap * k) n = cap * k;
+    if (em_resolve_recipe(n, k, d, p, &st->recipe) != RCRE_OK)
+        return RCRE_ERR_INVALID_ARG;
+    st->alpha0_f64 = st->recipe.alpha0_full;
+    st->n = n;
+    st->do_shuffle = (p == NULL) || p->shuffle;
+
+    /* Active row set: the full set, or a random sorted subset when the
+     * max_points_per_centroid cap binds (reference parity: choice without
+     * replacement + sort). */
+    st->order = (uint32_t*)rcre_arena_alloc(arena, n_total * sizeof(uint32_t), 16);
+    if (!st->order) return RCRE_ERR_OUT_OF_MEMORY;
+    for (size_t i = 0; i < n_total; i++) st->order[i] = (uint32_t)i;
+    if (n < n_total) {
+        uint64_t rs = (p && p->seed) ? p->seed : 1234ULL;
+        for (size_t i = 0; i < n; i++) {
+            uint64_t r = rcre_splitmix64(&rs);
+            size_t j = i + (size_t)(r % (n_total - i));
+            uint32_t tmp = st->order[i]; st->order[i] = st->order[j];
+            st->order[j] = tmp;
+        }
+        qsort(st->order, n, sizeof(uint32_t), em_uint32_cmp);
+    }
+
+    /* Scratch (arena, aligned). */
+    st->c    = (float*)rcre_arena_alloc(arena, k * d * sizeof(float), 64);
+    st->N    = (float*)rcre_arena_alloc(arena, k * sizeof(float), 64);
+    st->cc   = (float*)rcre_arena_alloc(arena, k * sizeof(float), 64);
+    st->batch_s = (float*)rcre_arena_alloc(arena, k * d * sizeof(float), 64);
+    st->batch_n = (float*)rcre_arena_alloc(arena, k * sizeof(float), 64);
+    st->labels  = (int32_t*)rcre_arena_alloc(arena, n_total * sizeof(int32_t), 64);
+    st->pass_sums   = (double*)rcre_arena_alloc(arena, k * d * sizeof(double), 64);
+    st->pass_counts = (double*)rcre_arena_alloc(arena, k * sizeof(double), 64);
+    if (!st->c || !st->N || !st->cc || !st->batch_s || !st->batch_n ||
+        !st->labels || !st->pass_sums || !st->pass_counts)
+        return RCRE_ERR_OUT_OF_MEMORY;
+    memset(st->labels, 0xFF, n_total * sizeof(int32_t)); /* -1 default */
+
+    /* Assignment geometry. Exact kernel: no Dmat, the whole batch is one
+     * chunk (row-independent dots). GEMM kernel: chunk*k under the Dmat
+     * budget. */
+    if (st->use_exact_dots) {
+        st->chunk = st->recipe.batch_size;
+        st->Dmat = NULL;
+        st->gather = NULL;
+    } else {
+        size_t chunk_cap = EM_DMAT_BUDGET / (4u * (unsigned)k);
+        if (chunk_cap < 1) chunk_cap = 1;
+        st->chunk = st->recipe.batch_size < chunk_cap ? st->recipe.batch_size : chunk_cap;
+        if (st->chunk < 1) st->chunk = 1;
+        st->Dmat   = (float*)rcre_arena_alloc(arena, st->chunk * k * sizeof(float), 64);
+        st->gather = (float*)rcre_arena_alloc(arena, st->chunk * d * sizeof(float), 64);
+        if (!st->Dmat || !st->gather) return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Per-slab stats buffers. */
+    st->wsum = (float**)rcre_arena_alloc(arena, st->nbuf * sizeof(float*), 8);
+    st->wcnt = (uint32_t*)rcre_arena_alloc(arena, st->nbuf * k * sizeof(uint32_t), 64);
+    st->wobj = (double*)rcre_arena_alloc(arena, st->nbuf * sizeof(double), 8);
+    if (!st->wsum || !st->wcnt || !st->wobj) return RCRE_ERR_OUT_OF_MEMORY;
+    for (size_t s = 0; s < st->nbuf; s++) {
+        st->wsum[s] = (float*)rcre_arena_alloc(arena, k * d * sizeof(float), 64);
+        if (!st->wsum[s]) return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Model init: provided centroids, all rows (n == k), or k uniform
+     * distinct rows (partial Fisher-Yates on a private copy). */
+    if (p && p->init_centroids) {
+        const RCRE_Tensor* ic = p->init_centroids;
+        if (!ic->data || ic->ndim != 2 || ic->dtype != RCRE_DTYPE_F32 ||
+            ic->shape[0] != k || ic->shape[1] != d)
+            return RCRE_ERR_SHAPE_MISMATCH;
+        memcpy(st->c, ic->data, k * d * sizeof(float));
+    } else if (n == k) {
+        for (size_t i = 0; i < k; i++)
+            memcpy(st->c + i * d, st->X + (size_t)st->order[i] * d, d * sizeof(float));
+    } else {
+        uint32_t* tmp = (uint32_t*)rcre_arena_alloc(arena, n * sizeof(uint32_t), 16);
+        if (!tmp) return RCRE_ERR_OUT_OF_MEMORY;
+        memcpy(tmp, st->order, n * sizeof(uint32_t));
+        st->rng_init = st->recipe.seed;
+        for (size_t i = 0; i < k; i++) {
+            uint64_t r = rcre_splitmix64(&st->rng_init);
+            size_t j = i + (size_t)(r % (n - i));
+            uint32_t t = tmp[i]; tmp[i] = tmp[j]; tmp[j] = t;
+        }
+        for (size_t i = 0; i < k; i++)
+            memcpy(st->c + i * d, st->X + (size_t)tmp[i] * d, d * sizeof(float));
+    }
+    for (size_t j = 0; j < k; j++)
+        st->N[j] = ldexp(1.0f, -EM_INIT_USAGE_EXP); /* 2^-16 */
+
+    st->rng_revive = st->recipe.seed;
+    em_state_recompute_cc(st);
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* Assignment + batch statistics                                             */
+/* ========================================================================= */
+
+/* One slab: gather rows, gemm against the current centroid snapshot,
+ * argmin (first index on ties), scatter stats into this slab's buffers.
+ * Slabs of one chunk own disjoint row ranges of gather/Dmat, so they run
+ * concurrently without races. */
+typedef struct EMSlabTask {
+    EMState*  st;
+    const uint32_t* rows; /* chunk-local row ids (into st->X) */
+    size_t cm;            /* chunk rows in this batch */
+    size_t block;         /* rows per slab */
+} EMSlabTask;
+
+static void em_slab_task(void* arg, size_t task_id) {
+    EMSlabTask* t = (EMSlabTask*)arg;
+    EMState* st = t->st;
+    size_t r0 = task_id * t->block;
+    size_t r1 = r0 + t->block < t->cm ? r0 + t->block : t->cm;
+    if (r0 >= r1) return;
+    size_t nr = r1 - r0;
+
+    float* ws = st->wsum[task_id];
+    uint32_t* wc = st->wcnt + task_id * st->k;
+    double* wo = &st->wobj[task_id];
+    const float* cc = st->cc;
+
+    if (st->use_exact_dots) {
+        /* EXACT kernel: per-row TRUE squared distance to every centroid,
+         * sequential FP32 in index order (diff*diff, mul+add, no FMA).
+         * Row-independent — slab-safe by construction, bit-identical to
+         * the oracle, and free of the cc - 2*x*c cancellation on
+         * large-offset data. */
+        for (size_t r = 0; r < nr; r++) {
+            const float* x = st->X + (size_t)t->rows[r0 + r] * st->d;
+            int32_t best = 0;
+            float bv = 0.0f;
+            {
+                const float* c0 = st->c;
+                for (size_t dd = 0; dd < st->d; dd++) {
+                    float df = x[dd] - c0[dd];
+                    bv += df * df;
+                }
+            }
+            for (size_t j = 1; j < st->k; j++) {
+                const float* cj = st->c + j * st->d;
+                float acc = 0.0f;
+                for (size_t dd = 0; dd < st->d; dd++) {
+                    float df = x[dd] - cj[dd];
+                    acc += df * df;
+                }
+                if (acc < bv) { bv = acc; best = (int32_t)j; }
+            }
+            uint32_t rid = t->rows[r0 + r];
+            if (st->capturing) st->labels[rid] = best;
+            wc[best]++;
+            float* srow = ws + (size_t)best * st->d;
+            for (size_t dd = 0; dd < st->d; dd++) srow[dd] += x[dd];
+            *wo += (double)bv; /* true distance — no cancellation */
+        }
+        return;
+    }
+
+    /* GEMM kernel (large k*d): Dmat = chunk x C^T via the RCRE HAL, then
+     * first-argmin of (cc - 2*D). The expanded score is monotone in the
+     * true distance, so labels are correct while F32 precision holds;
+     * the objective is ALWAYS the true distance to the winner (one extra
+     * d-dot per row) so MSE stays exact on large-offset data. */
+    float* g = st->gather + r0 * st->d;
+    for (size_t r = 0; r < nr; r++)
+        memcpy(g + r * st->d, st->X + (size_t)t->rows[r0 + r] * st->d,
+               st->d * sizeof(float));
+    float* D = st->Dmat + r0 * st->k;
+    rcre_hal.gemm_f32(nr, st->k, st->d, 1.0f, g, st->d, st->c, st->d,
+                      0.0f, D, st->k);
+    for (size_t r = 0; r < nr; r++) {
+        const float* row = D + r * st->k;
+        int32_t best = 0;
+        float bv = cc[0] - 2.0f * row[0];
+        for (size_t j = 1; j < st->k; j++) {
+            float v = cc[j] - 2.0f * row[j];
+            if (v < bv) { bv = v; best = (int32_t)j; }
+        }
+        uint32_t rid = t->rows[r0 + r];
+        if (st->capturing) st->labels[rid] = best;
+        wc[best]++;
+        const float* x = st->X + (size_t)rid * st->d;
+        float* srow = ws + (size_t)best * st->d;
+        for (size_t dd = 0; dd < st->d; dd++) srow[dd] += x[dd];
+        /* exact objective: true distance to the winning centroid */
+        const float* cw = st->c + (size_t)best * st->d;
+        float dv = 0.0f;
+        for (size_t dd = 0; dd < st->d; dd++) {
+            float df = x[dd] - cw[dd];
+            dv += df * df;
+        }
+        *wo += (double)dv;
+    }
+}
+
+RCRE_NODISCARD int em_state_run_batch(EMState* st, const uint32_t* rows,
+                                      size_t m, bool capture) {
+    memset(st->batch_s, 0, st->k * st->d * sizeof(float));
+    memset(st->batch_n, 0, st->k * sizeof(float));
+    double obj = 0.0;
+    st->capturing = capture;
+
+    size_t off = 0;
+    while (off < m) {
+        size_t cm = m - off;
+        if (cm > st->chunk) cm = st->chunk;
+
+        /* Slab partition (depends only on cm, k, B — never pool size). */
+        size_t nslab = 1;
+        if (st->pool) {
+            nslab = (cm + EM_MIN_SLAB_ROWS - 1) / EM_MIN_SLAB_ROWS;
+            if (nslab > st->nbuf) nslab = st->nbuf;
+            if (cm < EM_MIN_SLAB_ROWS) nslab = 1;
+        }
+        size_t block = (cm + nslab - 1) / nslab;
+
+        for (size_t s = 0; s < nslab; s++) {
+            memset(st->wsum[s], 0, st->k * st->d * sizeof(float));
+            memset(st->wcnt + s * st->k, 0, st->k * sizeof(uint32_t));
+            st->wobj[s] = 0.0;
+        }
+
+        if (st->pool && nslab > 1) {
+            EMSlabTask task = { st, rows + off, cm, block };
+            rcre_threadpool_parallel_for(st->pool, nslab, em_slab_task, &task);
+        } else {
+            for (size_t s = 0; s < nslab; s++) {
+                EMSlabTask task = { st, rows + off, cm, block };
+                em_slab_task(&task, s);
+            }
+        }
+
+        /* Merge slab partials in slab (row) order into the batch stats. */
+        for (size_t s = 0; s < nslab; s++) {
+            const uint32_t* wc = st->wcnt + s * st->k;
+            const float* ws = st->wsum[s];
+            for (size_t j = 0; j < st->k; j++)
+                st->batch_n[j] += (float)wc[j];
+            for (size_t j = 0; j < st->k; j++) {
+                const float* sr = ws + j * st->d;
+                float* br = st->batch_s + j * st->d;
+                for (size_t dd = 0; dd < st->d; dd++)
+                    br[dd] += sr[dd];
+            }
+            obj += st->wobj[s];
+        }
+        off += cm;
+    }
+
+    return em_state_update(st, st->batch_s, st->batch_n, obj);
+}
+
+RCRE_EMMeansParams rcre_ml_emeans_params_default(void) {
+    RCRE_EMMeansParams p;
+    memset(&p, 0, sizeof(p));
+    p.nepochs = 5.0f;
+    p.unused_threshold = -1.0f; /* auto (0.1, off for d <= 2) */
+    p.shuffle = true;
+    p.seed = 1234ULL; /* reference default */
+    p.capture_labels = true;
+    return p;
+}
+
+/* ========================================================================= */
+/* Public API                                                                */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_ml_emeans_recipe(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* p,
+                                         RCRE_EMMeansRecipe* out) {
+    /* Only n and d are consumed: a shape-only tensor (data == NULL) is a
+     * valid input — planning the recipe needs no data. */
+    if (!X || !out || k == 0) return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || X->dtype != RCRE_DTYPE_F32) return RCRE_ERR_INVALID_ARG;
+    size_t n_total = X->shape[0], d = X->shape[1];
+    if (n_total == 0 || d == 0 || k > n_total) return RCRE_ERR_INVALID_ARG;
+    size_t cap = p ? p->max_points_per_centroid : 0;
+    size_t n = (cap > 0 && n_total > cap * k) ? cap * k : n_total;
+    return em_resolve_recipe(n, k, d, p, out);
+}
+
+RCRE_NODISCARD int rcre_ml_emeans_fit(const RCRE_Tensor* X, size_t k, float nepochs,
+                                      RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                      RCRE_Arena* arena) {
+    /* The convenience API takes an explicit T: validate it (the _ex path
+     * treats nepochs <= 0 as "use the default of 5"). */
+    if (!(nepochs > 0.0f) || nepochs > EM_MAX_T || !isfinite((double)nepochs))
+        return RCRE_ERR_INVALID_ARG;
+    RCRE_EMMeansParams p;
+    memset(&p, 0, sizeof(p));
+    p.nepochs = nepochs;
+    p.shuffle = true;
+    p.unused_threshold = -1.0f; /* auto */
+    p.capture_labels = true;
+    return rcre_ml_emeans_fit_ex(X, k, &p, centroids, labels, NULL, NULL,
+                                 arena, NULL);
+}
+
+RCRE_NODISCARD int rcre_ml_emeans_fit_ex(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* params,
+                                         RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                         float* out_inertia, int* out_n_splits,
+                                         RCRE_Arena* arena,
+                                         RCRE_ThreadPool* pool) {
+    if (!X || !X->data || !centroids || !centroids->data || !arena)
+        return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || X->dtype != RCRE_DTYPE_F32 ||
+        centroids->ndim != 2 || centroids->dtype != RCRE_DTYPE_F32 ||
+        centroids->shape[1] != X->shape[1])
+        return RCRE_ERR_SHAPE_MISMATCH;
+    if (labels && labels->data && labels->shape[0] < X->shape[0])
+        return RCRE_ERR_SHAPE_MISMATCH;
+
+    EMState st;
+    int rc = em_state_init(&st, X, k, params, arena, pool);
+    if (rc != RCRE_OK) return rc;
+    if (centroids->shape[0] != k) return RCRE_ERR_SHAPE_MISMATCH;
+
+    bool capture = (params == NULL) || params->capture_labels;
+    const uint32_t* base = st.order;
+
+    for (size_t e = 0; e < st.recipe.n_epochs; e++) {
+        size_t rows = st.recipe.epoch_rows[e];
+        st.epoch_idx = e;
+        st.epoch_cursor = 0;
+        st.last_epoch = (e == st.recipe.n_epochs - 1);
+        if (st.last_epoch) {
+            memset(st.pass_sums, 0, st.k * st.d * sizeof(double));
+            memset(st.pass_counts, 0, st.k * sizeof(double));
+            st.obj_last = 0.0;
+            st.obj_last_rows = rows;
+        }
+        em_state_shuffle_epoch(&st);
+        size_t cursor = 0;
+        while (cursor < rows) {
+            size_t m = st.recipe.batch_size;
+            if (m > rows - cursor) m = rows - cursor;
+            rc = em_state_run_batch(&st, base + cursor, m,
+                                    st.last_epoch && capture);
+            if (rc != RCRE_OK) return rc;
+            cursor += m;
+        }
+    }
+
+    rc = em_state_finalize(&st);
+    if (rc != RCRE_OK) return rc;
+
+    memcpy(centroids->data, st.c, k * st.d * sizeof(float));
+
+    if (labels && labels->data) {
+        size_t n_total = X->shape[0];
+        if (labels->dtype == RCRE_DTYPE_I32) {
+            int32_t* l = (int32_t*)labels->data;
+            for (size_t i = 0; i < n_total; i++) l[i] = st.labels[i];
+        } else if (labels->dtype == RCRE_DTYPE_F32) {
+            float* l = (float*)labels->data;
+            for (size_t i = 0; i < n_total; i++) l[i] = (float)st.labels[i];
+        }
+    }
+
+    if (out_inertia) {
+        *out_inertia = (st.obj_last_rows > 0)
+            ? (float)(st.obj_last / (double)st.obj_last_rows) : 0.0f;
+    }
+    if (out_n_splits) *out_n_splits = st.n_splits;
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* Exact assignment pass (post-training)                                     */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_ml_emeans_assign(const RCRE_Tensor* X,
+                                         const RCRE_Tensor* centroids,
+                                         RCRE_Tensor* labels, float* out_mse,
+                                         RCRE_Arena* arena) {
+    if (!X || !X->data || !centroids || !centroids->data || !labels ||
+        !labels->data || !arena)
+        return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || X->dtype != RCRE_DTYPE_F32 ||
+        centroids->ndim != 2 || centroids->dtype != RCRE_DTYPE_F32 ||
+        labels->ndim != 2 || X->shape[1] != centroids->shape[1])
+        return RCRE_ERR_SHAPE_MISMATCH;
+    size_t n = X->shape[0], d = X->shape[1], k = centroids->shape[0];
+    if (n == 0 || d == 0 || k == 0) return RCRE_ERR_INVALID_ARG;
+
+    const float* Xd = (const float*)X->data;
+    const float* Cd = (const float*)centroids->data;
+
+    float* cc = (float*)rcre_arena_alloc(arena, k * sizeof(float), 64);
+    if (!cc) return RCRE_ERR_OUT_OF_MEMORY;
+    /* Exact sequential FP32 dots (index order, mul+add, no FMA) — same
+     * contract as the training exact kernel. */
+    for (size_t j = 0; j < k; j++) {
+        const float* cj = Cd + j * d;
+        float acc = 0.0f;
+        for (size_t dd = 0; dd < d; dd++) acc += cj[dd] * cj[dd];
+        cc[j] = acc;
+    }
+
+    bool exact = (k * d) <= EM_EXACT_DOTS_MAX;
+    float* D = NULL, *g = NULL;
+    size_t chunk = n;
+    if (!exact) {
+        chunk = EM_DMAT_BUDGET / (4u * (unsigned)k);
+        if (chunk < 1) chunk = 1;
+        if (chunk > n) chunk = n;
+        D = (float*)rcre_arena_alloc(arena, chunk * k * sizeof(float), 64);
+        g = (float*)rcre_arena_alloc(arena, chunk * d * sizeof(float), 64);
+        if (!D || !g) return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    double mse = 0.0;
+    size_t off = 0;
+    while (off < n) {
+        size_t cm = n - off;
+        if (cm > chunk) cm = chunk;
+        if (!exact) {
+            for (size_t r = 0; r < cm; r++)
+                memcpy(g + r * d, Xd + (off + r) * d, d * sizeof(float));
+            rcre_hal.gemm_f32(cm, k, d, 1.0f, g, d, Cd, d, 0.0f, D, k);
+        }
+        for (size_t r = 0; r < cm; r++) {
+            int32_t best = 0;
+            float bv;
+            if (exact) {
+                /* true squared distance, sequential FP32 (no cancellation) */
+                const float* x = Xd + (off + r) * d;
+                float acc = 0.0f;
+                for (size_t dd = 0; dd < d; dd++) {
+                    float df = x[dd] - Cd[dd];
+                    acc += df * df;
+                }
+                bv = acc;
+                for (size_t j = 1; j < k; j++) {
+                    const float* cj = Cd + j * d;
+                    float a2 = 0.0f;
+                    for (size_t dd = 0; dd < d; dd++) {
+                        float df = x[dd] - cj[dd];
+                        a2 += df * df;
+                    }
+                    if (a2 < bv) { bv = a2; best = (int32_t)j; }
+                }
+            } else {
+                const float* row = D + r * k;
+                bv = cc[0] - 2.0f * row[0];
+                for (size_t j = 1; j < k; j++) {
+                    float v = cc[j] - 2.0f * row[j];
+                    if (v < bv) { bv = v; best = (int32_t)j; }
+                }
+                /* exact MSE: true distance to the winner */
+                const float* x = Xd + (off + r) * d;
+                const float* cw = Cd + (size_t)best * d;
+                float dv = 0.0f;
+                for (size_t dd = 0; dd < d; dd++) {
+                    float df = x[dd] - cw[dd];
+                    dv += df * df;
+                }
+                bv = dv;
+            }
+            mse += (double)bv;
+            if (labels->dtype == RCRE_DTYPE_I32)
+                ((int32_t*)labels->data)[off + r] = best;
+            else
+                ((float*)labels->data)[off + r] = (float)best;
+        }
+        off += cm;
+    }
+    if (out_mse) *out_mse = (float)(mse / (double)n);
+    return RCRE_OK;
+}
+
 /* --- Source: gbdt_infer.c --- */
 /**
  * @file gbdt_infer.c
@@ -12177,136 +16353,38 @@ static bool data_is_f32(const RCRE_Tensor* t) {
 }
 
 /* ========================================================================= */
-/* Dynamic line reader (lines may exceed any fixed stack buffer)             */
+/* High-Throughput Memory-Mapped & SIMD-Accelerated CSV Loader               */
 /* ========================================================================= */
-
-typedef struct {
-    char*  buf;
-    size_t cap;
-    int    done; /* 1 when a line was fully read */
-} csv_line_t;
-
-static void csv_line_free(csv_line_t* ln) {
-    if (ln->buf) { free(ln->buf); ln->buf = nullptr; ln->cap = 0; }
-}
-
-/* Reads one full line (without the trailing newline). Returns 1 on success,
- * 0 at EOF. Grows the buffer as needed so arbitrarily long rows parse intact. */
-static int csv_line_read(FILE* f, csv_line_t* ln) {
-    size_t len = 0;
-    int c;
-    ln->done = 1;
-
-    if (ln->cap == 0) {
-        ln->cap = 4096;
-        ln->buf = (char*)malloc(ln->cap);
-        if (!ln->buf) return 0;
-    }
-
-    while ((c = fgetc(f)) != EOF) {
-        if (c == '\n') break;
-        if (c == '\r') continue;
-        if (len + 1 >= ln->cap) {
-            size_t new_cap = ln->cap * 2;
-            char* nb = (char*)realloc(ln->buf, new_cap);
-            if (!nb) { ln->buf = nullptr; ln->cap = 0; ln->done = 0; return 0; }
-            ln->buf = nb;
-            ln->cap = new_cap;
-        }
-        ln->buf[len++] = (char)c;
-    }
-    if (c == EOF && len == 0) {
-        ln->done = 0; /* EOF before any content of this line */
-        return 0;
-    }
-    ln->buf[len] = '\0';
-    return 1;
-}
 
 RCRE_Tensor* rcre_data_load_csv(RCRE_Arena* arena, const char* filepath, bool skip_header, size_t max_rows) {
     if (arena == nullptr || filepath == nullptr) return nullptr;
-    FILE* f = fopen(filepath, "r");
-    if (!f) return nullptr;
 
-    csv_line_t line = { nullptr, 0, 0 };
-
-    if (skip_header && !csv_line_read(f, &line)) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-
-    /* Column count comes from the first data row. The rewind position must
-     * be captured BEFORE reading it, so the parse pass sees the same start. */
-    long first_data_pos = ftell(f);
-    int have_first = csv_line_read(f, &line);
-    if (!have_first) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-    int c0 = 0;
-    char* save = nullptr;
-    char* tok = strtok_r(line.buf, ",\t", &save);
-    while (tok != nullptr) { c0++; tok = strtok_r(nullptr, ",\t", &save); }
-    if (c0 == 0) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-    size_t cols = (size_t)c0;
-
-    size_t rows = 1;
-    if (max_rows == 0 || rows < max_rows) {
-        int rc;
-        while ((rc = csv_line_read(f, &line)) != 0) {
-            rows++;
-            if (max_rows > 0 && rows >= max_rows) break;
-        }
-        (void)rc;
-    }
-    if (rows == 0) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-
-    fseek(f, first_data_pos, SEEK_SET);
-
-    RCRE_Tensor* t = rcre_tensor_alloc_2d(arena, rows, cols);
+    RCRE_ArenaTemp checkpoint = rcre_arena_temp_begin(arena);
+    RCRE_Tensor* t = (RCRE_Tensor*)rcre_arena_alloc(arena, sizeof(RCRE_Tensor), alignof(RCRE_Tensor));
     if (!t) {
-        csv_line_free(&line);
-        fclose(f);
+        rcre_arena_temp_end(checkpoint);
         return nullptr;
     }
-    float* td = rcre_tensor_f32_data(t);
 
-    /* Parse pass: every row must carry exactly `cols` fields. Ragged or
-     * truncated rows are a data error -> reject the whole file (fail fast
-     * instead of silently zero-filling missing values). */
-    size_t r = 0;
-    csv_line_read(f, &line);
-    for (;;) {
-        size_t c = 0;
-        save = nullptr;
-        tok = strtok_r(line.buf, ",\t", &save);
-        while (tok != nullptr) {
-            if (c >= cols) break;
-            td[r * cols + c] = (float)atof(tok);
-            c++;
-            tok = strtok_r(nullptr, ",\t", &save);
-        }
-        if (c != cols) {
-            csv_line_free(&line);
-            fclose(f);
-            return nullptr;
-        }
-        if (++r >= rows) break;
-        if (!csv_line_read(f, &line)) break;
+    RCRE_CSVOptions opts = {
+        .delimiter      = 0, /* Auto: ',' or '\t' */
+        .skip_header    = skip_header,
+        .strict_numbers = false,
+        .max_rows       = max_rows,
+        .pool           = nullptr
+    };
+
+    if (rcre_io_load_csv_ex(filepath, &opts, arena, t) != RCRE_OK) {
+        rcre_arena_temp_end(checkpoint);
+        return nullptr;
     }
 
-    csv_line_free(&line);
-    fclose(f);
+    t->grad = (float*)rcre_arena_alloc(arena, t->numel * sizeof(float), 64);
+    if (!t->grad) {
+        rcre_arena_temp_end(checkpoint);
+        return nullptr;
+    }
+    memset(t->grad, 0, t->numel * sizeof(float));
     return t;
 }
 
@@ -13347,6 +17425,93 @@ void rcre_gpt_zero_grads(RCRE_GPTModel *model) {
     }
 }
 
+RCRE_NODISCARD int rcre_gpt_bind_weights_zero_copy(
+    RCRE_GPTModel *model,
+    const float *external_params,
+    size_t num_floats
+) {
+    if (!model || !model->blocks || !external_params || num_floats != model->num_params) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (((uintptr_t)external_params & 63U) != 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    float *base = (float*)(uintptr_t)external_params;
+    int V = model->config.vocab_size;
+    int T = model->config.seq_len;
+    int C = model->config.embed_dim;
+    int L = model->config.num_layers;
+
+    size_t offset = 0;
+    model->wte = base + offset; offset += (size_t)V * C;
+    model->wpe = base + offset; offset += (size_t)T * C;
+
+    for (int l = 0; l < L; l++) {
+        map_block_pointers(&model->blocks[l], base, &model->config, &offset);
+    }
+
+    model->ln_f_w = base + offset; offset += (size_t)C;
+    model->ln_f_b = base + offset; offset += (size_t)C;
+    model->head_w = base + offset; offset += (size_t)C * V;
+
+    if (offset != model->num_params) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_gpt_save_safetensors(
+    const RCRE_GPTModel *model,
+    const char *filepath,
+    RCRE_Arena *scratch
+) {
+    if (!model || !model->params || !filepath || !scratch || model->num_params == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t shape[1] = { model->num_params };
+    RCRE_Tensor param_view = rcre_tensor_from_buffer(
+        model->params, shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR
+    );
+    const char *names[1] = { "gpt.params" };
+    return rcre_io_safetensors_save(filepath, names, &param_view, 1, scratch);
+}
+
+RCRE_NODISCARD int rcre_gpt_load_safetensors_zero_copy(
+    RCRE_GPTModel *model,
+    const char *filepath,
+    struct RCRE_SafeTensorsArchive *out_archive
+) {
+    if (!model || !filepath || !out_archive) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    int rc = rcre_io_safetensors_open(filepath, out_archive);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    RCRE_Tensor view = {0};
+    rc = rcre_io_safetensors_get_tensor(out_archive, "gpt.params", nullptr, &view);
+    if (rc != RCRE_OK) {
+        rcre_io_safetensors_close(out_archive);
+        return rc;
+    }
+
+    if (view.dtype != RCRE_DTYPE_F32 || view.numel != model->num_params) {
+        rcre_io_safetensors_close(out_archive);
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    rc = rcre_gpt_bind_weights_zero_copy(model, (const float*)view.data, view.numel);
+    if (rc != RCRE_OK) {
+        rcre_io_safetensors_close(out_archive);
+        return rc;
+    }
+    return RCRE_OK;
+}
+
 void rcre_gpt_free(RCRE_GPTModel *model) {
     if (!model) return;
     if (model->owns_heap) {
@@ -14312,35 +18477,19 @@ void rcre_bpe_free(RCRE_BPETokenizer *tok) {
 
 
 RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_CharTokenizer *tok, int batch_size, int seq_len) {
-    if (!tok || tok->vocab_size <= 0 || batch_size <= 0 || seq_len < 2) {
-        return nullptr;
-    }
-    FILE *f = fopen(filepath, "rb");
-    if (!f) {
+    if (!filepath || !tok || tok->vocab_size <= 0 || batch_size <= 0 || seq_len < 2) {
         return nullptr;
     }
 
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (file_size <= 0) {
-        fclose(f);
+    RCRE_MappedFile map;
+    if (rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map) != RCRE_OK) {
         return nullptr;
     }
 
-    char *raw_text = (char*)malloc((size_t)file_size);
-    if (!raw_text) {
-        fclose(f);
-        return nullptr;
-    }
-
-    size_t read_bytes = fread(raw_text, 1, (size_t)file_size, f);
-    fclose(f);
-
+    size_t read_bytes = map.size;
     RCRE_GPTDataLoader *loader = (RCRE_GPTDataLoader*)malloc(sizeof(RCRE_GPTDataLoader));
     if (!loader) {
-        free(raw_text);
+        rcre_io_mmap_close(&map);
         return nullptr;
     }
 
@@ -14349,13 +18498,13 @@ RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_
     loader->current_idx = 0;
     loader->tokens = (int*)malloc(sizeof(int) * read_bytes);
     if (!loader->tokens) {
-        free(raw_text);
+        rcre_io_mmap_close(&map);
         free(loader);
         return nullptr;
     }
 
-    int valid_tokens = rcre_char_tokenizer_encode(tok, raw_text, read_bytes, loader->tokens, (int)read_bytes);
-    free(raw_text);
+    int valid_tokens = rcre_char_tokenizer_encode(tok, (const char*)map.data, read_bytes, loader->tokens, (int)read_bytes);
+    rcre_io_mmap_close(&map);
 
     loader->num_tokens = (size_t)valid_tokens;
     if (loader->num_tokens <= (size_t)(seq_len + 1)) {
