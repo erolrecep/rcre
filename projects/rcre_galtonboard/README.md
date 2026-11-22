@@ -4,7 +4,7 @@ An architectural, multi-runtime demonstration of the **Galton Board (Bean Machin
 
 Implemented across two cohesive tiers in this repository:
 1. **ISO C23 Engine & WebAssembly-Ready Visualizer**: Ultra-high-throughput Monte-Carlo engine in strict C23 with live ANSI terminal visualization, zero-dependency HTML5 Canvas2D / Web Audio visualizer, and hardware-accelerated bit-level intrinsics (**750+ Million drops/sec**).
-2. **Python 3.15 FastAPI Service**: Modern asynchronous service built on Python 3.15.2, featuring REST APIs, WebSocket real-time streaming, strict Pydantic v2 schemas, and full statistical moment verification. Also mirrored as a standalone package under `_python_/galtonboard_fastapi/`.
+2. **Python 3.15 FastAPI Service**: Modern asynchronous service built on Python 3.15.2, featuring REST APIs, WebSocket real-time streaming, strict Pydantic v2 schemas, and full statistical moment verification under `projects/rcre_galtonboard/python/`.
 
 ---
 
@@ -88,8 +88,6 @@ apps/rcre-galtonboard/
     └── tests/
         ├── test_api.py          # FastAPI REST & WebSocket integration tests
         └── test_engine.py       # CLT numerical verification tests
-
-_python_/galtonboard_fastapi/    # Dedicated standalone mirror for monorepo Python ecosystem
 ```
 
 ---
@@ -98,7 +96,7 @@ _python_/galtonboard_fastapi/    # Dedicated standalone mirror for monorepo Pyth
 
 ### 1. Build and Run the C23 Engine
 ```bash
-cd apps/rcre-galtonboard
+cd apps/rcre/projects/rcre_galtonboard
 
 # Compile release binary and shared library
 make
@@ -173,15 +171,8 @@ make python-test
 - `GET /api/v1/export/json` — Export JSON.
 - `WS /ws/stream` — Real-time bidirectional streaming channel.
 
----
-
-## Standalone Python Mirror
-In addition to the main project directory, the Python implementation is also preserved as a standalone project at:
-```
-_python_/galtonboard_fastapi/
-```
 To run tests directly in the Python folder:
 ```bash
-cd _python_/galtonboard_fastapi
-uv run --extra dev --python /opt/homebrew/bin/python3.15 pytest tests/ -v
+cd apps/rcre/projects/rcre_galtonboard/python
+uv run --python /opt/homebrew/bin/python3.15 pytest tests/ -v
 ```
