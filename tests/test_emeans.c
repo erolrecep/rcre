@@ -39,6 +39,11 @@
 
 static void *em_read_file(const char* path, size_t* out_size) {
     FILE* f = fopen(path, "rb");
+    if (!f) {
+        char alt[512];
+        snprintf(alt, sizeof(alt), "apps/rcre/%s", path);
+        f = fopen(alt, "rb");
+    }
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);

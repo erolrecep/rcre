@@ -3014,6 +3014,12 @@ static inline float rcre_rand_f32(uint64_t* state) {
 /* State                                                                     */
 /* ========================================================================= */
 
+/** Max-heap node for Gumbel-max revival selection. */
+typedef struct EMHeapNode {
+    double key;
+    size_t j;
+} EMHeapNode;
+
 typedef struct EMState {
     /* geometry */
     const float* X;
@@ -3074,6 +3080,12 @@ typedef struct EMState {
     const double* inject_U;
     size_t        inject_U_pos;
     size_t        inject_U_len;
+
+    /* revival scratch (allocated once in em_state_init; reused across checks) */
+    size_t*     revive_targets;  /* [k] */
+    size_t*     revive_donors;   /* [k] */
+    double*     revive_U;        /* [k] */
+    EMHeapNode* revive_heap;     /* [k] */
 
     /* parallel */
     RCRE_ThreadPool* pool;
@@ -13866,7 +13878,6 @@ static double em_gumbel_u(EMState* st, size_t j) {
  * pop nsplit tops. Tie rule: larger key first, then smaller cluster index
  * (the reference argsorts F64 keys; exact ties have measure zero and the
  * parity tests assert a key margin). */
-typedef struct EMHeapNode { double key; size_t j; } EMHeapNode;
 
 static void em_heap_swap(EMHeapNode* h, size_t a, size_t b) {
     EMHeapNode t = h[a]; h[a] = h[b]; h[b] = t;
@@ -13889,15 +13900,15 @@ static void em_heap_sift_down(EMHeapNode* h, size_t i, size_t sz) {
 static void em_revive(EMState* st) {
     if (st->recipe.unused_threshold <= 0.0f) return;
 
-    size_t* targets = (size_t*)rcre_arena_alloc(st->arena, st->k * sizeof(size_t), 8);
-    size_t* donors  = (size_t*)rcre_arena_alloc(st->arena, st->k * sizeof(size_t), 8);
-    if (!targets || !donors) return; /* OOM: skip revival this check */
+    size_t* targets = st->revive_targets;
+    size_t* donors  = st->revive_donors;
+    double* U       = st->revive_U;
+    EMHeapNode* heap = st->revive_heap;
+    if (!targets || !donors || !U || !heap) return;
 
     /* Consume this check's U vector for ALL k FIRST — the reference draws
      * the full k-vector per check regardless of whether any split happens,
      * so the stream position must stay aligned with the oracle. */
-    double* U = (double*)rcre_arena_alloc(st->arena, st->k * sizeof(double), 8);
-    if (!U) return;
     for (size_t j = 0; j < st->k; j++) U[j] = em_gumbel_u(st, j);
 
     /* threshold: sequential FP32 sum (index order), then F32 mul/div —
@@ -13920,10 +13931,6 @@ static void em_revive(EMState* st) {
     /* Gumbel keys over the donors (reference: uniform = max(U, tiny);
      * key = log(N) - log(-log(uniform)); the log(N) term is FP32 in the
      * reference because usage is an FP32 array). */
-    EMHeapNode* heap = (EMHeapNode*)rcre_arena_alloc(
-        st->arena, ndonors * sizeof(EMHeapNode), 8);
-    if (!heap) return;
-
     const double tiny = 2.2250738585072014e-308; /* DBL_MIN */
     for (size_t i = 0; i < ndonors; i++) {
         size_t dj = donors[i];
@@ -14144,6 +14151,14 @@ RCRE_NODISCARD int em_state_init(EMState* st, const RCRE_Tensor* X, size_t k,
         st->wsum[s] = (float*)rcre_arena_alloc(arena, k * d * sizeof(float), 64);
         if (!st->wsum[s]) return RCRE_ERR_OUT_OF_MEMORY;
     }
+
+    /* Revival scratch (pre-allocated once to avoid monotonic arena growth during fit) */
+    st->revive_targets = (size_t*)rcre_arena_alloc(arena, k * sizeof(size_t), 8);
+    st->revive_donors  = (size_t*)rcre_arena_alloc(arena, k * sizeof(size_t), 8);
+    st->revive_U       = (double*)rcre_arena_alloc(arena, k * sizeof(double), 8);
+    st->revive_heap    = (EMHeapNode*)rcre_arena_alloc(arena, k * sizeof(EMHeapNode), 8);
+    if (!st->revive_targets || !st->revive_donors || !st->revive_U || !st->revive_heap)
+        return RCRE_ERR_OUT_OF_MEMORY;
 
     /* Model init: provided centroids, all rows (n == k), or k uniform
      * distinct rows (partial Fisher-Yates on a private copy). */

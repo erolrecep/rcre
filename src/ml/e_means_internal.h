@@ -54,6 +54,12 @@
 /* State                                                                     */
 /* ========================================================================= */
 
+/** Max-heap node for Gumbel-max revival selection. */
+typedef struct EMHeapNode {
+    double key;
+    size_t j;
+} EMHeapNode;
+
 typedef struct EMState {
     /* geometry */
     const float* X;
@@ -114,6 +120,12 @@ typedef struct EMState {
     const double* inject_U;
     size_t        inject_U_pos;
     size_t        inject_U_len;
+
+    /* revival scratch (allocated once in em_state_init; reused across checks) */
+    size_t*     revive_targets;  /* [k] */
+    size_t*     revive_donors;   /* [k] */
+    double*     revive_U;        /* [k] */
+    EMHeapNode* revive_heap;     /* [k] */
 
     /* parallel */
     RCRE_ThreadPool* pool;
