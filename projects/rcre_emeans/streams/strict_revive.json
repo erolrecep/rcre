@@ -1,0 +1,51 @@
+{
+  "name": "strict_revive",
+  "n": 4000,
+  "d": 16,
+  "k": 128,
+  "B": 512,
+  "alpha0": 0.4000000059604645,
+  "alpha0_full": 0.4000000059604645,
+  "T": 2.0,
+  "tau": 0.1,
+  "seed": 123,
+  "shuffle": false,
+  "M": 16,
+  "n_updates": 16,
+  "update_rows": [
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    416,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    416
+  ],
+  "n_U_checks": 3,
+  "n_splits": 15,
+  "min_key_margin": 0.007198456910608719,
+  "recipe": {
+    "batch_size": 512,
+    "alpha0": 0.4000000059604645,
+    "alpha0_full": 0.4000000059604645,
+    "nepochs": 2.0,
+    "n_epochs": 2,
+    "steps_per_pass": 8,
+    "total_steps": 16,
+    "unused_threshold": 0.1,
+    "batch_law": "manual",
+    "epoch_rows": [
+      4000,
+      4000
+    ]
+  }
+}

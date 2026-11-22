@@ -1,0 +1,170 @@
+[
+  {
+    "n": 1000000,
+    "d": 96,
+    "k": 4096,
+    "T": 5.0,
+    "batch_size": 65536,
+    "alpha0": 0.6484957933425903,
+    "alpha0_full": 0.6484957693935519,
+    "nepochs": 5.0,
+    "epoch_rows": [
+      1000000,
+      1000000,
+      1000000,
+      1000000,
+      1000000
+    ],
+    "n_epochs": 5,
+    "steps_per_pass": 16,
+    "total_steps": 80,
+    "unused_threshold": 0.1,
+    "batch_law": "throughput"
+  },
+  {
+    "n": 8294400,
+    "d": 3,
+    "k": 256,
+    "T": 5.0,
+    "batch_size": 32768,
+    "alpha0": 0.4825724959373474,
+    "alpha0_full": 0.48257248517595785,
+    "nepochs": 5.0,
+    "epoch_rows": [
+      8294400,
+      8294400,
+      8294400,
+      8294400,
+      8294400
+    ],
+    "n_epochs": 5,
+    "steps_per_pass": 254,
+    "total_steps": 1270,
+    "unused_threshold": 0.1,
+    "batch_law": "quality"
+  },
+  {
+    "n": 100000,
+    "d": 128,
+    "k": 16384,
+    "T": 5.0,
+    "batch_size": 16384,
+    "alpha0": 0.2765040099620819,
+    "alpha0_full": 0.2765040131712233,
+    "nepochs": 5.0,
+    "epoch_rows": [
+      100000,
+      100000,
+      100000,
+      100000,
+      100000
+    ],
+    "n_epochs": 5,
+    "steps_per_pass": 7,
+    "total_steps": 35,
+    "unused_threshold": 0.1,
+    "batch_law": "throughput"
+  },
+  {
+    "n": 20000,
+    "d": 8,
+    "k": 50,
+    "T": 2.5,
+    "batch_size": 128,
+    "alpha0": 0.11276624351739883,
+    "alpha0_full": 0.11276624440236242,
+    "nepochs": 2.5,
+    "epoch_rows": [
+      20000,
+      10000,
+      20000
+    ],
+    "n_epochs": 3,
+    "steps_per_pass": 157,
+    "total_steps": 393,
+    "unused_threshold": 0.1,
+    "batch_law": "quality"
+  },
+  {
+    "n": 1000,
+    "d": 4,
+    "k": 8,
+    "T": 0.5,
+    "batch_size": 1,
+    "alpha0": 0.015191484242677689,
+    "alpha0_full": 0.015191484213189051,
+    "nepochs": 0.5,
+    "epoch_rows": [
+      500
+    ],
+    "n_epochs": 1,
+    "steps_per_pass": 1000,
+    "total_steps": 500,
+    "unused_threshold": 0.1,
+    "batch_law": "quality"
+  },
+  {
+    "n": 20000,
+    "d": 24,
+    "k": 256,
+    "T": 5.0,
+    "batch_size": 2048,
+    "alpha0": 0.5983558297157288,
+    "alpha0_full": 0.5983558283432238,
+    "nepochs": 5.0,
+    "epoch_rows": [
+      20000,
+      20000,
+      20000,
+      20000,
+      20000
+    ],
+    "n_epochs": 5,
+    "steps_per_pass": 10,
+    "total_steps": 50,
+    "unused_threshold": 0.1,
+    "batch_law": "throughput"
+  },
+  {
+    "n": 1000000,
+    "d": 128,
+    "k": 1024,
+    "T": 3.0,
+    "batch_size": 32768,
+    "alpha0": 0.6955211758613586,
+    "alpha0_full": 0.6955211692520258,
+    "nepochs": 3.0,
+    "epoch_rows": [
+      1000000,
+      1000000,
+      1000000
+    ],
+    "n_epochs": 3,
+    "steps_per_pass": 31,
+    "total_steps": 93,
+    "unused_threshold": 0.1,
+    "batch_law": "throughput"
+  },
+  {
+    "n": 50000,
+    "d": 16,
+    "k": 128,
+    "T": 5.0,
+    "batch_size": 512,
+    "alpha0": 0.15664517879486084,
+    "alpha0_full": 0.15664518449910136,
+    "nepochs": 5.0,
+    "epoch_rows": [
+      50000,
+      50000,
+      50000,
+      50000,
+      50000
+    ],
+    "n_epochs": 5,
+    "steps_per_pass": 98,
+    "total_steps": 490,
+    "unused_threshold": 0.1,
+    "batch_law": "quality"
+  }
+]

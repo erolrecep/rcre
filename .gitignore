@@ -4,9 +4,12 @@ dev_reports/
 # Build artifacts & libraries
 bin/
 **/bin/
+build/
+**/build/
 lib/
 *.o
 *.a
+*.d
 *.dylib
 *.so
 

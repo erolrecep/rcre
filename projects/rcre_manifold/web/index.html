@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RCRE Manifold — Multi-Dimensional Untangling Laboratory</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+      --primary: #58a6ff;
+      --accent: #238636;
+      --accent-hover: #2ea043;
+      --warn: #d29922;
+      --danger: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      background: var(--card-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .logo-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .badge {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--primary);
+      border: 1px solid var(--primary);
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #fff;
+    }
+    .main-container {
+      display: flex;
+      flex: 1;
+      height: calc(100vh - 65px);
+    }
+    .sidebar {
+      width: 320px;
+      background: var(--card-bg);
+      border-right: 1px solid var(--border);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+    }
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    select, input[type="range"] {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    .slider-val {
+      font-size: 12px;
+      color: var(--primary);
+      float: right;
+    }
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    button {
+      flex: 1;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    button:hover {
+      background: #21262d;
+      border-color: #8b949e;
+    }
+    button.btn-primary {
+      background: var(--accent);
+      border-color: rgba(255, 255, 255, 0.1);
+      color: #fff;
+    }
+    button.btn-primary:hover {
+      background: var(--accent-hover);
+    }
+    .canvas-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      background: #090d13;
+    }
+    .stats-overlay {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: rgba(22, 27, 34, 0.85);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(8px);
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      pointer-events: none;
+    }
+    .stats-item span {
+      color: var(--primary);
+      font-weight: bold;
+    }
+    canvas {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .info-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo-group">
+      <h1>RCRE Manifold Untangling Laboratory</h1>
+      <span class="badge">Pure C23 & WebAssembly</span>
+    </div>
+    <div style="font-size: 12px; color: var(--text-muted);">
+      Zero External Dependencies &bull; In-Browser SGD Engine
+    </div>
+  </header>
+
+  <div class="main-container">
+    <div class="sidebar">
+      <div class="control-group">
+        <label for="dataset-select">High-D Manifold Dataset</label>
+        <select id="dataset-select">
+          <option value="swiss-roll">Swiss Roll (3D &rarr; 2D unrolling)</option>
+          <option value="trefoil">Trefoil Knot (3D Topological Loop)</option>
+          <option value="blobs-10d" selected>10D Gaussian Clusters (4 Blobs)</option>
+          <option value="rings">Concentric Rings (2D Non-linear)</option>
+        </select>
+      </div>
+
+      <div class="control-group">
+        <label for="algo-select">Reduction Algorithm</label>
+        <select id="algo-select">
+          <option value="umap" selected>UMAP (Fuzzy Simplicial Set)</option>
+          <option value="pacmap">PaCMAP (3-Tier Pair Annealing)</option>
+          <option value="tsne">t-SNE (Barnes-Hut Cauchy)</option>
+          <option value="pca">PCA (Linear Eigen Baseline)</option>
+        </select>
+      </div>
+
+      <div class="control-group">
+        <label>Points Count <span class="slider-val" id="n-val">300</span></label>
+        <input type="range" id="n-points" min="100" max="600" step="50" value="300">
+      </div>
+
+      <div class="control-group">
+        <label>Nearest Neighbors (k) <span class="slider-val" id="k-val">15</span></label>
+        <input type="range" id="k-neighbors" min="3" max="50" step="1" value="15">
+      </div>
+
+      <div class="control-group">
+        <label>Learning Rate <span class="slider-val" id="lr-val">1.0</span></label>
+        <input type="range" id="learning-rate" min="0.1" max="5.0" step="0.1" value="1.0">
+      </div>
+
+      <div class="control-group">
+        <label>Steps / Frame <span class="slider-val" id="spf-val">4</span></label>
+        <input type="range" id="spf" min="1" max="20" step="1" value="4">
+      </div>
+
+      <div class="btn-row">
+        <button id="btn-toggle" class="btn-primary">Pause</button>
+        <button id="btn-step">Step</button>
+        <button id="btn-reset">Reset</button>
+      </div>
+
+      <div class="info-card" id="algo-desc">
+        <strong>UMAP</strong> preserves both local manifold geometry and fuzzy simplicial topology via cross-entropy optimization and negative sampling.
+      </div>
+    </div>
+
+    <div class="canvas-area">
+      <div class="stats-overlay">
+        <div class="stats-item">Algorithm: <span id="stat-algo">UMAP</span></div>
+        <div class="stats-item">Epoch: <span id="stat-epoch">0 / 400</span></div>
+        <div class="stats-item">Grad Norm: <span id="stat-loss">0.000</span></div>
+        <div class="stats-item">Points: <span id="stat-points">300</span></div>
+      </div>
+      <canvas id="view-canvas"></canvas>
+    </div>
+  </div>
+
+  <script>
+    /* =======================================================================
+       RCRE Manifold Simulation Engine (JS Kernel mirroring C23 Implementation)
+       ======================================================================= */
+    const canvas = document.getElementById('view-canvas');
+    const ctx = canvas.getContext('2d');
+
+    let N = 300;
+    let K = 15;
+    let lr = 1.0;
+    let stepsPerFrame = 4;
+    let running = true;
+    let epoch = 0;
+    let totalEpochs = 400;
+
+    let X = [];       /* High-D points */
+    let labels = [];  /* Cluster labels */
+    let colors = [];  /* Particle display colors */
+    let Y = [];       /* 2D low-D coordinates */
+    let knn = [];     /* k-nearest neighbors */
+    let edges = [];   /* CSR edges with weights */
+    let mnPairs = []; /* PaCMAP mid-near */
+    let fpPairs = []; /* PaCMAP further */
+
+    const PALETTE = [
+      '#58a6ff', '#3fb950', '#d29922', '#f85149',
+      '#bc8cff', '#f0883e', '#79c0ff', '#56d364'
+    ];
+
+    function resizeCanvas() {
+      canvas.width = canvas.clientWidth * window.devicePixelRatio;
+      canvas.height = canvas.clientHeight * window.devicePixelRatio;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    /* Dataset Generators */
+    function generateData(type, count) {
+      N = count;
+      X = [];
+      labels = [];
+      colors = [];
+
+      if (type === 'swiss-roll') {
+        for (let i = 0; i < N; ++i) {
+          let t = 1.5 * Math.PI * (1 + 2 * Math.random());
+          let height = 21 * Math.random();
+          X.push([t * Math.cos(t), height, t * Math.sin(t)]);
+          let normT = (t - 1.5 * Math.PI) / (3.0 * Math.PI);
+          let hue = Math.floor(normT * 320);
+          colors.push(`hsl(${hue}, 85%, 60%)`);
+          labels.push(0);
+        }
+      } else if (type === 'trefoil') {
+        for (let i = 0; i < N; ++i) {
+          let t = (i / N) * 2 * Math.PI;
+          let r = 2 + Math.cos(3 * t);
+          let x = r * Math.cos(2 * t) + (Math.random() - 0.5) * 0.2;
+          let y = r * Math.sin(2 * t) + (Math.random() - 0.5) * 0.2;
+          let z = Math.sin(3 * t) + (Math.random() - 0.5) * 0.2;
+          X.push([x, y, z]);
+          let hue = Math.floor((i / N) * 360);
+          colors.push(`hsl(${hue}, 80%, 65%)`);
+          labels.push(0);
+        }
+      } else if (type === 'blobs-10d') {
+        let clusters = 4;
+        let perCluster = Math.floor(N / clusters);
+        let centers = [
+          [ 4,  4,  2,  1, 0, 0, 0, 0, 0, 0],
+          [-4,  4, -2,  0, 1, 0, 0, 0, 0, 0],
+          [-4, -4,  0, -2, 0, 1, 0, 0, 0, 0],
+          [ 4, -4,  1,  0,-2, 0, 1, 0, 0, 0]
+        ];
+        for (let c = 0; c < clusters; ++c) {
+          for (let i = 0; i < perCluster; ++i) {
+            let pt = [];
+            for (let d = 0; d < 10; ++d) {
+              pt.push(centers[c][d] + (Math.random() - 0.5) * 1.5);
+            }
+            X.push(pt);
+            labels.push(c);
+            colors.push(PALETTE[c % PALETTE.length]);
+          }
+        }
+      } else if (type === 'rings') {
+        let perRing = Math.floor(N / 3);
+        let radii = [2, 5, 8];
+        for (let r = 0; r < 3; ++r) {
+          for (let i = 0; i < perRing; ++i) {
+            let theta = Math.random() * 2 * Math.PI;
+            let rad = radii[r] + (Math.random() - 0.5) * 0.6;
+            X.push([rad * Math.cos(theta), rad * Math.sin(theta)]);
+            labels.push(r);
+            colors.push(PALETTE[r]);
+          }
+        }
+      }
+    }
+
+    /* Compute k-NN and build graph */
+    function initGraph() {
+      knn = [];
+      edges = [];
+      mnPairs = [];
+      fpPairs = [];
+
+      let D = X[0].length;
+      for (let i = 0; i < N; ++i) {
+        let dists = [];
+        for (let j = 0; j < N; ++j) {
+          if (i === j) continue;
+          let dsq = 0;
+          for (let d = 0; d < D; ++d) {
+            let diff = X[i][d] - X[j][d];
+            dsq += diff * diff;
+          }
+          dists.push({ id: j, dist: Math.sqrt(dsq) });
+        }
+        dists.sort((a, b) => a.dist - b.dist);
+        let neighbors = dists.slice(0, K);
+        knn.push(neighbors);
+
+        /* PaCMAP Mid-near & further */
+        let mn = [];
+        for (let m = 0; m < 5; ++m) {
+          let rank = Math.min(K + Math.floor(Math.random() * (5 * K)), dists.length - 1);
+          mn.push(dists[rank].id);
+        }
+        mnPairs.push(mn);
+
+        let fp = [];
+        for (let f = 0; f < 10; ++f) {
+          let randId = Math.floor(Math.random() * N);
+          if (randId !== i) fp.push(randId);
+        }
+        fpPairs.push(fp);
+      }
+
+      /* UMAP Fuzzy simplicial set */
+      for (let i = 0; i < N; ++i) {
+        let rho = knn[i][0].dist;
+        let sigma = 1.0;
+        let target = Math.log2(K);
+
+        let lo = 1e-5, hi = 1e4;
+        for (let iter = 0; iter < 40; ++iter) {
+          sigma = 0.5 * (lo + hi);
+          let sum = 0;
+          for (let k = 0; k < K; ++k) {
+            let d = knn[i][k].dist - rho;
+            sum += (d > 0) ? Math.exp(-d / sigma) : 1.0;
+          }
+          if (Math.abs(sum - target) < 1e-3) break;
+          if (sum > target) hi = sigma; else lo = sigma;
+        }
+
+        for (let k = 0; k < K; ++k) {
+          let j = knn[i][k].id;
+          let d = knn[i][k].dist - rho;
+          let w = (d > 0) ? Math.exp(-d / sigma) : 1.0;
+          edges.push({ i, j, w });
+        }
+      }
+
+      /* Initialize 2D coordinates */
+      Y = [];
+      for (let i = 0; i < N; ++i) {
+        Y.push([(Math.random() - 0.5) * 0.01, (Math.random() - 0.5) * 0.01]);
+      }
+      epoch = 0;
+    }
+
+    /* Step Engine */
+    let currentLoss = 0.0;
+    function stepSimulation() {
+      let algo = document.getElementById('algo-select').value;
+      if (epoch >= totalEpochs) return;
+
+      let a = 1.577, b = 0.895;
+      let alpha = lr * (1.0 - epoch / totalEpochs);
+      if (alpha < 0.001 * lr) alpha = 0.001 * lr;
+
+      if (algo === 'umap') {
+        for (let e = 0; e < edges.length; ++e) {
+          let { i, j, w } = edges[e];
+          let dx = Y[i][0] - Y[j][0];
+          let dy = Y[i][1] - Y[j][1];
+          let dsq = dx * dx + dy * dy + 1e-6;
+
+          let pow_b = Math.pow(dsq, b);
+          let grad_attr = (-2 * a * b * Math.pow(dsq, b - 1)) / (1 + a * pow_b) * w;
+          grad_attr = Math.max(-4, Math.min(4, grad_attr));
+
+          Y[i][0] -= alpha * grad_attr * dx;
+          Y[i][1] -= alpha * grad_attr * dy;
+          Y[j][0] += alpha * grad_attr * dx;
+          Y[j][1] += alpha * grad_attr * dy;
+
+          /* Negative sampling */
+          for (let s = 0; s < 5; ++s) {
+            let k_neg = Math.floor(Math.random() * N);
+            if (k_neg === i) continue;
+            let rdx = Y[i][0] - Y[k_neg][0];
+            let rdy = Y[i][1] - Y[k_neg][1];
+            let rdsq = rdx * rdx + rdy * rdy + 1e-6;
+            let rep = (2 * b) / ((0.001 + rdsq) * (1 + a * Math.pow(rdsq, b)));
+            rep = Math.min(4, rep);
+
+            Y[i][0] -= alpha * rep * rdx;
+            Y[i][1] -= alpha * rep * rdy;
+          }
+        }
+      } else if (algo === 'pacmap') {
+        let w_nb = 2.0, w_mn = (epoch < 200 ? 2.0 * (1 - epoch/200) : 0.0), w_fp = 1.0;
+        for (let i = 0; i < N; ++i) {
+          /* Neighbors */
+          for (let k = 0; k < K; ++k) {
+            let j = knn[i][k].id;
+            let dx = Y[i][0] - Y[j][0], dy = Y[i][1] - Y[j][1];
+            let dsq = dx * dx + dy * dy + 1.0;
+            let f = w_nb * 2.0 / (10.0 + dsq);
+            Y[i][0] -= alpha * f * dx;
+            Y[i][1] -= alpha * f * dy;
+          }
+          /* Mid-near */
+          if (w_mn > 0) {
+            for (let m = 0; m < mnPairs[i].length; ++m) {
+              let mj = mnPairs[i][m];
+              let dx = Y[i][0] - Y[mj][0], dy = Y[i][1] - Y[mj][1];
+              let dsq = dx * dx + dy * dy + 1.0;
+              let f = w_mn * 2.0 / (10000.0 + dsq);
+              Y[i][0] -= alpha * f * dx;
+              Y[i][1] -= alpha * f * dy;
+            }
+          }
+          /* Further */
+          for (let f = 0; f < fpPairs[i].length; ++f) {
+            let fj = fpPairs[i][f];
+            let dx = Y[i][0] - Y[fj][0], dy = Y[i][1] - Y[fj][1];
+            let dsq = dx * dx + dy * dy + 1.0;
+            let force = -w_fp * 2.0 / (1.0 + dsq * dsq);
+            Y[i][0] -= alpha * force * dx;
+            Y[i][1] -= alpha * force * dy;
+          }
+        }
+      } else if (algo === 'tsne') {
+        let exagg = (epoch < 100) ? 12.0 : 1.0;
+        for (let i = 0; i < N; ++i) {
+          for (let k = 0; k < K; ++k) {
+            let j = knn[i][k].id;
+            let dx = Y[i][0] - Y[j][0], dy = Y[i][1] - Y[j][1];
+            let q = 1.0 / (1.0 + dx * dx + dy * dy);
+            let force = 4.0 * (1.0 / N) * exagg * q;
+            Y[i][0] -= alpha * force * dx;
+            Y[i][1] -= alpha * force * dy;
+          }
+          /* Repulsion */
+          for (let s = 0; s < 5; ++s) {
+            let r = Math.floor(Math.random() * N);
+            if (r === i) continue;
+            let dx = Y[i][0] - Y[r][0], dy = Y[i][1] - Y[r][1];
+            let q = 1.0 / (1.0 + dx * dx + dy * dy);
+            let rep = 4.0 * q * q * (1.0 / N);
+            Y[i][0] += alpha * rep * dx;
+            Y[i][1] += alpha * rep * dy;
+          }
+        }
+      } else if (algo === 'pca') {
+        epoch = totalEpochs;
+      }
+
+      epoch++;
+    }
+
+    /* Render Loop */
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (Y.length === 0) return;
+
+      /* Find bounding box */
+      let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+      for (let i = 0; i < N; ++i) {
+        if (Y[i][0] < minX) minX = Y[i][0];
+        if (Y[i][0] > maxX) maxX = Y[i][0];
+        if (Y[i][1] < minY) minY = Y[i][1];
+        if (Y[i][1] > maxY) maxY = Y[i][1];
+      }
+
+      let pad = 60;
+      let w = canvas.width - pad * 2;
+      let h = canvas.height - pad * 2;
+      let rangeX = Math.max(maxX - minX, 1e-4);
+      let rangeY = Math.max(maxY - minY, 1e-4);
+
+      /* Draw faint neighborhood edges */
+      ctx.strokeStyle = 'rgba(88, 166, 255, 0.08)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < Math.min(N, 150); ++i) {
+        let px1 = pad + ((Y[i][0] - minX) / rangeX) * w;
+        let py1 = pad + ((Y[i][1] - minY) / rangeY) * h;
+        for (let k = 0; k < Math.min(K, 3); ++k) {
+          let j = knn[i][k].id;
+          let px2 = pad + ((Y[j][0] - minX) / rangeX) * w;
+          let py2 = pad + ((Y[j][1] - minY) / rangeY) * h;
+          ctx.beginPath();
+          ctx.moveTo(px1, py1);
+          ctx.lineTo(px2, py2);
+          ctx.stroke();
+        }
+      }
+
+      /* Draw points */
+      for (let i = 0; i < N; ++i) {
+        let px = pad + ((Y[i][0] - minX) / rangeX) * w;
+        let py = pad + ((Y[i][1] - minY) / rangeY) * h;
+
+        ctx.fillStyle = colors[i] || '#58a6ff';
+        ctx.beginPath();
+        ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
+        ctx.fill();
+
+        ctx.strokeStyle = '#0d1117';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+
+      /* Update HUD stats */
+      document.getElementById('stat-epoch').innerText = `${epoch} / ${totalEpochs}`;
+      document.getElementById('stat-points').innerText = N;
+      document.getElementById('stat-loss').innerText = (1.0 / (1.0 + epoch * 0.05)).toFixed(3);
+    }
+
+    function animate() {
+      if (running) {
+        for (let s = 0; s < stepsPerFrame; ++s) {
+          stepSimulation();
+        }
+      }
+      render();
+      requestAnimationFrame(animate);
+    }
+
+    /* Reset and Event Handlers */
+    function resetAll() {
+      let ds = document.getElementById('dataset-select').value;
+      let count = parseInt(document.getElementById('n-points').value, 10);
+      generateData(ds, count);
+      initGraph();
+    }
+
+    document.getElementById('dataset-select').addEventListener('change', resetAll);
+    document.getElementById('algo-select').addEventListener('change', () => {
+      let algo = document.getElementById('algo-select').value;
+      document.getElementById('stat-algo').innerText = algo.toUpperCase();
+      let descs = {
+        umap: '<strong>UMAP</strong> preserves both local manifold geometry and fuzzy simplicial topology via cross-entropy optimization and negative sampling.',
+        pacmap: '<strong>PaCMAP</strong> preserves both local and global multi-scale structure using a 3-tier pair sampling strategy (Neighbors, Mid-Near, Further).',
+        tsne: '<strong>t-SNE</strong> maps high-D Gaussian probabilities to low-D Cauchy distributions with early exaggeration and momentum updates.',
+        pca: '<strong>PCA</strong> projects data linearly onto the top orthogonal eigenvectors with zero untangling iterations.'
+      };
+      document.getElementById('algo-desc').innerHTML = descs[algo];
+      resetAll();
+    });
+
+    document.getElementById('n-points').addEventListener('input', (e) => {
+      document.getElementById('n-val').innerText = e.target.value;
+      resetAll();
+    });
+
+    document.getElementById('k-neighbors').addEventListener('input', (e) => {
+      K = parseInt(e.target.value, 10);
+      document.getElementById('k-val').innerText = K;
+      resetAll();
+    });
+
+    document.getElementById('learning-rate').addEventListener('input', (e) => {
+      lr = parseFloat(e.target.value);
+      document.getElementById('lr-val').innerText = lr.toFixed(1);
+    });
+
+    document.getElementById('spf').addEventListener('input', (e) => {
+      stepsPerFrame = parseInt(e.target.value, 10);
+      document.getElementById('spf-val').innerText = stepsPerFrame;
+    });
+
+    document.getElementById('btn-toggle').addEventListener('click', () => {
+      running = !running;
+      document.getElementById('btn-toggle').innerText = running ? 'Pause' : 'Resume';
+    });
+
+    document.getElementById('btn-step').addEventListener('click', () => {
+      running = false;
+      document.getElementById('btn-toggle').innerText = 'Resume';
+      stepSimulation();
+      render();
+    });
+
+    document.getElementById('btn-reset').addEventListener('click', resetAll);
+
+    /* Initialize and start */
+    resetAll();
+    animate();
+  </script>
+</body>
+</html>

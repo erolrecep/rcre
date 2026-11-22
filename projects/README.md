@@ -20,6 +20,8 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-xgb`** | [`rcre_xgb/`](rcre_xgb/) | XGBoost-style regularized second-order gradient boosted decision trees | Quantile Histograms, Newton Updates, Missing NaN Routing, Flat-Array Predictor |
 | **`rcre-omnisearch`** | [`omnisearch_hash/`](omnisearch_hash/) | 30M multimodal vector search & LSH hash engine for mixed text and images | L2 Spherical Normalization, Random Hyperplanes, Arena Hash Table, SIMD ADC |
 | **`rcre-galton`** | [`rcre_galtonboard/`](rcre_galtonboard/) | High-speed Galton Board (Quincunx) flow simulator, Bernoulli trials & Central Limit Theorem | xoshiro256** PRNG, SIMD Bit-Level Popcount, Dynamic Histograms, Chi-Square Goodness-of-Fit, WebAssembly Canvas2D |
+| **`rcre-emeans`** | [`rcre_emeans/`](rcre_emeans/) | Fast mini-batch EMA k-means clustering with scaling-law recipes & dead-cluster revival | EMA Updates, Gumbel-Max Revival, Dual-Kernel Argmin, ThreadPool Determinism |
+| **`rcre-manifold`** | [`rcre_manifold/`](rcre_manifold/) | Multi-dimensional manifold learning, UMAP, Barnes-Hut t-SNE & PaCMAP untangling | Fuzzy Simplicial Sets, Barnes-Hut 2D Quadtree, 3-Tier Pair Annealing, WebAssembly |
 
 ---
 
@@ -288,6 +290,71 @@ make project_galton_bench
 ```
 
 For complete documentation, see [`projects/rcre_galtonboard/README.md`](rcre_galtonboard/README.md).
+
+---
+
+## 11. `rcre-emeans` (Fast Mini-Batch EMA k-Means Clustering Engine)
+
+A high-performance C23 implementation of **e-means** (Bessa et al., arXiv:2611.09501, 2026): mini-batch k-means with exponential-moving-average (EMA) centroid updates, a cosine-annealed step schedule, scaling-law batch/step selection, and Gumbel-max dead-cluster revival.
+
+### Key Capabilities
+* **Empirical Scaling Laws**: Automatically resolves optimal mini-batch size $B$ and step size $\alpha_0$ from problem parameters $(n, k, d, T)$, switching between throughput and quality regimes ($d \le 16$).
+* **Cosine-Annealed EMA Updates**: Dynamic step decay $\alpha(t) = \alpha_0 (0.1 + 0.9 \cdot \frac{1 + \cos(\pi t / M)}{2})$ providing continuous centroid refinement.
+* **Gumbel-Max Dead-Cluster Revival**: Starved clusters ($\text{usage} < 0.1 \cdot \text{mean}$) are split from heavy donor clusters using Gumbel-max donor selection with alternating coordinate perturbations ($\pm 10^{-4}$) and bit-collapse separation via `nextafterf`.
+* **Dual-Kernel Architecture**:
+  * **Exact Kernel ($k \cdot d \le 16,384$)**: Direct $(x - c_j)^2$ calculation with zero matrix scratch, bit-identical to reference and optimal for image palettes ($k=256, d=3$).
+  * **GEMM Kernel ($k \cdot d > 16,384$)**: HAL-accelerated matrix multiplication $D = X \cdot C^T$ under a strict 16 MB memory budget, with exact winner evaluation in F64.
+* **Pool-Size Invariant Determinism**: Slab partitioning depends strictly on $(m, k, B)$, delivering bit-identical centroids across arbitrary thread pool sizes (1 to 18+ workers).
+* **30x–70x Speedups vs. 25-Iter Lloyd**: Quantizes an 8.3M-pixel 4K image to 256 colors in ~1.18 s (30x faster), and clusters 100K 128-D SIFT vectors in 1.14 s (69x faster) with 43.4% lower MSE error.
+* **Zero Runtime Heap Allocation**: 100% linear `RCRE_Arena` memory model.
+
+### Quick Start
+```bash
+# Run the visual 2D cluster demo with real-time ASCII scatter map:
+make project_emeans_demo
+
+# Run all 6 automated C test suites (300k+ assertions):
+make project_emeans_test
+
+# Run the 4krgb and sift100k benchmarks vs Lloyd-25:
+make project_emeans_bench
+
+# Run AddressSanitizer and UndefinedBehaviorSanitizer:
+make -C projects/rcre_emeans san
+```
+
+For complete documentation, exactness contracts, and benchmark tables, see [`projects/rcre_emeans/README.md`](rcre_emeans/README.md), [`projects/rcre_emeans/docs/exactness.md`](rcre_emeans/docs/exactness.md), and [`projects/rcre_emeans/docs/benchmarks.md`](rcre_emeans/docs/benchmarks.md).
+
+---
+
+## 12. `rcre-manifold` (Multi-Dimensional Manifold Learning & Untangling Engine)
+
+A high-performance ISO C23 implementation of modern non-linear dimensionality reduction and manifold learning algorithms: **UMAP** (McInnes et al. 2018), **Barnes-Hut t-SNE** (van der Maaten 2014), **PaCMAP** (Wang et al., JMLR 2021), and **PCA**. Features interactive WebAssembly / HTML5 Canvas2D untangling visualizations with zero external runtime dependencies.
+
+### Key Capabilities
+* **Unified Dimensionality Reduction Suite**: Execute UMAP, Barnes-Hut t-SNE, PaCMAP, or orthogonal PCA projections through a single clean C23 API (`rcre_manifold_*`).
+* **UMAP Fuzzy Simplicial Sets**: Smooth local metric space bisection for Riemannian metric tensor $\sigma_i$ satisfying $\sum_j \exp(-\max(0, d_{ij}-\rho_i)/\sigma_i) = \log_2(k)$, symmetric fuzzy union, and cross-entropy SGD with Monte-Carlo negative sampling.
+* **Barnes-Hut $\mathcal{O}(N \log N)$ 2D Quadtree**: Fast spatial decomposition with multipole acceptance criteria ($\theta = 0.5$) for low-dimensional Cauchy repulsive forces, combined with early exaggeration ($\times 12$) and momentum schedules.
+* **PaCMAP 3-Tier Multi-Scale Annealing**: Dynamic loss scheduling across neighbor pairs, mid-near pairs ($k \dots 6k$), and further pairs, preserving both local cluster boundaries and global inter-cluster topologies.
+* **Step-by-Step Interactive Untangling**: Incremental `rcre_manifold_step()` engine allowing real-time animation frames in browser WebAssembly playgrounds or terminal ASCII visualizers.
+* **100% Linear Arena Allocation**: Zero heap fragmentation; all graphs, CSR edges, and Quadtree pools are allocated inside 64-byte aligned `RCRE_Arena`.
+* **Zero Runtime Dependencies**: No Python, no BLAS/LAPACK, no PyTorch, no C++ runtime.
+
+### Quick Start
+```bash
+# Run the 10-D Gaussian mixture ASCII scatter untangling demonstration:
+make project_manifold_demo
+
+# Run the comprehensive verification and cluster separation test suite:
+make project_manifold_test
+
+# Run AddressSanitizer and UndefinedBehaviorSanitizer:
+make project_manifold_san
+```
+
+For complete documentation and interactive web laboratory, see [`projects/rcre_manifold/web/index.html`](rcre_manifold/web/index.html).
+
+
 
 
 
