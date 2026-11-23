@@ -14,7 +14,23 @@ void rcre_scalar_gemm_f32(size_t M, size_t N, size_t K, float alpha,
                           const float* B, size_t ldb, 
                           float beta, float* C, size_t ldc);
 
+void rcre_scalar_gemv_f32(size_t M, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* x, float beta, float* y);
+
 float rcre_scalar_dot_f32(const float* x, const float* y, size_t n);
+
+int32_t rcre_scalar_dot_i8(const int8_t* x, const int8_t* y, size_t n);
+
+void rcre_scalar_gemm_i8(size_t M, size_t N, size_t K,
+                         const int8_t* A, size_t lda,
+                         const int8_t* B, size_t ldb,
+                         int32_t* C, size_t ldc);
+
+void rcre_scalar_gemm_bf16(size_t M, size_t N, size_t K, float alpha,
+                           const uint16_t* A, size_t lda,
+                           const uint16_t* B, size_t ldb,
+                           float beta, float* C, size_t ldc);
 
 void rcre_scalar_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
@@ -31,7 +47,18 @@ void rcre_neon_gemm_f32(size_t M, size_t N, size_t K, float alpha,
                         const float* B, size_t ldb, 
                         float beta, float* C, size_t ldc);
 
+void rcre_neon_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y);
+
 float rcre_neon_dot_f32(const float* x, const float* y, size_t n);
+
+int32_t rcre_neon_dot_i8(const int8_t* x, const int8_t* y, size_t n);
+
+void rcre_neon_gemm_i8(size_t M, size_t N, size_t K,
+                       const int8_t* A, size_t lda,
+                       const int8_t* B, size_t ldb,
+                       int32_t* C, size_t ldc);
 
 void rcre_neon_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
@@ -49,7 +76,18 @@ void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha,
                         const float* B, size_t ldb, 
                         float beta, float* C, size_t ldc);
 
+void rcre_avx2_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y);
+
 float rcre_avx2_dot_f32(const float* x, const float* y, size_t n);
+
+int32_t rcre_avx2_dot_i8(const int8_t* x, const int8_t* y, size_t n);
+
+void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
+                       const int8_t* A, size_t lda,
+                       const int8_t* B, size_t ldb,
+                       int32_t* C, size_t ldc);
 
 void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
@@ -60,12 +98,32 @@ size_t rcre_avx2_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 #endif
 
+/* x86 AVX-512 512-bit Micro-Kernels */
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX512F__) || defined(__clang__) || defined(__GNUC__))
+void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc);
+
+void rcre_avx512_gemv_f32(size_t M, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* x, float beta, float* y);
+
+float rcre_avx512_dot_f32(const float* x, const float* y, size_t n);
+
+void rcre_avx512_axpy_f32(size_t n, float alpha, const float* x, float* y);
+#endif
+
 /* WebAssembly 128-bit SIMD Micro-Kernels */
 #if defined(__wasm_simd128__)
 void rcre_wasm_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
                         const float* A, size_t lda, 
                         const float* B, size_t ldb, 
                         float beta, float* C, size_t ldc);
+
+void rcre_wasm_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y);
 
 float rcre_wasm_dot_f32(const float* x, const float* y, size_t n);
 

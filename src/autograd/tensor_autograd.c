@@ -97,7 +97,7 @@ static bool is_f32(const RCRE_Tensor* t) {
 }
 
 RCRE_Tensor* rcre_tensor_alloc(RCRE_Arena* arena, const size_t* shape, uint8_t ndim) {
-    if (arena == nullptr || ndim == 0 || ndim > 4 || shape == nullptr) return nullptr;
+    if (arena == nullptr || ndim == 0 || ndim > RCRE_MAX_DIMS || shape == nullptr) return nullptr;
 
     RCRE_Tensor* t = (RCRE_Tensor*)rcre_arena_alloc(arena, sizeof(RCRE_Tensor), alignof(RCRE_Tensor));
     if (!t) return nullptr;

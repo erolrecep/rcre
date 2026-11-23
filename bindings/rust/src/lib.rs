@@ -20,8 +20,8 @@ pub struct RCRE_Arena {
 pub struct RCRE_Tensor {
     pub data: *mut std::ffi::c_void,
     pub grad: *mut f32,
-    pub shape: [usize; 4],
-    pub strides: [isize; 4],
+    pub shape: [usize; 8],
+    pub strides: [isize; 8],
     pub numel: usize,
     pub ndim: u8,
     pub dtype: u32,

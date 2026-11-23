@@ -26,8 +26,8 @@ extern "C" {
 /* Version & Compatibility Macros                                            */
 /* ========================================================================= */
 
-#define RCRE_VERSION_MAJOR 1
-#define RCRE_VERSION_MINOR 2
+#define RCRE_VERSION_MAJOR 2
+#define RCRE_VERSION_MINOR 0
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -39,6 +39,11 @@ extern "C" {
     #define RCRE_NODISCARD
   #endif
 #endif
+
+#define RCRE_ABI_VERSION 0x020000U
+RCRE_NODISCARD static inline uint32_t rcre_abi_version(void) {
+    return RCRE_ABI_VERSION;
+}
 
 #ifndef constexpr
   #if !defined(__cpp_constexpr) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L)
@@ -80,9 +85,12 @@ typedef enum {
 typedef enum {
     RCRE_DTYPE_U8   = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
     RCRE_DTYPE_I32  = 1, /* 32-bit signed integer (class labels, indices)          */
+    RCRE_DTYPE_I64  = 2, /* 64-bit signed integer (token IDs, Arrow/NumPy int64)   */
     RCRE_DTYPE_F32  = 3, /* 32-bit single precision float                         */
     RCRE_DTYPE_F16  = 4, /* 16-bit IEEE 754-2008 half precision float             */
-    RCRE_DTYPE_BF16 = 5  /* 16-bit Google Brain bfloat16 format                   */
+    RCRE_DTYPE_BF16 = 5, /* 16-bit Google Brain bfloat16 format                   */
+    RCRE_DTYPE_I8   = 6, /* 8-bit signed quantized integer                        */
+    RCRE_DTYPE_F64  = 7  /* 64-bit IEEE-754 double precision float                */
 } RCRE_DType;
 
 typedef enum {
@@ -122,6 +130,16 @@ typedef struct RCRE_GraphCtx {
  * @return Pointer to newly initialized RCRE_Arena, or NULL on failure.
  */
 RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity);
+
+/**
+ * @brief Initializes a stack/static RCRE_Arena over caller-supplied memory
+ *        (zero heap allocations; ideal for freestanding/embedded targets).
+ * @param arena Caller-owned RCRE_Arena struct to initialize.
+ * @param backing_buffer Pre-allocated memory buffer (64-byte alignment recommended).
+ * @param capacity Byte capacity of backing_buffer.
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG on NULL/zero capacity.
+ */
+RCRE_NODISCARD int rcre_arena_from_buffer(RCRE_Arena* arena, void* backing_buffer, size_t capacity);
 
 /**
  * @brief Allocates an aligned buffer from the linear scratchpad arena.
@@ -227,18 +245,20 @@ RCRE_NODISCARD char* rcre_sb_to_cstr(RCRE_StrBuilder* sb);
 /* Tensor Abstraction & Zero-Copy Views (TNS-REQ-01 to TNS-REQ-05)           */
 /* ========================================================================= */
 
+#define RCRE_MAX_DIMS 8
+
 typedef struct RCRE_Tensor {
-    void*         data;            /* Pointer to element (0, 0, ...)               */
-    float*        grad;            /* Backprop buffer (training); NULL otherwise   */
-    size_t        shape[4];        /* Dimensions (rank 1 to 4)                     */
-    ptrdiff_t     strides[4];      /* Step in elements per dimension               */
-    size_t        numel;           /* Cached element count (set at construction;   */
-                                   /* shape/strides are immutable afterwards)      */
-    uint8_t       ndim;            /* Rank (1 to 4)                                */
+    void*         data;                 /* Pointer to element (0, 0, ...)               */
+    float*        grad;                 /* Backprop buffer (training); NULL otherwise   */
+    size_t        shape[RCRE_MAX_DIMS]; /* Dimensions (rank 1 to 8)                     */
+    ptrdiff_t     strides[RCRE_MAX_DIMS];/* Step in elements per dimension              */
+    size_t        numel;                /* Cached element count (set at construction;   */
+                                        /* shape/strides are immutable afterwards)      */
+    uint8_t       ndim;                 /* Rank (1 to 8)                                */
     RCRE_DType    dtype;
     RCRE_Layout   layout;
-    bool          is_view;         /* true: data owned elsewhere (slice/permute/…) */
-    const char*   label;           /* Optional name (visualization/debug); NULL ok */
+    bool          is_view;              /* true: data owned elsewhere (slice/permute/…) */
+    const char*   label;                /* Optional name (visualization/debug); NULL ok */
 } RCRE_Tensor;
 
 /**
@@ -308,6 +328,41 @@ RCRE_NODISCARD size_t rcre_tensor_nbytes(const RCRE_Tensor* t);
  * @brief Returns byte size of a given RCRE_DType.
  */
 RCRE_NODISCARD size_t rcre_dtype_size(RCRE_DType dtype);
+
+/**
+ * @brief Computes NumPy-compatible broadcast output shape for two tensors.
+ * @return RCRE_OK if shapes are broadcast-compatible, RCRE_ERR_SHAPE_MISMATCH otherwise.
+ */
+RCRE_NODISCARD int rcre_tensor_broadcast_shape(
+    const size_t* shape_a, uint8_t ndim_a,
+    const size_t* shape_b, uint8_t ndim_b,
+    size_t out_shape[RCRE_MAX_DIMS], uint8_t* out_ndim
+);
+
+/**
+ * @brief Creates a zero-copy strided broadcast view (0-stride along expanded axes).
+ */
+RCRE_NODISCARD RCRE_Tensor rcre_tensor_broadcast_to(
+    const RCRE_Tensor* src,
+    const size_t* target_shape,
+    uint8_t target_ndim
+);
+
+/**
+ * @brief Broadcasted elementwise addition: dst = a + b (F32).
+ */
+RCRE_NODISCARD int rcre_tensor_add_broadcast(
+    const RCRE_Tensor* a, const RCRE_Tensor* b,
+    RCRE_Arena* arena, RCRE_Tensor* dst
+);
+
+/**
+ * @brief Broadcasted elementwise multiplication: dst = a * b (F32).
+ */
+RCRE_NODISCARD int rcre_tensor_mul_broadcast(
+    const RCRE_Tensor* a, const RCRE_Tensor* b,
+    RCRE_Arena* arena, RCRE_Tensor* dst
+);
 
 /* ========================================================================= */
 /* Input Recognition & Adaptation Pipeline (ADP-REQ-01 to ADP-REQ-03)        */
@@ -1079,7 +1134,9 @@ typedef enum {
     RCRE_CPU_FEAT_AVX2        = (1 << 2),
     RCRE_CPU_FEAT_FMA         = (1 << 3),
     RCRE_CPU_FEAT_AVX512F     = (1 << 4),
-    RCRE_CPU_FEAT_WASM_SIMD   = (1 << 5)
+    RCRE_CPU_FEAT_WASM_SIMD   = (1 << 5),
+    RCRE_CPU_FEAT_ARM_SVE2    = (1 << 6),
+    RCRE_CPU_FEAT_ARM_DOTPROD = (1 << 7)
 } RCRE_CpuFeatures;
 
 typedef void (*rcre_gemm_fn)(size_t M, size_t N, size_t K, float alpha, 
@@ -1087,7 +1144,23 @@ typedef void (*rcre_gemm_fn)(size_t M, size_t N, size_t K, float alpha,
                              const float* B, size_t ldb, 
                              float beta, float* C, size_t ldc);
 
+typedef void (*rcre_gemv_fn)(size_t M, size_t K, float alpha,
+                             const float* A, size_t lda,
+                             const float* x, float beta, float* y);
+
 typedef float (*rcre_dot_fn)(const float* x, const float* y, size_t n);
+
+typedef int32_t (*rcre_dot_i8_fn)(const int8_t* x, const int8_t* y, size_t n);
+
+typedef void (*rcre_gemm_i8_fn)(size_t M, size_t N, size_t K,
+                                const int8_t* A, size_t lda,
+                                const int8_t* B, size_t ldb,
+                                int32_t* C, size_t ldc);
+
+typedef void (*rcre_gemm_bf16_fn)(size_t M, size_t N, size_t K, float alpha,
+                                  const uint16_t* A, size_t lda,
+                                  const uint16_t* B, size_t ldb,
+                                  float beta, float* C, size_t ldc);
 
 typedef void (*rcre_axpy_fn)(size_t n, float alpha, const float* x, float* y);
 
@@ -1109,7 +1182,11 @@ typedef struct RCRE_HalDispatch {
     const char*            backend_name;
     uint32_t               cpu_features;
     rcre_gemm_fn           gemm_f32;
+    rcre_gemv_fn           gemv_f32;
     rcre_dot_fn            dot_f32;
+    rcre_dot_i8_fn         dot_i8;
+    rcre_gemm_i8_fn        gemm_i8;
+    rcre_gemm_bf16_fn      gemm_bf16;
     rcre_axpy_fn           axpy_f32;
     rcre_rgb_to_gray_u8_fn rgb_to_gray_u8;
     rcre_find_byte_fn      find_byte;
@@ -1117,6 +1194,16 @@ typedef struct RCRE_HalDispatch {
 } RCRE_HalDispatch;
 
 extern RCRE_HalDispatch rcre_hal;
+
+/**
+ * @brief Opt-in parallel SGEMM partitioned over RCRE_ThreadPool row slabs.
+ *        Falls back to single-threaded rcre_hal.gemm_f32 when pool is NULL or small.
+ */
+void rcre_hal_gemm_f32_mt(RCRE_ThreadPool* pool,
+                          size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc);
 
 /**
  * @brief Probes host hardware and initializes dynamic SIMD dispatch table.

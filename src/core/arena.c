@@ -11,6 +11,19 @@
 
 #define RCRE_DEFAULT_ALIGNMENT 64
 
+RCRE_NODISCARD int rcre_arena_from_buffer(RCRE_Arena* arena, void* backing_buffer, size_t capacity) {
+    if (!arena || !backing_buffer || capacity == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    arena->buffer         = (uint8_t*)backing_buffer;
+    arena->capacity       = capacity;
+    arena->offset         = 0;
+    arena->high_watermark = 0;
+    arena->alloc_count    = 0;
+    arena->rewind_count   = 0;
+    return RCRE_OK;
+}
+
 RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity) {
     if (capacity == 0) {
         return NULL;
