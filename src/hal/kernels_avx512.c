@@ -159,7 +159,7 @@ void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
   #if RCRE_NEED_POP_AVX512 == 2
 /* 8x8 micro-kernel: eight row accumulators (__m512d = 8 doubles each);
  * each k-step broadcasts A[i,k] against the 8-wide B columns. */
-static void avx512_gemm64_microkernel_8x8(size_t K,
+static void avx512_gemm64_microkernel_8x8(size_t K, double alpha,
                               const double* A, size_t lda,
                               const double* B, size_t ldb,
                               double* C, size_t ldc) {
@@ -175,7 +175,7 @@ static void avx512_gemm64_microkernel_8x8(size_t K,
         __m512d b6 = _mm512_load_pd(&B[k * ldb + 6]);
         __m512d b7 = _mm512_load_pd(&B[k * ldb + 7]);
         for (size_t i = 0; i < 8; ++i) {
-            __m512d a = _mm512_set1_pd(A[i * lda + k]);
+            __m512d a = _mm512_set1_pd(A[i * lda + k] * alpha);
             acc[i] = _mm512_fmadd_pd(a, b0, acc[i]);
             acc[i] = _mm512_fmadd_pd(a, b1, acc[i]);
             acc[i] = _mm512_fmadd_pd(a, b2, acc[i]);
@@ -210,7 +210,7 @@ void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                 for (; i + 7 < i_end; i += 8) {
                     size_t j = jj;
                     for (; j + 7 < j_end; j += 8)
-                        avx512_gemm64_microkernel_8x8(k_end - kk,
+                        avx512_gemm64_microkernel_8x8(k_end - kk, alpha,
                                                       &A[i * lda + kk], lda,
                                                       &B[kk * ldb + j], ldb,
                                                       &C[i * ldc + j], ldc);
@@ -232,10 +232,6 @@ void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
             }
         }
     }
-    if (alpha != 1.0)
-        for (size_t i = 0; i < M; ++i)
-            for (size_t j = 0; j < N; ++j)
-                C[i * ldc + j] *= alpha;
 }
 
 double rcre_avx512_dot_f64(const double* x, const double* y, size_t n) {

@@ -45,6 +45,7 @@ SRCS = src/core/arena.c \
        src/core/reduce.c \
        src/core/sf.c \
        src/core/rng.c \
+       src/core/fft.c \
        src/cv/color.c \
        src/cv/geom.c \
        src/cv/filter.c \
@@ -94,7 +95,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_slice test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_emeans test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse test_io test_df test_stat test_metric test_sota test_linalg test_rng
+TESTS = test_arena test_slice test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_emeans test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse test_io test_df test_stat test_metric test_sota test_linalg test_rng test_fft_f64
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -340,13 +341,21 @@ bin/bench_rng: benchmarks/bench_rng.c $(LIB)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@
 
-bench: bin/bench_hal bin/bench_linalg bin/bench_rng
+bench_rng: bin/bench_rng
+	@bin/bench_rng
+
+bin/bench_h2: benchmarks/bench_h2.c $(LIB)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@
+
+bench_h2: bin/bench_h2
+	@bin/bench_h2
+
+bench: bin/bench_hal bin/bench_linalg bin/bench_rng bin/bench_h2
 	@bin/bench_hal
 	@bin/bench_linalg
 	@bin/bench_rng
-
-bench_rng: bin/bench_rng
-	@bin/bench_rng
+	@bin/bench_h2
 
 bench_io: bin/bench_io
 	@bin/bench_io

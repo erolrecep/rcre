@@ -322,8 +322,197 @@ static void test_sf_logsumexp_expit_norm(void) {
     ASSERT_TRUE(rcre_sf_norm_cdf_f64(-100.0) == 0.0);
 }
 
+
+/* ========================================================================= */
+/* H2 (2.2.0) — Blocked GEMM + triangular solves                             */
+/* ========================================================================= */
+
+/* Reference GEMM, sequential F64 (deterministic): C = alpha*A*B + beta*C0. */
+static void gemm_ref(size_t M, size_t N, size_t K, double alpha,
+                     const double* A, size_t lda, const double* B, size_t ldb,
+                     double beta, double* C, size_t ldc) {
+    for (size_t i = 0; i < M; ++i)
+        for (size_t j = 0; j < N; ++j) {
+            double ab = 0.0;
+            for (size_t k = 0; k < K; ++k)
+                ab += A[i * lda + k] * B[k * ldb + j];
+            C[i * ldc + j] = alpha * ab + beta * C[i * ldc + j];
+        }
+}
+
+static double max_abs_diff(const double* a, const double* b, size_t n) {
+    double m = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        double d = fabs(a[i] - b[i]);
+        if (d > m) m = d;
+    }
+    return m;
+}
+
+static void fill_rand(double* x, size_t n, uint64_t seed) {
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t z = seed + i * 0x9E3779B97F4A7C15ull;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        z ^= z >> 31;
+        x[i] = (double)(z >> 11) * 0x1.0p-53 * 2.0 - 1.0;
+    }
+}
+
+static void test_gemm_blocked_vs_reference(void) {
+    /* sizes spanning the 64x64x64 block grid: exact multiples,
+     * remainders on all three axes, K < BK, thin matrices */
+    struct { size_t M, N, K; } cases[] = {
+        { 64, 64, 64 }, { 65, 65, 65 }, { 128, 128, 128 },
+        { 100, 200, 300 }, { 33, 17, 101 }, { 1, 1, 1 },
+        { 129, 1, 257 }, { 1, 129, 257 }, { 1, 1, 129 },
+        { 1000, 500, 200 }, { 63, 63, 63 }, { 64, 64, 1 },
+        { 512, 512, 1024 },
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+        const size_t M = cases[c].M, N = cases[c].N, K = cases[c].K;
+        double* A = (double*)malloc(M * K * sizeof(double));
+        double* B = (double*)malloc(K * N * sizeof(double));
+        double* C1 = (double*)malloc(M * N * sizeof(double));
+        double* C2 = (double*)malloc(M * N * sizeof(double));
+        double* Cref = (double*)malloc(M * N * sizeof(double));
+        fill_rand(A, M * K, 0xA11 + c);
+        fill_rand(B, K * N, 0xB22 + c);
+        fill_rand(C1, M * N, 0xC33 + c);
+        double* C0 = (double*)malloc(M * N * sizeof(double));
+        memcpy(C0, C1, M * N * sizeof(double)); /* pristine input */
+        memcpy(C2, C1, M * N * sizeof(double));
+        memcpy(Cref, C1, M * N * sizeof(double));
+        const double alpha = 1.5, beta = -0.5;
+        rcre_linalg_gemm_blocked_f64(M, N, K, alpha, A, K, B, N, beta, C1, N);
+        gemm_ref(M, N, K, alpha, A, K, B, N, beta, Cref, N);
+        /* float determinism class: |diff| bounded relative to |A*B| scale */
+        const double err = max_abs_diff(C1, Cref, M * N);
+        const double scale = (double)K * 4.0; /* |A*B| elements ~ K * (2*2) max */
+        ASSERT_TRUE(err < 1e-13 * scale);
+        /* K = 0: C = beta*C0 (pristine copy) */
+        memcpy(C2, C0, M * N * sizeof(double));
+        rcre_linalg_gemm_blocked_f64(M, N, 0, alpha, A, K, B, N, beta, C2, N);
+        for (size_t i = 0; i < M * N; ++i)
+            ASSERT_TRUE(C2[i] == C0[i] * beta);
+        free(C0);
+        free(A); free(B); free(C1); free(C2); free(Cref);
+    }
+    /* blocked == unblocked for K <= 64 (single K-block: same micro calls) */
+    {
+        const size_t M = 128, N = 96, K = 32;
+        double* A = (double*)malloc(M * K * sizeof(double));
+        double* B = (double*)malloc(K * N * sizeof(double));
+        double* C1 = (double*)malloc(M * N * sizeof(double));
+        double* C2 = (double*)malloc(M * N * sizeof(double));
+        fill_rand(A, M * K, 0xD44);
+        fill_rand(B, K * N, 0xE55);
+        memset(C1, 0, M * N * sizeof(double));
+        memset(C2, 0, M * N * sizeof(double));
+        rcre_linalg_gemm_blocked_f64(M, N, K, 1.0, A, K, B, N, 0.0, C1, N);
+        rcre_linalg_gemm_f64(M, N, K, 1.0, A, K, B, N, 0.0, C2, N);
+        /* both accumulate K in the same order within the single block,
+         * but the unblocked path loops all K per output element — for
+         * K < BK the element order differs; float class, 1 ulp tolerance */
+        ASSERT_TRUE(max_abs_diff(C1, C2, M * N) < 1e-15 * (double)K);
+        free(A); free(B); free(C1); free(C2);
+    }
+}
+
+static void test_trsm_triangular(void) {
+    /* upper triangular: A = I + strictly-upper random; solve A X = alpha X
+     * against a reference substitution (independent reimplementation) */
+    {
+        const size_t n = 32, nrhs = 4;
+        double* A = (double*)malloc(n * n * sizeof(double));
+        double* X1 = (double*)malloc(n * nrhs * sizeof(double));
+        double* Xref = (double*)malloc(n * nrhs * sizeof(double));
+        fill_rand(A, n * n, 0xF66);
+        for (size_t i = 0; i < n; ++i) {
+            for (size_t j = 0; j < i; ++j) A[i * n + j] = 0.0; /* zero lower */
+            A[i * n + i] += 2.0;                                 /* non-unit diag */
+        }
+        fill_rand(X1, n * nrhs, 0xA77);
+        memcpy(Xref, X1, n * nrhs * sizeof(double));
+        const double alpha = 0.7;
+        ASSERT_INT_EQ(0, rcre_linalg_trsm_f64(1, 0, 1, alpha, A, n, X1, nrhs, n, nrhs));
+
+        /* reference: backward substitution (explicit index loop — the
+         * post-decrement idiom `m-- > 0` would skip the last row) */
+        for (size_t r = 0; r < nrhs; ++r) {
+            for (size_t mi = 0; mi < n; ++mi) {
+                const size_t m = n - 1 - mi;
+                double s = Xref[m * nrhs + r] * alpha;
+                for (size_t k = m + 1; k < n; ++k)
+                    s -= A[m * n + k] * Xref[k * nrhs + r];
+                Xref[m * nrhs + r] = s / A[m * n + m];
+            }
+        }
+        ASSERT_TRUE(max_abs_diff(X1, Xref, n * nrhs) < 1e-14);
+        free(A); free(X1); free(Xref);
+    }
+    /* lower, unit diag, transposed solve, single vector via trsv */
+    {
+        const size_t n = 24;
+        double* A = (double*)malloc(n * n * sizeof(double));
+        double* x1 = (double*)malloc(n * sizeof(double));
+        double* xref = (double*)malloc(n * sizeof(double));
+        fill_rand(A, n * n, 0x088);
+        for (size_t i = 0; i < n; ++i) {
+            for (size_t j = i + 1; j < n; ++j) A[i * n + j] = 0.0; /* zero upper */
+            A[i * n + i] = 1.0;                                     /* unit */
+        }
+        fill_rand(x1, n, 0x099);
+        memcpy(xref, x1, n * sizeof(double));
+        /* solve A^T x = x (alpha = 1) */
+        ASSERT_INT_EQ(0, rcre_linalg_trsv_f64(0, 1, 0, 1.0, A, n, x1, n));
+        /* reference: A lower => A^T upper => BACKWARD substitution:
+         * x[m] = x[m] - sum_{k>m} A[k,m] x[k]  (unit diag, alpha = 1) */
+        for (size_t mi = 0; mi < n; ++mi) {
+            const size_t m = n - 1 - mi;
+            double s = xref[m];
+            for (size_t k = m + 1; k < n; ++k) s -= A[k * n + m] * xref[k];
+            xref[m] = s;
+        }
+        ASSERT_TRUE(max_abs_diff(x1, xref, n) < 1e-14);
+        free(A); free(x1); free(xref);
+    }
+    /* zero diagonal is detected */
+    {
+        double A[9] = { 1, 2, 3, 0, 0, 0, 0, 0, 0 }; /* upper, A[1,1] = 0 */
+        double x[3] = { 1, 1, 1 };
+        ASSERT_INT_EQ(-1, rcre_linalg_trsv_f64(1, 0, 1, 1.0, A, 3, x, 3));
+    }
+    /* verify the solve: A * (solved x) == alpha * original x */
+    {
+        const size_t n = 16;
+        double* A = (double*)malloc(n * n * sizeof(double));
+        double* x0 = (double*)malloc(n * sizeof(double));
+        double* x = (double*)malloc(n * sizeof(double));
+        double* y = (double*)malloc(n * sizeof(double));
+        fill_rand(A, n * n, 0x0AA);
+        for (size_t i = 0; i < n; ++i) {
+            for (size_t j = 0; j < i; ++j) A[i * n + j] = 0.0;
+            A[i * n + i] += 3.0;
+        }
+        fill_rand(x0, n, 0x0BB);
+        memcpy(x, x0, n * sizeof(double));
+        const double alpha = 2.5;
+        ASSERT_INT_EQ(0, rcre_linalg_trsv_f64(1, 0, 1, alpha, A, n, x, n));
+        /* y = A*x (via the HAL gemv) */
+        rcre_linalg_gemv_f64(n, n, 1.0, A, n, x, 0.0, y);
+        double m = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            double d = fabs(y[i] - alpha * x0[i]);
+            if (d > m) m = d;
+        }
+        ASSERT_TRUE(m < 1e-13);
+        free(A); free(x0); free(x); free(y);
+    }
+}
+
 int main(void) {
-    test_suite_begin("RCRE HPC Numerical Layer (H0, 2.1.0)");
+    test_suite_begin("RCRE HPC Numerical Layer (H0/H2, 2.1.0/2.2.0)");
     TEST_RUN(test_f64_dispatch_available);
     TEST_RUN(test_f64_dot_axpy_scale_sum);
     TEST_RUN(test_f64_gemv);
@@ -336,5 +525,7 @@ int main(void) {
     TEST_RUN(test_sf_lgamma);
     TEST_RUN(test_sf_digamma);
     TEST_RUN(test_sf_logsumexp_expit_norm);
+    TEST_RUN(test_gemm_blocked_vs_reference);
+    TEST_RUN(test_trsm_triangular);
     return test_suite_report();
 }

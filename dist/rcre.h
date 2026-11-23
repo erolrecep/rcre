@@ -1371,6 +1371,21 @@ void rcre_linalg_gemm_f32(size_t M, size_t N, size_t K, float alpha,
 void rcre_linalg_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                           const double* A, size_t lda, const double* B, size_t ldb,
                           double beta, double* C, size_t ldc);
+/**
+ * @brief BLIS-style blocked GEMM, f64 (H2, 2.2.0).
+ *
+ * C = alpha*A*B + beta*C, all row-major. One-sided (A-panel) blocking:
+ * the loop order is (i-block, kk-block, j-block) so the A micropanel
+ * A(i0:i0+BM, kk0:kk0+BK) stays hot while sweeping j; B and C blocks
+ * are BM×BN tiles. The micro-panel calls go through the HAL gemm_f64
+ * (ISA-dispatched), so the blocked structure composes with the vector
+ * kernels. Deterministic (fixed loop order) — but the K accumulation
+ * order differs from the unblocked rcre_linalg_gemm_f64, so results
+ * may differ in a few ulps: both are in the float determinism class.
+ */
+void rcre_linalg_gemm_blocked_f64(size_t M, size_t N, size_t K, double alpha,
+                                  const double* A, size_t lda, const double* B, size_t ldb,
+                                  double beta, double* C, size_t ldc);
 /** y = alpha*A*x + beta*y, f32 (A is MxN row-major). */
 void rcre_linalg_gemv_f32(size_t M, size_t N, float alpha,
                           const float* A, size_t lda, const float* x,
@@ -1395,6 +1410,34 @@ double rcre_linalg_dot_f64(const double* x, const double* y, size_t n);
 float  rcre_linalg_sum_f32(const float* x, size_t n);
 /** sum(x), f64. */
 double rcre_linalg_sum_f64(const double* x, size_t n);
+
+/**
+ * @brief Triangular solve, f64 (H2, 2.2.0). Solve A*X = alpha*X in
+ * place. A is n×n row-major triangular; uplo selects the triangle,
+ * trans solves with A^T, diag may be unit (skips the division). X is
+ * n×nrhs ROW-MAJOR (ldx = row stride; the RCRE convention — note
+ * BLAS trsm is column-major). The H3 LU/QR machinery builds on this
+ * primitive. Returns 0 on success, -1 on a zero diagonal (non-invertible).
+ */
+int rcre_linalg_trsm_f64(int uplo, int trans, int diag, double alpha,
+                         const double* A, size_t lda,
+                         double* X, size_t ldx, size_t n, size_t nrhs);
+/** Single-vector triangular solve: A*x = alpha*x in place. */
+int rcre_linalg_trsv_f64(int uplo, int trans, int diag, double alpha,
+                         const double* A, size_t lda, double* x, size_t n);
+
+/**
+ * @brief General-size 1-D FFT, F64 (H2, 2.2.0).
+ *
+ * Any n >= 1: mixed-radix Cooley-Tukey for n with a small prime
+ * factor (2,3,5,7), Bluestein chirp-z otherwise (primes, products of
+ * large primes). Convention: forward X_k = sum_j x_j exp(-2*pi*i*j*k/n);
+ * invert uses + and divides by n (numpy convention).
+ * in/out may alias (copies are made). 0 on success, -1 on n == 0.
+ */
+RCRE_NODISCARD int rcre_fft_1d_f64(const double* in_re, const double* in_im,
+                                   double* out_re, double* out_im,
+                                   size_t n, int invert);
 
 /* --------------------------- compensated reductions ---------------------- */
 
@@ -5644,7 +5687,10 @@ void rcre_scalar_axpy_f64(size_t n, double alpha, const double* x, double* y) {
 #define RCRE_SCAL_GEMM_NB 128
 #define RCRE_SCAL_GEMM_KB 128
 
-static void scalar_gemm_microkernel_8x8(size_t K,
+/* alpha scales the A load (F32-driver convention): the product
+ * accumulated is alpha*A*B while the C part loaded into the
+ * accumulator keeps its beta*C0 value untouched. */
+static void scalar_gemm_microkernel_8x8(size_t K, double alpha,
                                         const double* A, size_t lda,
                                         const double* B, size_t ldb,
                                         double* C, size_t ldc) {
@@ -5652,7 +5698,7 @@ static void scalar_gemm_microkernel_8x8(size_t K,
     for (size_t k = 0; k < K; ++k) {
         for (size_t j = 0; j < 8; ++j) {
             const double bk = B[k * ldb + j];
-            for (size_t i = 0; i < 8; ++i) c[i][j] += A[i * lda + k] * bk;
+            for (size_t i = 0; i < 8; ++i) c[i][j] += (A[i * lda + k] * alpha) * bk;
         }
     }
     for (size_t i = 0; i < 8; ++i)
@@ -5680,7 +5726,7 @@ void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                 for (; i + 7 < i_end; i += 8) {
                     size_t j = jj;
                     for (; j + 7 < j_end; j += 8)
-                        scalar_gemm_microkernel_8x8(k_end - kk,
+                        scalar_gemm_microkernel_8x8(k_end - kk, alpha,
                                                     &A[i * lda + kk], lda,
                                                     &B[kk * ldb + j], ldb,
                                                     &C[i * ldc + j], ldc);
@@ -5688,7 +5734,7 @@ void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         for (size_t r = 0; r < 8; ++r) {
                             double acc = 0.0;
                             for (size_t k = kk; k < k_end; ++k)
-                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                                acc += (A[(i + r) * lda + k] * alpha) * B[k * ldb + j];
                             C[(i + r) * ldc + j] += acc;
                         }
                     }
@@ -5697,17 +5743,12 @@ void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                     for (size_t j = jj; j < j_end; ++j) {
                         double acc = 0.0;
                         for (size_t k = kk; k < k_end; ++k)
-                            acc += A[i * lda + k] * B[k * ldb + j];
+                            acc += (A[i * lda + k] * alpha) * B[k * ldb + j];
                         C[i * ldc + j] += acc;
                     }
                 }
             }
         }
-    }
-    if (alpha != 1.0) {
-        for (size_t i = 0; i < M; ++i)
-            for (size_t j = 0; j < N; ++j)
-                C[i * ldc + j] *= alpha;
     }
 }
 
@@ -6177,7 +6218,9 @@ void rcre_neon_gemm_i8(size_t M, size_t N, size_t K,
  * baseline; cross-ISA parity is tolerance-gated (docs/hpc.md).
  * ========================================================================= */
 
-static void neon_gemm64_microkernel_4x2(size_t K,
+/* alpha scales the A load (F32-driver convention); the C part in the
+ * accumulator keeps its beta*C0 value untouched. */
+static void neon_gemm64_microkernel_4x2(size_t K, double alpha,
                                         const double* A, size_t lda,
                                         const double* B, size_t ldb,
                                         double* C, size_t ldc) {
@@ -6186,7 +6229,7 @@ static void neon_gemm64_microkernel_4x2(size_t K,
     for (size_t k = 0; k < K; ++k) {
         float64x2_t b = vld1q_f64(&B[k * ldb]);      /* B[k, 0..1] */
         for (size_t i = 0; i < 4; ++i)
-            acc[i] = vfmaq_n_f64(acc[i], b, A[i * lda + k]);
+            acc[i] = vfmaq_n_f64(acc[i], b, A[i * lda + k] * alpha);
     }
     for (size_t i = 0; i < 4; ++i) vst1q_f64(&C[i * ldc], acc[i]);
 }
@@ -6212,7 +6255,7 @@ void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                 for (; i + 3 < i_end; i += 4) {
                     size_t j = jj;
                     for (; j + 1 < j_end; j += 2)
-                        neon_gemm64_microkernel_4x2(k_end - kk,
+                        neon_gemm64_microkernel_4x2(k_end - kk, alpha,
                                                     &A[i * lda + kk], lda,
                                                     &B[kk * ldb + j], ldb,
                                                     &C[i * ldc + j], ldc);
@@ -6220,7 +6263,7 @@ void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         for (size_t r = 0; r < 4; ++r) {
                             double acc = 0.0;
                             for (size_t k = kk; k < k_end; ++k)
-                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                                acc += (A[(i + r) * lda + k] * alpha) * B[k * ldb + j];
                             C[(i + r) * ldc + j] += acc;
                         }
                 }
@@ -6228,16 +6271,12 @@ void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                     for (size_t j = jj; j < j_end; ++j) {
                         double acc = 0.0;
                         for (size_t k = kk; k < k_end; ++k)
-                            acc += A[i * lda + k] * B[k * ldb + j];
+                            acc += (A[i * lda + k] * alpha) * B[k * ldb + j];
                         C[i * ldc + j] += acc;
                     }
             }
         }
     }
-    if (alpha != 1.0)
-        for (size_t i = 0; i < M; ++i)
-            for (size_t j = 0; j < N; ++j)
-                C[i * ldc + j] *= alpha;
 }
 
 double rcre_neon_dot_f64(const double* x, const double* y, size_t n) {
@@ -6732,7 +6771,7 @@ void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
  * same k-outer order as the scalar baseline; gated at ISA-parity tolerance.
  * ========================================================================= */
 
-static void avx2_gemm64_microkernel_4x4(size_t K,
+static void avx2_gemm64_microkernel_4x4(size_t K, double alpha,
                                         const double* A, size_t lda,
                                         const double* B, size_t ldb,
                                         double* C, size_t ldc) {
@@ -6744,7 +6783,7 @@ static void avx2_gemm64_microkernel_4x4(size_t K,
         __m256d b2 = _mm256_load_pd(&B[k * ldb + 2]);
         __m256d b3 = _mm256_load_pd(&B[k * ldb + 3]);
         for (size_t i = 0; i < 4; ++i) {
-            const double a = A[i * lda + k];
+            const double a = A[i * lda + k] * alpha;
             acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b0, acc[i]);
             acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b1, acc[i]);
             acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b2, acc[i]);
@@ -6775,7 +6814,7 @@ void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                 for (; i + 3 < i_end; i += 4) {
                     size_t j = jj;
                     for (; j + 3 < j_end; j += 4)
-                        avx2_gemm64_microkernel_4x4(k_end - kk,
+                        avx2_gemm64_microkernel_4x4(k_end - kk, alpha,
                                                     &A[i * lda + kk], lda,
                                                     &B[kk * ldb + j], ldb,
                                                     &C[i * ldc + j], ldc);
@@ -6783,7 +6822,7 @@ void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         for (size_t r = 0; r < 4; ++r) {
                             double acc = 0.0;
                             for (size_t k = kk; k < k_end; ++k)
-                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                                acc += (A[(i + r) * lda + k] * alpha) * B[k * ldb + j];
                             C[(i + r) * ldc + j] += acc;
                         }
                 }
@@ -6791,16 +6830,12 @@ void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                     for (size_t j = jj; j < j_end; ++j) {
                         double acc = 0.0;
                         for (size_t k = kk; k < k_end; ++k)
-                            acc += A[i * lda + k] * B[k * ldb + j];
+                            acc += (A[i * lda + k] * alpha) * B[k * ldb + j];
                         C[i * ldc + j] += acc;
                     }
             }
         }
     }
-    if (alpha != 1.0)
-        for (size_t i = 0; i < M; ++i)
-            for (size_t j = 0; j < N; ++j)
-                C[i * ldc + j] *= alpha;
 }
 
 double rcre_avx2_dot_f64(const double* x, const double* y, size_t n) {
@@ -7039,7 +7074,7 @@ void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
   #if RCRE_NEED_POP_AVX512 == 2
 /* 8x8 micro-kernel: eight row accumulators (__m512d = 8 doubles each);
  * each k-step broadcasts A[i,k] against the 8-wide B columns. */
-static void avx512_gemm64_microkernel_8x8(size_t K,
+static void avx512_gemm64_microkernel_8x8(size_t K, double alpha,
                               const double* A, size_t lda,
                               const double* B, size_t ldb,
                               double* C, size_t ldc) {
@@ -7055,7 +7090,7 @@ static void avx512_gemm64_microkernel_8x8(size_t K,
         __m512d b6 = _mm512_load_pd(&B[k * ldb + 6]);
         __m512d b7 = _mm512_load_pd(&B[k * ldb + 7]);
         for (size_t i = 0; i < 8; ++i) {
-            __m512d a = _mm512_set1_pd(A[i * lda + k]);
+            __m512d a = _mm512_set1_pd(A[i * lda + k] * alpha);
             acc[i] = _mm512_fmadd_pd(a, b0, acc[i]);
             acc[i] = _mm512_fmadd_pd(a, b1, acc[i]);
             acc[i] = _mm512_fmadd_pd(a, b2, acc[i]);
@@ -7090,7 +7125,7 @@ void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                 for (; i + 7 < i_end; i += 8) {
                     size_t j = jj;
                     for (; j + 7 < j_end; j += 8)
-                        avx512_gemm64_microkernel_8x8(k_end - kk,
+                        avx512_gemm64_microkernel_8x8(k_end - kk, alpha,
                                                       &A[i * lda + kk], lda,
                                                       &B[kk * ldb + j], ldb,
                                                       &C[i * ldc + j], ldc);
@@ -7112,10 +7147,6 @@ void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
             }
         }
     }
-    if (alpha != 1.0)
-        for (size_t i = 0; i < M; ++i)
-            for (size_t j = 0; j < N; ++j)
-                C[i * ldc + j] *= alpha;
 }
 
 double rcre_avx512_dot_f64(const double* x, const double* y, size_t n) {
@@ -8974,6 +9005,131 @@ double rcre_linalg_sum_f64(const double* x, size_t n) {
     return rcre_hal.sum_f64(x, n);
 }
 
+/* ========================================================================= */
+/* H2 (2.2.0) — Blocked GEMM + triangular solves                             */
+/* ========================================================================= */
+
+/*
+ * One-sided (A-panel) blocked GEMM.
+ *
+ * Loop order (i, kk, j): for each A row-block and K-slab, sweep the
+ * whole N range so that A(i0:i0+BM, kk0:kk0+BK) — BM*BK doubles — is
+ * the resident micropanel while B/C tiles stream through. For BM =
+ * BN = BK = 64 that panel is 32 KB: L1-resident on every modern core,
+ * which is the entire point of BLIS's micro-kernel structure. The
+ * micro-panel calls dispatch through rcre_hal.gemm_f64, so the vector
+ * ISA still does the inner work.
+ *
+ * Determinism: fixed loop order — reproducible. The K accumulation
+ * order differs from the unblocked path, so ulps may differ (float
+ * determinism class, docs/hpc.md §2.2).
+ */
+void rcre_linalg_gemm_blocked_f64(size_t M, size_t N, size_t K, double alpha,
+                                  const double* A, size_t lda, const double* B, size_t ldb,
+                                  double beta, double* C, size_t ldc) {
+    if (M == 0 || N == 0) return;
+    /* K == 0: C = beta*C only */
+    if (K == 0) {
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] *= beta;
+        return;
+    }
+    const size_t BM = 64, BN = 64, BK = 64;
+
+    for (size_t i0 = 0; i0 < M; i0 += BM) {
+        const size_t im = (i0 + BM < M) ? BM : M - i0;
+        for (size_t k0 = 0; k0 < K; k0 += BK) {
+            const size_t kk = (k0 + BK < K) ? BK : K - k0;
+            const double* a_panel = A + i0 * lda + k0;
+            /* alpha multiplies every panel (alpha*sum_k A_k B_k);
+             * beta applies only to the first panel (preserves beta*C0). */
+            const double panel_beta = (k0 == 0) ? beta : 1.0;
+            for (size_t j0 = 0; j0 < N; j0 += BN) {
+                const size_t jm = (j0 + BN < N) ? BN : N - j0;
+                /* C(i0:i0+im, j0:j0+jm) += A_panel @ B(k0:k0+kk, j0:j0+jm) */
+                rcre_hal.gemm_f64(im, jm, kk, alpha,
+                                  a_panel, lda,
+                                  B + k0 * ldb + j0, ldb,
+                                  panel_beta,
+                                  C + i0 * ldc + j0, ldc);
+            }
+        }
+    }
+}
+
+/*
+ * Triangular solve (H2). Row-major conventions:
+ *   A row-major n x n, A(m, k) = A[m*lda + k].
+ *   X row-major n x nrhs, X(m, r) = X[m*ldx + r].
+ * Solves A*X = alpha*X (or A^T*X = alpha*X when trans).
+ *
+ * uplo: 0 = lower, 1 = upper. diag: 0 = unit, 1 = general.
+ *
+ * Lower, non-trans, general diag — forward substitution:
+ *   for m: x[m] = alpha*(x[m] - sum_{k<m} A[m,k] x[k]) / A[m,m]
+ * Upper, non-trans — backward substitution:
+ *   for m from n-1: x[m] = alpha*(x[m] - sum_{k>m} A[m,k] x[k]) / A[m,m]
+ * Transposed variants solve with A^T (swap the loop range; the sum
+ * runs over the same stored triangle: (A^T x)[m] = sum_k A[k,m] x[k]).
+ *
+ * The inner products are plain sequential F64 (deterministic, fixed
+ * order). No pivoting: a triangular matrix's only singularity is a
+ * zero diagonal, which is detected and reported (-1).
+ */
+int rcre_linalg_trsm_f64(int uplo, int trans, int diag, double alpha,
+                         const double* A, size_t lda,
+                         double* X, size_t ldx, size_t n, size_t nrhs) {
+    /* ROW-MAJOR X (RCRE convention): column r is X[m*ldx + r], m = 0..n-1.
+     * (BLAS trsm is column-major; the ldx here is the row stride.) */
+    for (size_t r = 0; r < nrhs; ++r) {
+        const int lower = (uplo == 0);
+        const int forward = lower != trans; /* lower or upper-trans => forward */
+        if (forward) {
+            for (size_t m = 0; m < n; ++m) {
+                /* x[m] = (alpha*X0[m] - sum_{k<m} A[m,k] x[k]) / A[m,m]
+                 * — alpha scales the RHS ONLY, never the substitution */
+                double s = 0.0;
+                const double* a_row = A + m * lda;
+                if (lower) {
+                    for (size_t k = 0; k < m; ++k) s -= a_row[k] * X[k * ldx + r];
+                } else {
+                    /* upper triangle, solving with A^T: (A^T x)[m] uses
+                     * A[k,m] for k < m — the stored column m, rows < m */
+                    for (size_t k = 0; k < m; ++k) s -= A[k * lda + m] * X[k * ldx + r];
+                }
+                const double d = diag ? (lower ? a_row[m] : A[m * lda + m]) : 1.0;
+                if (d == 0.0) return -1;
+                X[m * ldx + r] = (alpha * X[m * ldx + r] + s) / d;
+            }
+        } else {
+            for (size_t mi = 0; mi < n; ++mi) {
+                const size_t m = n - 1 - mi;
+                /* x[m] = (alpha*X0[m] - sum_{k>m} A[m,k] x[k]) / A[m,m] */
+                double s = 0.0;
+                if (!lower) {
+                    const double* a_row = A + m * lda;
+                    for (size_t k = m + 1; k < n; ++k) s -= a_row[k] * X[k * ldx + r];
+                } else {
+                    /* lower triangle, solving with A^T: (A^T x)[m] uses
+                     * A[k,m] for k > m — stored column m, rows > m */
+                    for (size_t k = m + 1; k < n; ++k) s -= A[k * lda + m] * X[k * ldx + r];
+                }
+                const double d = diag ? (lower ? A[m * lda + m]
+                                               : (A + m * lda)[m]) : 1.0;
+                if (d == 0.0) return -1;
+                X[m * ldx + r] = (alpha * X[m * ldx + r] + s) / d;
+            }
+        }
+    }
+    return 0;
+}
+
+int rcre_linalg_trsv_f64(int uplo, int trans, int diag, double alpha,
+                         const double* A, size_t lda, double* x, size_t n) {
+    return rcre_linalg_trsm_f64(uplo, trans, diag, alpha, A, lda, x, 1, n, 1);
+}
+
 /* --- Source: reduce.c --- */
 /**
  * @file reduce.c
@@ -9568,6 +9724,201 @@ void rcre_qrng_halton_init(RCRE_QRNG* q, int k) {
 void rcre_qrng_halton_point(RCRE_QRNG* q, double* out) {
     rcre_qrng_halton_at(q->n, q->d, out);
     q->n++;
+}
+
+/* --- Source: fft.c --- */
+/**
+ * @file fft.c
+ * @brief General-size F64 FFT (H2, 2.2.0)
+ *
+ * Scientific FFT substrate for HPC numerical code. Contract:
+ *
+ *  - **Any length n >= 1.** n with a small prime factor (2,3,5,7)
+ *    recurses via the generalized even/odd (radix-p) Cooley-Tukey split;
+ *    n with no small factor (primes, 11*13, ...) runs **Bluestein's
+ *    chirp-z** reduction to a power-of-two FFT of length N' >= 2n-1.
+ *  - F64 throughout (the HPC substrate; the cv layer keeps its F32
+ *    power-of-two path for image work).
+ *  - Deterministic: fixed recursion, twiddles recomputed per call
+ *    (correctness-first; table caching is a bar-gated optimization).
+ *  - Convention: forward X_k = sum_j x_j * exp(-2*pi*i*j*k/n);
+ *    invert uses + and divides by n (numpy convention).
+ *
+ * Radix-p split (the textbook even/odd split generalized to residue
+ * classes — trivially correct by construction, no layout games):
+ *
+ *   X_k = sum_d W_n^{d k} * F_d(k mod q),  j = d + p*t, d < p
+ *   F_d = the q-point DFT of { a[d + p*t] : t = 0..q-1 }
+ *
+ * (Proof: W_n^{(d+p t) k} = W_n^{d k} * W_n^{p t k} = W_n^{d k} *
+ *  W_q^{t k}, and summing t with kernel W_q^{t k} is exactly F_d
+ *  evaluated at k mod q.) Cost: p FFTs of length q + O(n p) assembly —
+ *  T(n) = p T(n/p) + O(n p) = O(n log n).
+ *
+ * Bluestein (prime / large-prime-factor n):
+ *
+ *   c_j = W_n^{j^2/2} = exp(+/- i * pi * j^2 / n)   (sign per direction)
+ *   a'_j = a_j c_j (zero-padded to N'),  b'_j = c_j mirrored, zero-padded
+ *   X = IFFT( FFT(a') * FFT(b') ) elementwise, then X_k *= c_k
+ *
+ * with N' the smallest power of two >= 2n - 1 (so the circular
+ * convolution is the linear one). Verified against the direct O(n^2)
+ * DFT for dozens of sizes in tests/test_fft_f64.c.
+ */
+
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* W_n^{m} for the current direction: exp(sign * i * 2 pi m / n).
+ * EXACT modular reduction first: m mod n is an integer, so the angle
+ * is < 2*pi and the cos/sin argument-reduction error is ~1e-16 —
+ * not O(m * 1e-16) as a raw angle would give (this mattered: the
+ * Bluestein chirp at n ~ 1e6 lost ~3e-10 rad/twiddle without it,
+ * measured 4.9e-7 round-trip vs 1.5e-12 with). */
+static void fft_w(double* w_re, double* w_im, size_t m, size_t n, int invert) {
+    const size_t r = m % n;
+    const double ang = (invert ? 1.0 : -1.0) * 2.0 * M_PI * (double)r / (double)n;
+    *w_re = cos(ang);
+    *w_im = sin(ang);
+}
+
+/* Chirp exp(sign * i * pi * j^2 / n) with exact integer modular phase:
+ * pi*j^2/n = 2*pi*(j^2 mod 2n)/(2n). j^2 is taken in 128 bits so the
+ * reduction is exact for j up to ~4e9 (far beyond the H2 test range). */
+static void fft_chirp(double* cr, double* ci, size_t j, size_t n, int invert) {
+    const unsigned __int128 j2 = (unsigned __int128)j * j;
+    const size_t r = (size_t)(j2 % (unsigned __int128)(2 * n));
+    const double ang = (invert ? 1.0 : -1.0) * 2.0 * M_PI * (double)r / (2.0 * (double)n);
+    *cr = cos(ang);
+    *ci = sin(ang);
+}
+
+/* Forward declaration: the Bluestein path is defined below (it recurses
+ * back into fft_rec on the power-of-two length). */
+static void fft_bluestein(double* re, double* im, size_t n, int invert);
+
+static void fft_rec(double* re, double* im, size_t n, int invert) {
+    if (n == 1) return;
+
+    size_t p = 0;
+    for (size_t cand = 2; cand <= 7; ++cand) {
+        if (n % cand == 0) { p = cand; break; }
+    }
+    if (p == 0) { fft_bluestein(re, im, n, invert); return; }
+
+    const size_t q = n / p;
+
+    /* 1. for each residue d: q-point FFT of { re[d + p*t], im[d + p*t] } */
+    double* f_re = (double*)malloc(n * sizeof(double)); /* f_re[d*q + m] */
+    double* f_im = (double*)malloc(n * sizeof(double));
+    double* buf_r = (double*)malloc(q * sizeof(double));
+    double* buf_i = (double*)malloc(q * sizeof(double));
+    for (size_t d = 0; d < p; ++d) {
+        for (size_t t = 0; t < q; ++t) {
+            buf_r[t] = re[d + p * t];
+            buf_i[t] = im[d + p * t];
+        }
+        fft_rec(buf_r, buf_i, q, invert);
+        for (size_t m = 0; m < q; ++m) {
+            f_re[d * q + m] = buf_r[m];
+            f_im[d * q + m] = buf_i[m];
+        }
+    }
+
+    /* 2. X_k = sum_d W_n^{d k} F_d(k mod q) */
+    for (size_t k = 0; k < n; ++k) {
+        double sr = 0.0, si = 0.0;
+        const size_t m = k % q;
+        for (size_t d = 0; d < p; ++d) {
+            double wr, wi;
+            fft_w(&wr, &wi, d * k, n, invert);
+            sr += wr * f_re[d * q + m] - wi * f_im[d * q + m];
+            si += wr * f_im[d * q + m] + wi * f_re[d * q + m];
+        }
+        re[k] = sr;
+        im[k] = si;
+    }
+    free(f_re); free(f_im); free(buf_r); free(buf_i);
+}
+
+
+/* ---- Bluestein chirp-z (n with no small prime factor) ------------------- */
+
+static void fft_bluestein(double* re, double* im, size_t n, int invert) {
+    /* N' = smallest power of two >= 2n - 1 */
+    size_t N = 1;
+    while (N < 2 * n - 1) N <<= 1;
+
+    double* are = (double*)calloc(N, sizeof(double));
+    double* aim = (double*)calloc(N, sizeof(double));
+    double* bre = (double*)calloc(N, sizeof(double));
+    double* bim = (double*)calloc(N, sizeof(double));
+
+    /* a' side chirp c_j and b' side conjugate chirp — exact modular
+     * phase (see fft_chirp). The Bluestein identity x_m = W^{m^2/2}
+     * sum_l a'_l c'_{m-l} requires c' = conjugate(c). */
+    for (size_t j = 0; j < n; ++j) {
+        double cr, ci;
+        fft_chirp(&cr, &ci, j, n, invert);
+        are[j] = re[j] * cr - im[j] * ci;
+        aim[j] = re[j] * ci + im[j] * cr;
+        /* conjugate chirp: negate the imaginary part */
+        bre[j] = cr;
+        bim[j] = -ci;
+    }
+    for (size_t j = 1; j < n; ++j) {          /* mirrored chirp (b' is even) */
+        bre[N - j] = bre[j];
+        bim[N - j] = bim[j];
+    }
+
+    /* elementwise product in the frequency domain.
+     * First two transforms in the requested direction, the third the
+     * OPPOSITE (the convolution identity: conv = IFFT(FFT . FFT) for
+     * forward, or the conjugate symmetry for inverse). */
+    fft_rec(are, aim, N, invert);
+    fft_rec(bre, bim, N, invert);
+    for (size_t k = 0; k < N; ++k) {
+        const double pr = are[k] * bre[k] - aim[k] * bim[k];
+        const double pi = are[k] * bim[k] + aim[k] * bre[k];
+        are[k] = pr; aim[k] = pi;
+    }
+    fft_rec(are, aim, N, !invert);
+
+    /* apply the final chirp and the 1/N' convolution scale */
+    for (size_t j = 0; j < n; ++j) {
+        double cr, ci;
+        fft_chirp(&cr, &ci, j, n, invert);
+        const double yr = are[j] / (double)N, yi = aim[j] / (double)N;
+        re[j] = yr * cr - yi * ci;
+        im[j] = yr * ci + yi * cr;
+    }
+    free(are); free(aim); free(bre); free(bim);
+}
+
+/* ---- radix-p Cooley-Tukey (p in {2,3,5,7}) ------------------------------ */
+
+/* ---- public entry ------------------------------------------------------- */
+
+RCRE_NODISCARD int rcre_fft_1d_f64(const double* in_re, const double* in_im,
+                                   double* out_re, double* out_im,
+                                   size_t n, int invert) {
+    if (n == 0) return -1;
+    double* re = (double*)malloc(n * sizeof(double));
+    double* im = (double*)malloc(n * sizeof(double));
+    memcpy(re, in_re, n * sizeof(double));
+    memcpy(im, in_im, n * sizeof(double));
+    fft_rec(re, im, n, invert);
+    if (invert) {
+        const double s = 1.0 / (double)n;
+        for (size_t i = 0; i < n; ++i) { re[i] *= s; im[i] *= s; }
+    }
+    memcpy(out_re, re, n * sizeof(double));
+    memcpy(out_im, im, n * sizeof(double));
+    free(re);
+    free(im);
+    return 0;
 }
 
 /* --- Source: adapt.c --- */

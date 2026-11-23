@@ -33,6 +33,7 @@ C_FILES = [
     SRC_DIR / "core" / "reduce.c",
     SRC_DIR / "core" / "sf.c",
     SRC_DIR / "core" / "rng.c",
+    SRC_DIR / "core" / "fft.c",
     SRC_DIR / "core" / "adapt.c",
     SRC_DIR / "core" / "threadpool.c",
     SRC_DIR / "core" / "prof.c",
@@ -88,11 +89,36 @@ def clean_file_content(content: str) -> str:
     return "\n".join(lines)
 
 def verify_symbol_uniqueness(c_files):
-    """Ensures no un-namespaced colliding static function symbols exist."""
+    """Ensures no un-namespaced colliding static function symbols exist.
+
+    Declaration lines (signature ending in ';' before the body) are
+    skipped — only definitions (signature followed by '{') count, so a
+    forward declaration + its definition does not flag as a duplicate."""
     seen_funcs = {}
     for c_file in c_files:
         text = c_file.read_text(encoding="utf-8")
         for m in re.finditer(r"^(?:static\s+(?:inline\s+)?[\w\s\*]+?)\s+([a-zA-Z0-9_]+)\s*\(", text, re.MULTILINE):
+            rest = text[m.end():]
+            # find the end of the parameter list: the first ';' or '{' after
+            # the balanced parens
+            depth = 1
+            semi_before_brace = False
+            for ch in rest:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                    if depth == 0:
+                        tail = rest[rest.index(')') + 1:] if ')' in rest else ''
+                        for tch in tail.lstrip():
+                            if tch == ';':
+                                semi_before_brace = True
+                            break
+                        break
+                elif ch == '{' and depth == 0:
+                    break
+            if semi_before_brace:
+                continue  # forward declaration, not a definition
             name = m.group(1)
             seen_funcs.setdefault(name, []).append(c_file.name)
     duplicates = {k: v for k, v in seen_funcs.items() if len(v) > 1}

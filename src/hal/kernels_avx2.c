@@ -437,7 +437,7 @@ void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
  * same k-outer order as the scalar baseline; gated at ISA-parity tolerance.
  * ========================================================================= */
 
-static void avx2_gemm64_microkernel_4x4(size_t K,
+static void avx2_gemm64_microkernel_4x4(size_t K, double alpha,
                                         const double* A, size_t lda,
                                         const double* B, size_t ldb,
                                         double* C, size_t ldc) {
@@ -449,7 +449,7 @@ static void avx2_gemm64_microkernel_4x4(size_t K,
         __m256d b2 = _mm256_load_pd(&B[k * ldb + 2]);
         __m256d b3 = _mm256_load_pd(&B[k * ldb + 3]);
         for (size_t i = 0; i < 4; ++i) {
-            const double a = A[i * lda + k];
+            const double a = A[i * lda + k] * alpha;
             acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b0, acc[i]);
             acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b1, acc[i]);
             acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b2, acc[i]);
@@ -480,7 +480,7 @@ void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                 for (; i + 3 < i_end; i += 4) {
                     size_t j = jj;
                     for (; j + 3 < j_end; j += 4)
-                        avx2_gemm64_microkernel_4x4(k_end - kk,
+                        avx2_gemm64_microkernel_4x4(k_end - kk, alpha,
                                                     &A[i * lda + kk], lda,
                                                     &B[kk * ldb + j], ldb,
                                                     &C[i * ldc + j], ldc);
@@ -488,7 +488,7 @@ void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         for (size_t r = 0; r < 4; ++r) {
                             double acc = 0.0;
                             for (size_t k = kk; k < k_end; ++k)
-                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                                acc += (A[(i + r) * lda + k] * alpha) * B[k * ldb + j];
                             C[(i + r) * ldc + j] += acc;
                         }
                 }
@@ -496,16 +496,12 @@ void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                     for (size_t j = jj; j < j_end; ++j) {
                         double acc = 0.0;
                         for (size_t k = kk; k < k_end; ++k)
-                            acc += A[i * lda + k] * B[k * ldb + j];
+                            acc += (A[i * lda + k] * alpha) * B[k * ldb + j];
                         C[i * ldc + j] += acc;
                     }
             }
         }
     }
-    if (alpha != 1.0)
-        for (size_t i = 0; i < M; ++i)
-            for (size_t j = 0; j < N; ++j)
-                C[i * ldc + j] *= alpha;
 }
 
 double rcre_avx2_dot_f64(const double* x, const double* y, size_t n) {

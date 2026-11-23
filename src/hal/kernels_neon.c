@@ -464,7 +464,9 @@ void rcre_neon_gemm_i8(size_t M, size_t N, size_t K,
  * baseline; cross-ISA parity is tolerance-gated (docs/hpc.md).
  * ========================================================================= */
 
-static void neon_gemm64_microkernel_4x2(size_t K,
+/* alpha scales the A load (F32-driver convention); the C part in the
+ * accumulator keeps its beta*C0 value untouched. */
+static void neon_gemm64_microkernel_4x2(size_t K, double alpha,
                                         const double* A, size_t lda,
                                         const double* B, size_t ldb,
                                         double* C, size_t ldc) {
@@ -473,7 +475,7 @@ static void neon_gemm64_microkernel_4x2(size_t K,
     for (size_t k = 0; k < K; ++k) {
         float64x2_t b = vld1q_f64(&B[k * ldb]);      /* B[k, 0..1] */
         for (size_t i = 0; i < 4; ++i)
-            acc[i] = vfmaq_n_f64(acc[i], b, A[i * lda + k]);
+            acc[i] = vfmaq_n_f64(acc[i], b, A[i * lda + k] * alpha);
     }
     for (size_t i = 0; i < 4; ++i) vst1q_f64(&C[i * ldc], acc[i]);
 }
@@ -499,7 +501,7 @@ void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                 for (; i + 3 < i_end; i += 4) {
                     size_t j = jj;
                     for (; j + 1 < j_end; j += 2)
-                        neon_gemm64_microkernel_4x2(k_end - kk,
+                        neon_gemm64_microkernel_4x2(k_end - kk, alpha,
                                                     &A[i * lda + kk], lda,
                                                     &B[kk * ldb + j], ldb,
                                                     &C[i * ldc + j], ldc);
@@ -507,7 +509,7 @@ void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         for (size_t r = 0; r < 4; ++r) {
                             double acc = 0.0;
                             for (size_t k = kk; k < k_end; ++k)
-                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                                acc += (A[(i + r) * lda + k] * alpha) * B[k * ldb + j];
                             C[(i + r) * ldc + j] += acc;
                         }
                 }
@@ -515,16 +517,12 @@ void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                     for (size_t j = jj; j < j_end; ++j) {
                         double acc = 0.0;
                         for (size_t k = kk; k < k_end; ++k)
-                            acc += A[i * lda + k] * B[k * ldb + j];
+                            acc += (A[i * lda + k] * alpha) * B[k * ldb + j];
                         C[i * ldc + j] += acc;
                     }
             }
         }
     }
-    if (alpha != 1.0)
-        for (size_t i = 0; i < M; ++i)
-            for (size_t j = 0; j < N; ++j)
-                C[i * ldc + j] *= alpha;
 }
 
 double rcre_neon_dot_f64(const double* x, const double* y, size_t n) {

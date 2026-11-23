@@ -259,7 +259,10 @@ void rcre_scalar_axpy_f64(size_t n, double alpha, const double* x, double* y) {
 #define RCRE_SCAL_GEMM_NB 128
 #define RCRE_SCAL_GEMM_KB 128
 
-static void scalar_gemm_microkernel_8x8(size_t K,
+/* alpha scales the A load (F32-driver convention): the product
+ * accumulated is alpha*A*B while the C part loaded into the
+ * accumulator keeps its beta*C0 value untouched. */
+static void scalar_gemm_microkernel_8x8(size_t K, double alpha,
                                         const double* A, size_t lda,
                                         const double* B, size_t ldb,
                                         double* C, size_t ldc) {
@@ -267,7 +270,7 @@ static void scalar_gemm_microkernel_8x8(size_t K,
     for (size_t k = 0; k < K; ++k) {
         for (size_t j = 0; j < 8; ++j) {
             const double bk = B[k * ldb + j];
-            for (size_t i = 0; i < 8; ++i) c[i][j] += A[i * lda + k] * bk;
+            for (size_t i = 0; i < 8; ++i) c[i][j] += (A[i * lda + k] * alpha) * bk;
         }
     }
     for (size_t i = 0; i < 8; ++i)
@@ -295,7 +298,7 @@ void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                 for (; i + 7 < i_end; i += 8) {
                     size_t j = jj;
                     for (; j + 7 < j_end; j += 8)
-                        scalar_gemm_microkernel_8x8(k_end - kk,
+                        scalar_gemm_microkernel_8x8(k_end - kk, alpha,
                                                     &A[i * lda + kk], lda,
                                                     &B[kk * ldb + j], ldb,
                                                     &C[i * ldc + j], ldc);
@@ -303,7 +306,7 @@ void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         for (size_t r = 0; r < 8; ++r) {
                             double acc = 0.0;
                             for (size_t k = kk; k < k_end; ++k)
-                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                                acc += (A[(i + r) * lda + k] * alpha) * B[k * ldb + j];
                             C[(i + r) * ldc + j] += acc;
                         }
                     }
@@ -312,16 +315,11 @@ void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                     for (size_t j = jj; j < j_end; ++j) {
                         double acc = 0.0;
                         for (size_t k = kk; k < k_end; ++k)
-                            acc += A[i * lda + k] * B[k * ldb + j];
+                            acc += (A[i * lda + k] * alpha) * B[k * ldb + j];
                         C[i * ldc + j] += acc;
                     }
                 }
             }
         }
-    }
-    if (alpha != 1.0) {
-        for (size_t i = 0; i < M; ++i)
-            for (size_t j = 0; j < N; ++j)
-                C[i * ldc + j] *= alpha;
     }
 }

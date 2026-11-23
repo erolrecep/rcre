@@ -1366,6 +1366,21 @@ void rcre_linalg_gemm_f32(size_t M, size_t N, size_t K, float alpha,
 void rcre_linalg_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                           const double* A, size_t lda, const double* B, size_t ldb,
                           double beta, double* C, size_t ldc);
+/**
+ * @brief BLIS-style blocked GEMM, f64 (H2, 2.2.0).
+ *
+ * C = alpha*A*B + beta*C, all row-major. One-sided (A-panel) blocking:
+ * the loop order is (i-block, kk-block, j-block) so the A micropanel
+ * A(i0:i0+BM, kk0:kk0+BK) stays hot while sweeping j; B and C blocks
+ * are BM×BN tiles. The micro-panel calls go through the HAL gemm_f64
+ * (ISA-dispatched), so the blocked structure composes with the vector
+ * kernels. Deterministic (fixed loop order) — but the K accumulation
+ * order differs from the unblocked rcre_linalg_gemm_f64, so results
+ * may differ in a few ulps: both are in the float determinism class.
+ */
+void rcre_linalg_gemm_blocked_f64(size_t M, size_t N, size_t K, double alpha,
+                                  const double* A, size_t lda, const double* B, size_t ldb,
+                                  double beta, double* C, size_t ldc);
 /** y = alpha*A*x + beta*y, f32 (A is MxN row-major). */
 void rcre_linalg_gemv_f32(size_t M, size_t N, float alpha,
                           const float* A, size_t lda, const float* x,
@@ -1390,6 +1405,34 @@ double rcre_linalg_dot_f64(const double* x, const double* y, size_t n);
 float  rcre_linalg_sum_f32(const float* x, size_t n);
 /** sum(x), f64. */
 double rcre_linalg_sum_f64(const double* x, size_t n);
+
+/**
+ * @brief Triangular solve, f64 (H2, 2.2.0). Solve A*X = alpha*X in
+ * place. A is n×n row-major triangular; uplo selects the triangle,
+ * trans solves with A^T, diag may be unit (skips the division). X is
+ * n×nrhs ROW-MAJOR (ldx = row stride; the RCRE convention — note
+ * BLAS trsm is column-major). The H3 LU/QR machinery builds on this
+ * primitive. Returns 0 on success, -1 on a zero diagonal (non-invertible).
+ */
+int rcre_linalg_trsm_f64(int uplo, int trans, int diag, double alpha,
+                         const double* A, size_t lda,
+                         double* X, size_t ldx, size_t n, size_t nrhs);
+/** Single-vector triangular solve: A*x = alpha*x in place. */
+int rcre_linalg_trsv_f64(int uplo, int trans, int diag, double alpha,
+                         const double* A, size_t lda, double* x, size_t n);
+
+/**
+ * @brief General-size 1-D FFT, F64 (H2, 2.2.0).
+ *
+ * Any n >= 1: mixed-radix Cooley-Tukey for n with a small prime
+ * factor (2,3,5,7), Bluestein chirp-z otherwise (primes, products of
+ * large primes). Convention: forward X_k = sum_j x_j exp(-2*pi*i*j*k/n);
+ * invert uses + and divides by n (numpy convention).
+ * in/out may alias (copies are made). 0 on success, -1 on n == 0.
+ */
+RCRE_NODISCARD int rcre_fft_1d_f64(const double* in_re, const double* in_im,
+                                   double* out_re, double* out_im,
+                                   size_t n, int invert);
 
 /* --------------------------- compensated reductions ---------------------- */
 
