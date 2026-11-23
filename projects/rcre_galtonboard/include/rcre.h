@@ -31,8 +31,8 @@ extern "C" {
 /* Version & Compatibility Macros                                            */
 /* ========================================================================= */
 
-#define RCRE_VERSION_MAJOR 1
-#define RCRE_VERSION_MINOR 1
+#define RCRE_VERSION_MAJOR 2
+#define RCRE_VERSION_MINOR 0
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -44,6 +44,9 @@ extern "C" {
     #define RCRE_NODISCARD
   #endif
 #endif
+
+#define RCRE_ABI_VERSION 0x020000U
+RCRE_NODISCARD uint32_t rcre_abi_version(void);
 
 #ifndef constexpr
   #if !defined(__cpp_constexpr) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L)
@@ -83,9 +86,14 @@ typedef enum {
 /* ========================================================================= */
 
 typedef enum {
-    RCRE_DTYPE_U8  = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
-    RCRE_DTYPE_I32 = 1, /* 32-bit signed integer (class labels, indices)          */
-    RCRE_DTYPE_F32 = 3  /* 32-bit single precision float                           */
+    RCRE_DTYPE_U8   = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
+    RCRE_DTYPE_I32  = 1, /* 32-bit signed integer (class labels, indices)          */
+    RCRE_DTYPE_I64  = 2, /* 64-bit signed integer (token IDs, Arrow/NumPy int64)   */
+    RCRE_DTYPE_F32  = 3, /* 32-bit single precision float                         */
+    RCRE_DTYPE_F16  = 4, /* 16-bit IEEE 754-2008 half precision float             */
+    RCRE_DTYPE_BF16 = 5, /* 16-bit Google Brain bfloat16 format                   */
+    RCRE_DTYPE_I8   = 6, /* 8-bit signed quantized integer                        */
+    RCRE_DTYPE_F64  = 7  /* 64-bit IEEE-754 double precision float                */
 } RCRE_DType;
 
 typedef enum {
@@ -125,6 +133,16 @@ typedef struct RCRE_GraphCtx {
  * @return Pointer to newly initialized RCRE_Arena, or NULL on failure.
  */
 RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity);
+
+/**
+ * @brief Initializes a stack/static RCRE_Arena over caller-supplied memory
+ *        (zero heap allocations; ideal for freestanding/embedded targets).
+ * @param arena Caller-owned RCRE_Arena struct to initialize.
+ * @param backing_buffer Pre-allocated memory buffer (64-byte alignment recommended).
+ * @param capacity Byte capacity of backing_buffer.
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG on NULL/zero capacity.
+ */
+RCRE_NODISCARD int rcre_arena_from_buffer(RCRE_Arena* arena, void* backing_buffer, size_t capacity);
 
 /**
  * @brief Allocates an aligned buffer from the linear scratchpad arena.
@@ -230,18 +248,20 @@ RCRE_NODISCARD char* rcre_sb_to_cstr(RCRE_StrBuilder* sb);
 /* Tensor Abstraction & Zero-Copy Views (TNS-REQ-01 to TNS-REQ-05)           */
 /* ========================================================================= */
 
+#define RCRE_MAX_DIMS 8
+
 typedef struct RCRE_Tensor {
-    void*         data;            /* Pointer to element (0, 0, ...)               */
-    float*        grad;            /* Backprop buffer (training); NULL otherwise   */
-    size_t        shape[4];        /* Dimensions (rank 1 to 4)                     */
-    ptrdiff_t     strides[4];      /* Step in elements per dimension               */
-    size_t        numel;           /* Cached element count (set at construction;   */
-                                   /* shape/strides are immutable afterwards)      */
-    uint8_t       ndim;            /* Rank (1 to 4)                                */
+    void*         data;                 /* Pointer to element (0, 0, ...)               */
+    float*        grad;                 /* Backprop buffer (training); NULL otherwise   */
+    size_t        shape[RCRE_MAX_DIMS]; /* Dimensions (rank 1 to 8)                     */
+    ptrdiff_t     strides[RCRE_MAX_DIMS];/* Step in elements per dimension              */
+    size_t        numel;                /* Cached element count (set at construction;   */
+                                        /* shape/strides are immutable afterwards)      */
+    uint8_t       ndim;                 /* Rank (1 to 8)                                */
     RCRE_DType    dtype;
     RCRE_Layout   layout;
-    bool          is_view;         /* true: data owned elsewhere (slice/permute/…) */
-    const char*   label;           /* Optional name (visualization/debug); NULL ok */
+    bool          is_view;              /* true: data owned elsewhere (slice/permute/…) */
+    const char*   label;                /* Optional name (visualization/debug); NULL ok */
 } RCRE_Tensor;
 
 /**
@@ -311,6 +331,41 @@ RCRE_NODISCARD size_t rcre_tensor_nbytes(const RCRE_Tensor* t);
  * @brief Returns byte size of a given RCRE_DType.
  */
 RCRE_NODISCARD size_t rcre_dtype_size(RCRE_DType dtype);
+
+/**
+ * @brief Computes NumPy-compatible broadcast output shape for two tensors.
+ * @return RCRE_OK if shapes are broadcast-compatible, RCRE_ERR_SHAPE_MISMATCH otherwise.
+ */
+RCRE_NODISCARD int rcre_tensor_broadcast_shape(
+    const size_t* shape_a, uint8_t ndim_a,
+    const size_t* shape_b, uint8_t ndim_b,
+    size_t out_shape[RCRE_MAX_DIMS], uint8_t* out_ndim
+);
+
+/**
+ * @brief Creates a zero-copy strided broadcast view (0-stride along expanded axes).
+ */
+RCRE_NODISCARD RCRE_Tensor rcre_tensor_broadcast_to(
+    const RCRE_Tensor* src,
+    const size_t* target_shape,
+    uint8_t target_ndim
+);
+
+/**
+ * @brief Broadcasted elementwise addition: dst = a + b (F32).
+ */
+RCRE_NODISCARD int rcre_tensor_add_broadcast(
+    const RCRE_Tensor* a, const RCRE_Tensor* b,
+    RCRE_Arena* arena, RCRE_Tensor* dst
+);
+
+/**
+ * @brief Broadcasted elementwise multiplication: dst = a * b (F32).
+ */
+RCRE_NODISCARD int rcre_tensor_mul_broadcast(
+    const RCRE_Tensor* a, const RCRE_Tensor* b,
+    RCRE_Arena* arena, RCRE_Tensor* dst
+);
 
 /* ========================================================================= */
 /* Input Recognition & Adaptation Pipeline (ADP-REQ-01 to ADP-REQ-03)        */
@@ -520,6 +575,28 @@ RCRE_NODISCARD int rcre_cv_match_descriptors(const RCRE_CV_Descriptor* a, int na
                                             const RCRE_CV_Descriptor* b, int nb,
                                             float ratio_thresh, RCRE_CV_Match** out_matches,
                                             int* out_count, RCRE_Arena* arena);
+
+typedef struct RCRE_ORBKeypoint {
+    float    x;
+    float    y;
+    float    angle;   /* Dominant orientation in radians [-pi, pi] */
+    uint32_t score;   /* FAST corner score */
+    uint32_t bits[8]; /* 256-bit rotated BRIEF descriptor */
+} RCRE_ORBKeypoint;
+
+/** Detects FAST-9 corners on a grayscale/RGB F32 or U8 image and computes intensity-centroid orientation. */
+RCRE_NODISCARD int rcre_cv_fast_detect(const RCRE_Tensor* gray_f32, float threshold,
+                                       int max_keypoints, RCRE_ORBKeypoint** out_kps,
+                                       int* out_count, RCRE_Arena* arena);
+
+/** Computes 256-bit rotated BRIEF binary descriptors at detected ORB keypoints. */
+RCRE_NODISCARD int rcre_cv_orb_extract(const RCRE_Tensor* gray_f32, RCRE_ORBKeypoint* kps, int count);
+
+/** Matches two sets of ORB binary descriptors using Hamming distance (popcount) + ratio filter. */
+RCRE_NODISCARD int rcre_cv_orb_match(const RCRE_ORBKeypoint* a, int na,
+                                     const RCRE_ORBKeypoint* b, int nb,
+                                     int max_hamming, RCRE_CV_Match** out_matches,
+                                     int* out_count, RCRE_Arena* arena);
 
 /**
  * @brief Draws crosshair markers on an image for detected keypoints.
@@ -781,6 +858,11 @@ RCRE_NODISCARD int rcre_ml_pegasos_svm_fit(const RCRE_Tensor* X, const RCRE_Tens
 RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tensor* weights, 
                                           RCRE_Tensor* preds);
 
+/** Fits L1+L2 ElasticNet sparse linear model via coordinate descent. */
+RCRE_NODISCARD int rcre_ml_sparse_linear_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
+                                             float l1_reg, float l2_reg, size_t max_iter,
+                                             RCRE_Tensor* weights);
+
 /* ========================================================================= */
 /* Clustering & Dimensionality Reduction (ML-REQ-02)                         */
 /* ========================================================================= */
@@ -819,6 +901,155 @@ RCRE_NODISCARD int rcre_ml_kmeans_fit_ex(const RCRE_Tensor* X, size_t k,
  */
 RCRE_NODISCARD int rcre_ml_kmeans_predict(const RCRE_Tensor* X, const RCRE_Tensor* centroids,
                                           RCRE_Tensor* labels);
+
+/* ========================================================================= */
+/* e-means — mini-batch EMA k-means (ML-REQ-02, sibling of rcre_ml_kmeans_*) */
+/* ========================================================================= */
+
+/**
+ * @brief e-means for RCRE — mini-batch EMA k-means with scaling-law recipes.
+ *
+ * Implements Algorithm 1 of "e-means: outperforming k-means (in one-tenth
+ * the epochs)" (Bessa et al., arXiv 2611.09501, 2026): Euclidean, FP32
+ * model state, CPU, single process. Lloyd k-means remains available as
+ * `rcre_ml_kmeans_fit_ex` — the two are complementary (random-init EMA at a
+ * fixed epoch budget vs k-means++ Lloyd with convergence tolerance).
+ *
+ * Exactness contract (projects/rcre_emeans/docs/exactness.md):
+ *  - pooled runs are bit-identical run-to-run and across pool sizes (the
+ *    slab partition depends only on the batch size);
+ *  - the serial run (single slab) is a separately quality-guaranteed
+ *    configuration: final MSE within 0.5% and >= 99% label agreement vs a
+ *    pooled run at the same seed (F32 partial-sum regrouping feeds back
+ *    chaotically through the EMA system — 1 ULP is NOT the contract);
+ *  - batch sums: FP32, unbuffered, row order; objective and finalization
+ *    sums: FP64 (documented improvement over the reference's FP32);
+ *  - state machine: bit-exact port of the reference's FP32 operation order
+ *    (gated against the Python oracle in projects/rcre_emeans/ref/).
+ */
+
+/** Batch-size law selector. AUTO resolves by dimension: quality for
+ *  d <= 16, throughput above (the reference's "auto" behavior). */
+typedef enum {
+    RCRE_EM_BATCH_AUTO = 0,
+    RCRE_EM_BATCH_THROUGHPUT = 1,
+    RCRE_EM_BATCH_QUALITY = 2,
+} RCRE_EMBatchLaw;
+
+/**
+ * Resolved training plan (the reference's "recipe"). Exposed for
+ * observability: the auto-tuning is a formula, and the user can see what
+ * it produced for their (n, k, T).
+ */
+typedef struct RCRE_EMMeansRecipe {
+    size_t batch_size;       /* resolved statistical batch B            */
+    float  alpha0;           /* resolved peak EMA step (FP32)           */
+    double alpha0_full;      /* peak step, unrounded double (Eq. 5)     */
+    float  nepochs;          /* T as requested (fractional ok)          */
+    size_t epoch_rows[16];   /* rows per epoch (final is always n)      */
+    size_t n_epochs;         /* number of epochs (len of epoch_rows)    */
+    size_t steps_per_pass;   /* ceil(n / B)                             */
+    size_t total_steps;      /* M: total EMA updates over the run       */
+    float  unused_threshold; /* tau (0 = revival off)                   */
+    float  split_epsilon;    /* donor-split perturbation delta (1e-4)   */
+    float  init_usage;       /* N_j at init (2^-16)                     */
+    int    batch_law;        /* resolved law (RCRE_EMBatchLaw or -1 = manual) */
+    uint64_t seed;           /* seed used for shuffle/revival streams   */
+} RCRE_EMMeansRecipe;
+
+typedef struct RCRE_EMMeansParams {
+    float    nepochs;              /* T (default 5); fractional ok, <= 16 */
+    size_t   batch_size;           /* 0 = batch law (default)             */
+    float    alpha0;               /* <= 0 = step law (default); NaN err  */
+    int      batch_law;            /* RCRE_EMBatchLaw (default AUTO)      */
+    float    unused_threshold;     /* < 0 = auto (0.1, off for d <= 2);   */
+                                   /* 0 = revival off; > 0 fixed tau      */
+    bool     shuffle;              /* fresh per-epoch shuffle (default true) */
+    const RCRE_Tensor* init_centroids; /* [k,d] F32 or NULL = random rows */
+    size_t   max_points_per_centroid;  /* 0 = no cap; else train on a     */
+                                       /* random sorted subset of         */
+                                       /* cap*k rows (reference parity)   */
+    uint64_t seed;                 /* 0 = 1234 (reference default)        */
+    bool     capture_labels;       /* fill labels with last-epoch passes  */
+                                   /* (default true)                      */
+} RCRE_EMMeansParams;
+
+/**
+ * @brief Returns the default parameter struct: T = 5, batch and alpha0 from
+ *        the scaling laws, AUTO revival threshold (-1), shuffle on, random
+ *        init, label capture on, reference seed (1234). Override what you
+ *        need. (A zeroed struct means "batch law + step law + revival off";
+ *        use this constructor for the reference-default behavior.)
+ */
+RCRE_EMMeansParams rcre_ml_emeans_params_default(void);
+
+/**
+ * @brief Fills the e-means training plan without running training.
+ * @param X [n,d] F32 input (only n and d are needed; data may be NULL).
+ * @param k Number of clusters.
+ * @param params NULL = all defaults.
+ * @param out Resolved recipe (batch B, alpha0, epoch rows, total steps).
+ * @returns RCRE_OK or RCRE_ERR_INVALID_ARG.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_recipe(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* params,
+                                         RCRE_EMMeansRecipe* out);
+
+/**
+ * @brief Trains e-means on X with all-default parameters (T = nepochs).
+ *        Serial execution; B/alpha0 from the scaling laws.
+ * @param X [n,d] F32.
+ * @param k Number of clusters (1 <= k <= n).
+ * @param nepochs Epoch budget T (fractional supported, > 0, <= 16).
+ * @param centroids Output [k,d] F32 (last-epoch-mean finalization).
+ * @param labels Output [n,1] I32: last-epoch nearest-centroid id, or NULL.
+ *               Rows not visited in the final epoch (fractional T < 1) get -1.
+ * @param arena Scratch arena (permutation, batch stats, labels).
+ * @returns RCRE_OK or an RCRE_ERR_* code.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_fit(const RCRE_Tensor* X, size_t k, float nepochs,
+                                      RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                      RCRE_Arena* arena);
+
+/**
+ * @brief Trains e-means with full control (see RCRE_EMMeansParams).
+ * @param X [n,d] F32 (n >= 1, d >= 1, n < 2^32).
+ * @param k Number of clusters (1 <= k <= n).
+ * @param params NULL = all defaults.
+ * @param centroids Output [k,d] F32.
+ * @param labels Output [n,1] I32 (F32 also accepted), or NULL.
+ * @param out_inertia Optional: moving-pass mean squared distance of the
+ *                    last epoch (FP64 internally; the exact final MSE needs
+ *                    an rcre_ml_emeans_assign pass — the centroids still
+ *                    move during the last epoch).
+ * @param out_n_splits Optional: total dead-cluster revival splits performed.
+ * @param arena Scratch arena.
+ * @param pool Optional RCRE_ThreadPool (NULL = serial). Pooled runs are
+ *             bit-identical across pool sizes; serial vs pooled is a
+ *             quality-equivalence guarantee (see the header contract above).
+ * @returns RCRE_OK or an RCRE_ERR_* code.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_fit_ex(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* params,
+                                         RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                         float* out_inertia, int* out_n_splits,
+                                         RCRE_Arena* arena,
+                                         RCRE_ThreadPool* pool);
+
+/**
+ * @brief Exact nearest-centroid assignment of X against trained centroids.
+ *        Dual kernel: per-row true distance for k*d <= 16384, HAL GEMM
+ *        above. Costs roughly one epoch of FLOPs; use training labels
+ *        instead when the budget is tight (see the reference's README note).
+ * @param labels Output [n,1] I32 (F32 also accepted).
+ * @param out_mse Optional: mean squared distance to the assigned centroid
+ *                (FP64).
+ * @returns RCRE_OK or an RCRE_ERR_* code.
+ */
+RCRE_NODISCARD int rcre_ml_emeans_assign(const RCRE_Tensor* X,
+                                         const RCRE_Tensor* centroids,
+                                         RCRE_Tensor* labels, float* out_mse,
+                                         RCRE_Arena* arena);
 
 typedef struct RCRE_DBSCANParams {
     float  eps;          /* Neighborhood radius distance epsilon */
@@ -891,6 +1122,28 @@ RCRE_NODISCARD int rcre_ml_gbdt_predict(const RCRE_GBDTModel* model,
                                         const RCRE_Tensor* X, 
                                         RCRE_Tensor* preds);
 
+typedef struct RCRE_RFNode {
+    int32_t feature_idx;
+    float   threshold;
+    int32_t left;
+    int32_t right;
+    float   leaf_prob;
+} RCRE_RFNode;
+
+typedef struct RCRE_RandomForest {
+    RCRE_RFNode* nodes;
+    size_t*      tree_roots;
+    size_t       num_trees;
+    size_t       num_nodes;
+    size_t       num_features;
+    size_t       max_depth;
+} RCRE_RandomForest;
+
+RCRE_NODISCARD int rcre_ml_rf_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
+                                  size_t num_trees, size_t max_depth, uint64_t seed,
+                                  RCRE_Arena* arena, RCRE_RandomForest* out_rf);
+RCRE_NODISCARD int rcre_ml_rf_predict(const RCRE_RandomForest* rf, const RCRE_Tensor* X, RCRE_Tensor* out_probs);
+
 /* ========================================================================= */
 /* Similarity & Fast Vector Search: HNSW Graph Index (ML-REQ-04)             */
 /* ========================================================================= */
@@ -933,7 +1186,9 @@ typedef enum {
     RCRE_CPU_FEAT_AVX2        = (1 << 2),
     RCRE_CPU_FEAT_FMA         = (1 << 3),
     RCRE_CPU_FEAT_AVX512F     = (1 << 4),
-    RCRE_CPU_FEAT_WASM_SIMD   = (1 << 5)
+    RCRE_CPU_FEAT_WASM_SIMD   = (1 << 5),
+    RCRE_CPU_FEAT_ARM_SVE2    = (1 << 6),
+    RCRE_CPU_FEAT_ARM_DOTPROD = (1 << 7)
 } RCRE_CpuFeatures;
 
 typedef void (*rcre_gemm_fn)(size_t M, size_t N, size_t K, float alpha, 
@@ -941,7 +1196,23 @@ typedef void (*rcre_gemm_fn)(size_t M, size_t N, size_t K, float alpha,
                              const float* B, size_t ldb, 
                              float beta, float* C, size_t ldc);
 
+typedef void (*rcre_gemv_fn)(size_t M, size_t K, float alpha,
+                             const float* A, size_t lda,
+                             const float* x, float beta, float* y);
+
 typedef float (*rcre_dot_fn)(const float* x, const float* y, size_t n);
+
+typedef int32_t (*rcre_dot_i8_fn)(const int8_t* x, const int8_t* y, size_t n);
+
+typedef void (*rcre_gemm_i8_fn)(size_t M, size_t N, size_t K,
+                                const int8_t* A, size_t lda,
+                                const int8_t* B, size_t ldb,
+                                int32_t* C, size_t ldc);
+
+typedef void (*rcre_gemm_bf16_fn)(size_t M, size_t N, size_t K, float alpha,
+                                  const uint16_t* A, size_t lda,
+                                  const uint16_t* B, size_t ldb,
+                                  float beta, float* C, size_t ldc);
 
 typedef void (*rcre_axpy_fn)(size_t n, float alpha, const float* x, float* y);
 
@@ -963,7 +1234,11 @@ typedef struct RCRE_HalDispatch {
     const char*            backend_name;
     uint32_t               cpu_features;
     rcre_gemm_fn           gemm_f32;
+    rcre_gemv_fn           gemv_f32;
     rcre_dot_fn            dot_f32;
+    rcre_dot_i8_fn         dot_i8;
+    rcre_gemm_i8_fn        gemm_i8;
+    rcre_gemm_bf16_fn      gemm_bf16;
     rcre_axpy_fn           axpy_f32;
     rcre_rgb_to_gray_u8_fn rgb_to_gray_u8;
     rcre_find_byte_fn      find_byte;
@@ -971,6 +1246,16 @@ typedef struct RCRE_HalDispatch {
 } RCRE_HalDispatch;
 
 extern RCRE_HalDispatch rcre_hal;
+
+/**
+ * @brief Opt-in parallel SGEMM partitioned over RCRE_ThreadPool row slabs.
+ *        Falls back to single-threaded rcre_hal.gemm_f32 when pool is NULL or small.
+ */
+void rcre_hal_gemm_f32_mt(RCRE_ThreadPool* pool,
+                          size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc);
 
 /**
  * @brief Probes host hardware and initializes dynamic SIMD dispatch table.
@@ -996,6 +1281,35 @@ RCRE_CpuTopology rcre_cpu_get_topology(void);
  * @brief Queries current OS memory pressure level (0 = normal, 1 = warn, 2 = critical).
  */
 int rcre_cpu_get_memory_pressure(void);
+
+/* ========================================================================= */
+/* Apache Arrow C Data Interface (Standard Interoperability Structs)         */
+/* ========================================================================= */
+
+typedef struct RCRE_ArrowSchema {
+    const char*                format;      /* "f" = F32, "i" = I32, "C" = U8 */
+    const char*                name;
+    const char*                metadata;
+    int64_t                    flags;
+    int64_t                    n_children;
+    struct RCRE_ArrowSchema**  children;
+    struct RCRE_ArrowSchema*   dictionary;
+    void (*release)(struct RCRE_ArrowSchema*);
+    void*                      private_data;
+} RCRE_ArrowSchema;
+
+typedef struct RCRE_ArrowArray {
+    int64_t                   length;
+    int64_t                   null_count;
+    int64_t                   offset;
+    int64_t                   n_buffers;
+    int64_t                   n_children;
+    const void**              buffers;     /* buffers[0]=validity, buffers[1]=data */
+    struct RCRE_ArrowArray**  children;
+    struct RCRE_ArrowArray*   dictionary;
+    void (*release)(struct RCRE_ArrowArray*);
+    void*                     private_data;
+} RCRE_ArrowArray;
 
 /* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */
@@ -1131,6 +1445,7 @@ struct RCRE_TensorNode {
     RCRE_Tensor*    out;
     RCRE_Tensor*    inputs[3];
     size_t          num_inputs;
+    size_t          aux[4];
     void (*backward)(RCRE_TensorNode* node);
 };
 
@@ -1170,6 +1485,8 @@ RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_Tensor
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* bias);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_relu(RCRE_TensorTape* tape, RCRE_Tensor* x);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_conv2d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* weight, size_t stride, size_t padding);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_attention(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE_Tensor* k, RCRE_Tensor* v);
 
 /* ========================================================================= */
 /* 4. Loss Functions & Gradients                                             */
@@ -1215,7 +1532,9 @@ RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_loss_svm_max_margin(RCRE_GraphCtx* ct
 
 typedef enum : uint8_t {
     RCRE_OPTIM_SGD = 0,
-    RCRE_OPTIM_ADAMW
+    RCRE_OPTIM_ADAMW,
+    RCRE_OPTIM_LION,
+    RCRE_OPTIM_ADAFACTOR
 } RCRE_OptimType;
 
 typedef struct {
@@ -1229,17 +1548,19 @@ typedef struct {
     float          momentum;
     float**        v_momentum;
 
-    /* AdamW moments */
+    /* AdamW / Lion / Adafactor state */
     float          beta1;
     float          beta2;
     float          eps;
     size_t         step_count;
-    float**        m; /* 1st moment */
-    float**        v; /* 2nd moment */
+    float**        m; /* 1st moment or Adafactor row factor */
+    float**        v; /* 2nd moment or Adafactor col factor */
 } RCRE_TensorOptim;
 
 RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float momentum, float weight_decay);
 RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float beta1, float beta2, float eps, float weight_decay);
+RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_lion_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float beta1, float beta2, float weight_decay);
+RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_adafactor_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float weight_decay);
 /* Both create() calls validate hyperparameters and return NULL on invalid
  * input: lr > 0, eps > 0, 0 <= momentum < 1, 0 <= beta1 < 1, 0 <= beta2 < 1
  * (beta == 1 would divide by zero in the bias correction). */
@@ -1361,6 +1682,8 @@ bool rcre_vis_export_3d_clusters_html(const RCRE_Tensor* points, const size_t* a
 #ifndef RCRE_TRANSFORMER_H
 #define RCRE_TRANSFORMER_H
 
+
+struct RCRE_SafeTensorsArchive;
 
 #ifdef __cplusplus
 extern "C" {
@@ -1670,11 +1993,2029 @@ int rcre_gpt_generate(
 bool rcre_gpt_save_checkpoint(const RCRE_GPTModel *model, const char *filepath);
 bool rcre_gpt_load_checkpoint(RCRE_GPTModel *model, const char *filepath);
 
+/**
+ * @brief Binds an RCRE_GPTModel's internal layer weight pointers (wte, wpe,
+ *        blocks[0..L-1], ln_f, head_w) directly to an external 64-byte aligned
+ *        memory buffer (e.g. a zero-copy mmap'd .safetensors or .npy view).
+ * @param model Target initialized GPT model.
+ * @param external_params 64-byte aligned read/write or read-only float buffer.
+ * @param num_floats Element count of external_params (must equal model->num_params).
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG on size or alignment mismatch.
+ */
+RCRE_NODISCARD int rcre_gpt_bind_weights_zero_copy(
+    RCRE_GPTModel *model,
+    const float *external_params,
+    size_t num_floats
+);
+
+/**
+ * @brief Serializes an RCRE_GPTModel's parameters into a 64-byte aligned
+ *        Hugging Face .safetensors archive ("gpt.params") via rcre_io.
+ * @param model Trained GPT model.
+ * @param filepath Destination .safetensors file path.
+ * @param scratch Transient arena for JSON header assembly.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_gpt_save_safetensors(
+    const RCRE_GPTModel *model,
+    const char *filepath,
+    RCRE_Arena *scratch
+);
+
+/**
+ * @brief Memory-maps a .safetensors checkpoint and binds its 64-byte aligned
+ *        weights directly into model with ZERO memory copies.
+ * @param model Target GPT model with matching RCRE_GPTConfig.
+ * @param filepath Source .safetensors file path.
+ * @param out_archive Output archive handle (must stay open while model is used).
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_gpt_load_safetensors_zero_copy(
+    RCRE_GPTModel *model,
+    const char *filepath,
+    struct RCRE_SafeTensorsArchive *out_archive
+);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* RCRE_TRANSFORMER_H */
+#endif
+
+#ifndef RCRE_BUILDING_FROM_SUBHEADER
+/* ========================================================================= */
+/* High-Performance Scientific Data I/O & Zero-Copy Ecosystem Bridges         */
+/* ========================================================================= */
+#ifndef RCRE_NO_IO
+/**
+ * @file rcre_io.h
+ * @brief RCRE High-Performance Scientific Data I/O, Zero-Copy Memory Mapping,
+ *        SIMD Tabular Ingestion, Standard Tensor Containers (.npy / .safetensors),
+ *        SIMD Byte-Shuffle Block Compression, Out-of-Core Ping-Pong Streaming,
+ *        and Zero-Copy Cross-Framework ABI Bridges (DLPack v1.0 / Apache Arrow).
+ *
+ * Part of Recep's Code Run Everywhere (RCRE).
+ * Strict ISO C23 compliant, zero external dependencies.
+ */
+
+#ifndef RCRE_IO_H
+#define RCRE_IO_H
+
+#ifndef RCRE_H
+#define RCRE_BUILDING_FROM_SUBHEADER 1
+#undef RCRE_BUILDING_FROM_SUBHEADER
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Virtual Memory Mapping & OS Page-Cache Control (IO-REQ-01)             */
+/* ========================================================================= */
+
+typedef enum {
+    RCRE_IO_HINT_DEFAULT    = 0, /* Standard OS page cache behavior               */
+    RCRE_IO_HINT_SEQUENTIAL = 1, /* Aggressive sequential prefetch (MADV_WILLNEED)*/
+    RCRE_IO_HINT_RANDOM     = 2, /* Random access (disable readahead thrashing)   */
+    RCRE_IO_HINT_STREAMING  = 3  /* Out-of-core streaming (evict/bypass cache)    */
+} RCRE_IOHint;
+
+typedef struct RCRE_MappedFile {
+    const uint8_t* data;         /* Page-aligned (4KB/16KB) read-only base ptr    */
+    size_t         size;         /* Exact file size in bytes                      */
+    intptr_t       os_handle;    /* Underlying OS descriptor/handle (-1 if mem)   */
+    intptr_t       map_handle;   /* Secondary OS handle (e.g. Win32 file mapping) */
+    RCRE_IOHint    hint;         /* Active kernel paging hint                     */
+    bool           is_mapped;    /* True if backed by OS mmap / heap fallback     */
+    bool           is_heap_buf;  /* True if fallback heap buffer (non-mmap OS)    */
+} RCRE_MappedFile;
+
+/**
+ * @brief Maps a file from disk into virtual memory with zero heap allocations.
+ * @param filepath Source file path on disk.
+ * @param hint OS page-cache advisory policy (sequential, random, streaming).
+ * @param out_map Output mapped file descriptor.
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG or RCRE_ERR_IO on failure.
+ */
+RCRE_NODISCARD int rcre_io_mmap_open(
+    const char* filepath,
+    RCRE_IOHint hint,
+    RCRE_MappedFile* out_map
+);
+
+/**
+ * @brief Wraps an existing in-memory buffer (e.g., WASM ArrayBuffer) as a mapped file.
+ * @param buf Read-only memory pointer.
+ * @param size Byte length of buffer.
+ * @param out_map Output mapped file descriptor.
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG on NULL/empty buffer.
+ */
+RCRE_NODISCARD int rcre_io_mmap_from_buffer(
+    const void* buf,
+    size_t size,
+    RCRE_MappedFile* out_map
+);
+
+/**
+ * @brief Releases the virtual memory mapping and closes the file descriptor.
+ * @param map Mapped file descriptor to close.
+ */
+void rcre_io_mmap_close(RCRE_MappedFile* map);
+
+/**
+ * @brief Returns a zero-copy RCRE_Slice spanning the entire mapped file.
+ * @param map Active mapped file descriptor.
+ * @return RCRE_Slice viewing the mapped bytes, or empty slice if invalid.
+ */
+RCRE_NODISCARD RCRE_Slice rcre_io_mmap_slice(const RCRE_MappedFile* map);
+
+/**
+ * @brief Advises the OS kernel on upcoming access patterns for a byte sub-range.
+ * @param map Active mapped file descriptor.
+ * @param offset Starting byte offset within the file.
+ * @param length Number of bytes in the sub-range.
+ * @param hint Desired paging policy for the sub-range.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_madvise_range(
+    const RCRE_MappedFile* map,
+    size_t offset,
+    size_t length,
+    RCRE_IOHint hint
+);
+
+/**
+ * @brief Atomically writes a contiguous byte buffer to disk via temp-file rename.
+ * @param filepath Destination file path.
+ * @param data Source byte buffer.
+ * @param size Number of bytes to write.
+ * @return RCRE_OK on success, RCRE_ERR_IO on failure.
+ */
+RCRE_NODISCARD int rcre_io_write_atomic(
+    const char* filepath,
+    const void* data,
+    size_t size
+);
+
+/* ========================================================================= */
+/* 2. Fast Floating-Point & SIMD Tabular CSV/TSV Ingestion (IO-REQ-02)       */
+/* ========================================================================= */
+
+/**
+ * @brief Parses an IEEE-754 single-precision float from a byte slice using
+ *        the Clinger / Eisel-Lemire fast path (zero heap, locale-independent).
+ * @param s Input byte slice containing ASCII floating-point representation.
+ * @param out_val Output parsed float32 value.
+ * @return true if valid float parsed, false on malformed input.
+ */
+RCRE_NODISCARD bool rcre_slice_parse_f32(RCRE_Slice s, float* out_val);
+
+typedef struct RCRE_CSVOptions {
+    uint8_t          delimiter;      /* ',' or '\t', or 0 for auto (',' or '\t') */
+    bool             skip_header;    /* Skip first row if true                   */
+    bool             strict_numbers; /* Reject non-numeric tokens if true        */
+    size_t           max_rows;       /* 0 = read all rows                        */
+    RCRE_ThreadPool* pool;           /* Optional threadpool for parallel parsing */
+    uint8_t          quote_char;     /* e.g. '"' for RFC-4180 quotes, 0 = raw    */
+} RCRE_CSVOptions;
+
+/**
+ * @brief High-throughput memory-mapped & SIMD-accelerated CSV/TSV loader.
+ * @param filepath Path to CSV/TSV file.
+ * @param opts Parsing options (delimiter, skip_header, max_rows, threadpool).
+ * @param arena Arena to allocate the output 2D F32 tensor.
+ * @param out_tensor Output 2D F32 tensor [rows, cols].
+ * @return RCRE_OK on success, RCRE_ERR_IO or RCRE_ERR_OUT_OF_MEMORY on failure.
+ */
+RCRE_NODISCARD int rcre_io_load_csv_ex(
+    const char* filepath,
+    const RCRE_CSVOptions* opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+/**
+ * @brief Parses a CSV/TSV directly from an in-memory RCRE_Slice (zero file I/O).
+ * @param csv_slice In-memory byte slice containing CSV/TSV text.
+ * @param opts Parsing options.
+ * @param arena Arena to allocate the output 2D F32 tensor.
+ * @param out_tensor Output 2D F32 tensor [rows, cols].
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_parse_csv_slice(
+    RCRE_Slice csv_slice,
+    const RCRE_CSVOptions* opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+/* ========================================================================= */
+/* 3. NumPy (.npy v1.0 / v2.0) Serialization & Zero-Copy Views (IO-REQ-03)   */
+/* ========================================================================= */
+
+/**
+ * @brief Serializes an RCRE_Tensor to a NumPy .npy file with strict 64-byte
+ *        header padding so the payload is always 64-byte aligned on disk.
+ * @param tensor Contiguous 1D-4D tensor (U8, I32, or F32) to serialize.
+ * @param filepath Destination .npy file path.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_save_npy(
+    const RCRE_Tensor* tensor,
+    const char* filepath
+);
+
+/**
+ * @brief Loads a NumPy .npy file (v1.0 or v2.0) into a 64-byte aligned arena buffer.
+ * @param filepath Source .npy file path.
+ * @param arena Destination memory arena.
+ * @param out_tensor Output tensor allocated inside arena.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_load_npy(
+    const char* filepath,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+/**
+ * @brief Creates a zero-copy RCRE_Tensor view (is_view = true) directly over
+ *        an open RCRE_MappedFile containing a 64-byte aligned .npy file.
+ * @param map Open memory-mapped .npy file (must outlive the returned view).
+ * @param out_view Output zero-copy tensor view.
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG if payload is not 64B-aligned.
+ */
+RCRE_NODISCARD int rcre_io_view_npy(
+    const RCRE_MappedFile* map,
+    RCRE_Tensor* out_view
+);
+
+/* ========================================================================= */
+/* 4. Multi-Tensor Safetensors (.safetensors) Container Engine (IO-REQ-04)   */
+/* ========================================================================= */
+
+#define RCRE_SAFETENSORS_MAX_TENSORS 1024
+
+typedef struct RCRE_SafeTensorEntry {
+    RCRE_Slice  name;                 /* Zero-copy slice into JSON header               */
+    RCRE_DType  dtype;                /* U8, I8, I32, I64, F16, BF16, F32, or F64       */
+    uint8_t     ndim;                 /* Rank (1 to RCRE_MAX_DIMS)                      */
+    size_t      shape[RCRE_MAX_DIMS]; /* Dimensions                                     */
+    size_t      data_offset;          /* Relative byte offset from data section start   */
+    size_t      data_nbytes;          /* Validated byte length of payload               */
+} RCRE_SafeTensorEntry;
+
+typedef struct RCRE_SafeTensorsArchive {
+    RCRE_MappedFile      map;
+    size_t               header_nbytes;    /* JSON header size N                 */
+    size_t               data_base_offset; /* 8 + N (64-byte aligned by RCRE)    */
+    size_t               num_tensors;
+    RCRE_SafeTensorEntry entries[RCRE_SAFETENSORS_MAX_TENSORS];
+} RCRE_SafeTensorsArchive;
+
+/**
+ * @brief Opens and validates a .safetensors archive via zero-copy mmap.
+ * @param filepath Path to .safetensors file.
+ * @param out_archive Output parsed archive handle.
+ * @return RCRE_OK on success, RCRE_ERR_IO on corrupt/invalid archive.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_open(
+    const char* filepath,
+    RCRE_SafeTensorsArchive* out_archive
+);
+
+/**
+ * @brief Opens and validates a .safetensors archive from an in-memory buffer.
+ * @param buf Pointer to .safetensors bytes in memory.
+ * @param size Total byte length of buffer.
+ * @param out_archive Output parsed archive handle.
+ * @return RCRE_OK on success, RCRE_ERR_IO on corrupt/invalid archive.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_open_from_buffer(
+    const void* buf,
+    size_t size,
+    RCRE_SafeTensorsArchive* out_archive
+);
+
+/**
+ * @brief Closes a mapped .safetensors archive and releases OS virtual pages.
+ * @param archive Archive handle to close.
+ */
+void rcre_io_safetensors_close(RCRE_SafeTensorsArchive* archive);
+
+/**
+ * @brief Retrieves a tensor by name from an open .safetensors archive.
+ *        Returns a zero-copy view (is_view = true) whenever the tensor payload
+ *        is 64-byte aligned in memory; otherwise copies into fallback_arena.
+ * @param archive Open .safetensors archive.
+ * @param name Null-terminated tensor name to look up.
+ * @param fallback_arena Optional arena used only if file offset is not 64B-aligned.
+ * @param out_tensor Output tensor (zero-copy view or arena-copied).
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG if not found or unaligned without arena.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    RCRE_Arena* fallback_arena,
+    RCRE_Tensor* out_tensor
+);
+
+/**
+ * @brief Retrieves a tensor by name and guarantees output is an F32 tensor.
+ *        If tensor is already F32 and 64B-aligned, returns a zero-copy view (is_view = true).
+ *        If tensor is F16, BF16, I32, or U8, allocates an F32 tensor in arena and
+ *        executes hardware-accelerated SIMD dequantization / casting.
+ * @param archive Open .safetensors archive.
+ * @param name Tensor name to look up.
+ * @param arena Destination arena for dequantized payload (ignored if zero-copy F32).
+ * @param out_f32_tensor Output F32 tensor.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_f32_tensor
+);
+
+/**
+ * @brief Retrieves a 64-bit row-sliced view/dequantization of a tensor by name
+ *        from an open .safetensors archive without mapping or loading the entire matrix.
+ *        Supports 64-bit offsets > 4 GB for multi-billion parameter LLM weights.
+ * @param archive Open .safetensors archive.
+ * @param name Tensor name to look up.
+ * @param start_row Starting outer dimension row index.
+ * @param num_rows Number of rows to read in this chunk.
+ * @param arena Destination arena for F32 tensor or unaligned copy.
+ * @param out_slice Output sliced F32 tensor [num_rows, ...].
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_slice_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    size_t start_row,
+    size_t num_rows,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_slice
+);
+
+/**
+ * @brief Saves an array of named RCRE_Tensors to a 64-byte aligned .safetensors file.
+ * @param filepath Destination .safetensors file path.
+ * @param names Array of tensor name strings [num_tensors].
+ * @param tensors Array of contiguous RCRE_Tensors [num_tensors].
+ * @param num_tensors Number of tensors to serialize (1 to 256).
+ * @param scratch Transient scratch arena for header construction.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_save(
+    const char* filepath,
+    const char* const* names,
+    const RCRE_Tensor* tensors,
+    size_t num_tensors,
+    RCRE_Arena* scratch
+);
+
+/* ========================================================================= */
+/* 5. SIMD Byte-Shuffle Codec & Out-of-Core Ping-Pong Streamer (IO-REQ-05)   */
+/* ========================================================================= */
+
+/**
+ * @brief Applies a SIMD-accelerated byte-shuffle transpose on 32-bit elements
+ *        (F32/I32), grouping byte 0, byte 1, byte 2, and byte 3 into contiguous
+ *        streams to maximize downstream compression ratio and throughput.
+ * @param src Source array of num_elements 32-bit values (4 * num_elements bytes).
+ * @param dst Destination buffer (must not alias src, 4 * num_elements bytes).
+ * @param num_elements Number of 32-bit elements.
+ */
+void rcre_io_byte_shuffle_32(const void* src, void* dst, size_t num_elements);
+
+/**
+ * @brief Reconstructs interleaved 32-bit elements from a byte-shuffled buffer.
+ * @param src Byte-shuffled source buffer (4 * num_elements bytes).
+ * @param dst Destination array of num_elements 32-bit values.
+ * @param num_elements Number of 32-bit elements.
+ */
+void rcre_io_byte_unshuffle_32(const void* src, void* dst, size_t num_elements);
+
+/**
+ * @brief Applies a SIMD-accelerated 16-bit byte-shuffle transpose on F16/BF16 elements,
+ *        grouping byte 0 and byte 1 into contiguous streams.
+ * @param src Source array of num_elements 16-bit values (2 * num_elements bytes).
+ * @param dst Destination buffer (2 * num_elements bytes).
+ * @param num_elements Number of 16-bit elements.
+ */
+void rcre_io_byte_shuffle_16(const void* src, void* dst, size_t num_elements);
+
+/**
+ * @brief Reconstructs interleaved 16-bit elements from a 16-bit byte-shuffled buffer.
+ * @param src Byte-shuffled source buffer (2 * num_elements bytes).
+ * @param dst Destination array of num_elements 16-bit values.
+ * @param num_elements Number of 16-bit elements.
+ */
+void rcre_io_byte_unshuffle_16(const void* src, void* dst, size_t num_elements);
+
+/* ========================================================================= */
+/* Half-Precision (IEEE FP16 & Google BF16) Conversion & De-Quantization      */
+/* ========================================================================= */
+
+/**
+ * @brief Converts an array of IEEE-754 binary16 (FP16) floats to IEEE-754 F32
+ *        using hardware SIMD (ARM NEON vcvt_f32_f16 or x86 F16C / AVX2).
+ * @param src Pointer to numel uint16_t FP16 values.
+ * @param dst Pointer to numel float output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_f16_to_f32(const void* src, float* dst, size_t numel);
+
+/**
+ * @brief Converts an array of Google Brain bfloat16 (BF16) floats to IEEE-754 F32
+ *        using vectorized 16-bit bit-shifts and zero-latency unpack.
+ * @param src Pointer to numel uint16_t BF16 values.
+ * @param dst Pointer to numel float output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_bf16_to_f32(const void* src, float* dst, size_t numel);
+
+/**
+ * @brief Converts an array of IEEE-754 F32 floats to IEEE-754 binary16 (FP16).
+ * @param src Pointer to numel float values.
+ * @param dst Pointer to numel uint16_t FP16 output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_f32_to_f16(const float* src, void* dst, size_t numel);
+
+/**
+ * @brief Converts an array of IEEE-754 F32 floats to Google Brain bfloat16 (BF16)
+ *        with round-to-nearest-even precision.
+ * @param src Pointer to numel float values.
+ * @param dst Pointer to numel uint16_t BF16 output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_f32_to_bf16(const float* src, void* dst, size_t numel);
+
+/**
+ * @brief Converts any RCRE_Tensor (U8, I32, F16, BF16, or F32) to an F32 tensor.
+ * @param src Input source tensor.
+ * @param arena Destination arena to allocate output F32 tensor (ignored if already F32 view).
+ * @param dst_f32 Output F32 tensor.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_tensor_to_f32(
+    const RCRE_Tensor* src,
+    RCRE_Arena* arena,
+    RCRE_Tensor* dst_f32
+);
+
+/**
+ * @brief Compresses a contiguous 32-bit tensor (F32/I32) using SIMD byte-shuffle
+ *        followed by a zero-dependency LZ4-class run/match block compressor.
+ * @param tensor Contiguous F32 or I32 source tensor.
+ * @param arena Destination arena to allocate compressed byte buffer.
+ * @param out_slice Output slice containing the self-describing compressed frame.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_compress_tensor(
+    const RCRE_Tensor* tensor,
+    RCRE_Arena* arena,
+    RCRE_Slice* out_slice
+);
+
+/**
+ * @brief Decompresses a byte-shuffled compressed tensor frame into an arena.
+ * @param compressed_frame Slice produced by rcre_io_compress_tensor.
+ * @param arena Arena to allocate the reconstructed 64-byte aligned tensor.
+ * @param out_tensor Output reconstructed tensor (0-ULP bit-exact).
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_decompress_tensor(
+    RCRE_Slice compressed_frame,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+typedef struct RCRE_TensorStream {
+    RCRE_MappedFile map;
+    RCRE_DType      dtype;
+    RCRE_Layout     layout;
+    uint8_t         ndim;
+    size_t          full_shape[RCRE_MAX_DIMS];
+    size_t          row_elements;    /* Product of shape[1..ndim-1]              */
+    size_t          row_bytes;       /* row_elements * sizeof(dtype)             */
+    size_t          total_rows;      /* full_shape[0]                            */
+    size_t          batch_rows;      /* Maximum rows per streamed batch          */
+    size_t          current_row;     /* Next row cursor                          */
+    size_t          data_offset;     /* Byte offset to row 0 in file             */
+    uint8_t*        ping_pong_buf[2];/* Dual 64B-aligned arena buffers           */
+    uint8_t         active_slot;     /* Toggles 0 <-> 1 on each batch            */
+    bool            async_enabled;   /* Background double-buffered prefetch      */
+    bool            use_io_uring;    /* True if Linux io_uring active            */
+    intptr_t        async_handle;    /* io_uring ring fd or async handle         */
+    void*           prefetch_ctx;    /* Optional POSIX async prefetch worker     */
+} RCRE_TensorStream;
+
+/**
+ * @brief Checks if Linux io_uring ring buffer syscalls are supported by host kernel.
+ * @return true if io_uring is functional, false otherwise.
+ */
+RCRE_NODISCARD bool rcre_io_is_io_uring_available(void);
+
+/**
+ * @brief Enables asynchronous non-blocking prefetch on an open RCRE_TensorStream.
+ *        On Linux with kernel >= 5.1, engages io_uring zero-copy submission rings.
+ *        On macOS/other POSIX, engages aggressive sequential prefetch + double buffering.
+ * @param stream Active tensor stream.
+ * @return RCRE_OK on success.
+ */
+RCRE_NODISCARD int rcre_io_stream_enable_async(RCRE_TensorStream* stream);
+
+/**
+ * @brief Opens an out-of-core ping-pong batch streamer over a .npy tensor file.
+ * @param filepath Source .npy file path.
+ * @param batch_rows Number of outer-dimension rows per batch.
+ * @param arena Arena from which two ping-pong batch buffers are sub-allocated.
+ * @param out_stream Output initialized tensor stream.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_stream_open_npy(
+    const char* filepath,
+    size_t batch_rows,
+    RCRE_Arena* arena,
+    RCRE_TensorStream* out_stream
+);
+
+/**
+ * @brief Fetches the next batch from an open RCRE_TensorStream into a 64-byte
+ *        aligned ping-pong buffer and advises the OS kernel to evict consumed pages.
+ * @param stream Active tensor stream.
+ * @param out_batch Output tensor view wrapping the active ping-pong buffer.
+ * @return true if a batch was read, false when end-of-stream is reached.
+ */
+RCRE_NODISCARD bool rcre_io_stream_next(
+    RCRE_TensorStream* stream,
+    RCRE_Tensor* out_batch
+);
+
+/**
+ * @brief Rewinds an RCRE_TensorStream back to row 0 for a new training epoch.
+ * @param stream Active tensor stream.
+ */
+void rcre_io_stream_reset(RCRE_TensorStream* stream);
+
+/**
+ * @brief Closes an RCRE_TensorStream and unmaps its underlying file.
+ * @param stream Tensor stream to close.
+ */
+void rcre_io_stream_close(RCRE_TensorStream* stream);
+
+/* ========================================================================= */
+/* 6. Zero-Copy Cross-Framework C ABI Bridges: DLPack & Arrow (IO-REQ-06)    */
+/* ========================================================================= */
+
+typedef enum {
+    RCRE_DL_DEVICE_CPU  = 1,
+    RCRE_DL_DEVICE_CUDA = 2
+} RCRE_DLDeviceType;
+
+typedef enum {
+    RCRE_DL_INT   = 0,
+    RCRE_DL_UINT  = 1,
+    RCRE_DL_FLOAT = 2
+} RCRE_DLDataTypeCode;
+
+typedef struct RCRE_DLTensor {
+    void*     data;
+    int32_t   device_type; /* RCRE_DL_DEVICE_CPU (1)                          */
+    int32_t   device_id;   /* 0                                               */
+    int32_t   ndim;        /* 1 to 4                                          */
+    uint8_t   dtype_code;  /* RCRE_DL_INT (0), RCRE_DL_UINT (1), FLOAT (2)    */
+    uint8_t   dtype_bits;  /* 8 or 32                                         */
+    uint16_t  dtype_lanes; /* 1                                               */
+    int64_t*  shape;       /* Pointer to int64_t[ndim]                        */
+    int64_t*  strides;     /* Pointer to int64_t[ndim] in elements            */
+    uint64_t  byte_offset; /* 0                                               */
+} RCRE_DLTensor;
+
+/**
+ * @brief Exports an RCRE_Tensor to a zero-copy DLPack DLTensor descriptor.
+ * @param src Source RCRE_Tensor.
+ * @param meta_arena Arena to allocate the 64-bit shape/stride metadata arrays.
+ * @param out_dl Output DLPack tensor struct sharing src->data zero-copy.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_to_dlpack(
+    const RCRE_Tensor* src,
+    RCRE_Arena* meta_arena,
+    RCRE_DLTensor* out_dl
+);
+
+/**
+ * @brief Imports a CPU DLPack DLTensor into a zero-copy RCRE_Tensor view.
+ * @param dl Source DLPack tensor descriptor (device_type must be CPU).
+ * @param out_view Output zero-copy RCRE_Tensor view (is_view = true).
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG or UNSUPPORTED_OP on mismatch.
+ */
+RCRE_NODISCARD int rcre_io_from_dlpack(
+    const RCRE_DLTensor* dl,
+    RCRE_Tensor* out_view
+);
+
+/* Apache Arrow C Data Interface structures declared in rcre.h */
+
+/**
+ * @brief Exports a contiguous 1D RCRE_Tensor to the Apache Arrow C Data Interface.
+ * @param src Contiguous 1D RCRE_Tensor (U8, I32, or F32).
+ * @param meta_arena Arena to allocate the 2-element buffers pointer array.
+ * @param out_schema Output ArrowSchema descriptor.
+ * @param out_array Output ArrowArray descriptor pointing directly to src->data.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_to_arrow(
+    const RCRE_Tensor* src,
+    RCRE_Arena* meta_arena,
+    RCRE_ArrowSchema* out_schema,
+    RCRE_ArrowArray* out_array
+);
+
+/**
+ * @brief Imports a flat numeric column from the Apache Arrow C Data Interface
+ *        into a zero-copy 1D RCRE_Tensor view.
+ * @param schema ArrowSchema describing the column type ("f", "i", or "C").
+ * @param array ArrowArray holding the column buffer (null_count must be 0).
+ * @param out_view Output zero-copy 1D RCRE_Tensor view.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_from_arrow(
+    const RCRE_ArrowSchema* schema,
+    const RCRE_ArrowArray* array,
+    RCRE_Tensor* out_view
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_IO_H */
+#endif
+
+/* ========================================================================= */
+/* Modern LLM Architecture, GGUF Reader, Q8_0/Q4_0 Quantization & LoRA       */
+/* ========================================================================= */
+#ifndef RCRE_NO_LLM
+/**
+ * @file rcre_llm.h
+ * @brief Modern LLM Architecture, GGUF v2/v3 Reader, Block Quantization (Q8_0/Q4_0),
+ *        Byte-Level BPE, Sampler, LoRA Fine-Tuning & Sharded Streaming.
+ *
+ * Part of Recep's Code Run Everywhere (RCRE) v2.0.0.
+ * Strict ISO C23 compliant, zero external dependencies.
+ */
+
+#ifndef RCRE_LLM_H
+#define RCRE_LLM_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Block Quantization Formats (GGML-Compatible Q8_0 & Q4_0)               */
+/* ========================================================================= */
+
+#define RCRE_QK8_0 32
+#define RCRE_QK4_0 32
+
+typedef struct {
+    uint16_t d;                  /* IEEE FP16 delta scale                     */
+    int8_t   qs[RCRE_QK8_0];     /* 32 signed 8-bit quants (34 bytes total)   */
+} RCRE_BlockQ8_0;
+
+typedef struct {
+    uint16_t d;                  /* IEEE FP16 delta scale                     */
+    uint8_t  qs[RCRE_QK4_0 / 2]; /* 32 4-bit nibbles packed low/high (18 B)   */
+} RCRE_BlockQ4_0;
+
+typedef enum {
+    RCRE_LLM_W_F32  = 0,
+    RCRE_LLM_W_Q8_0 = 8,
+    RCRE_LLM_W_Q4_0 = 2
+} RCRE_LLMWeightType;
+
+void rcre_quantize_q8_0(const float* src, void* dst_blocks, size_t n);
+void rcre_dequantize_q8_0(const void* src_blocks, float* dst, size_t n);
+void rcre_quantize_q4_0(const float* src, void* dst_blocks, size_t n);
+void rcre_dequantize_q4_0(const void* src_blocks, float* dst, size_t n);
+
+RCRE_NODISCARD float rcre_vec_dot_q8_0(const void* q8_blocks, const float* f32_x, size_t n);
+RCRE_NODISCARD float rcre_vec_dot_q4_0(const void* q4_blocks, const float* f32_x, size_t n);
+
+void rcre_llm_gemv_quant(RCRE_LLMWeightType wtype, const void* w_data, const float* x,
+                         float* y, size_t rows, size_t cols, RCRE_ThreadPool* pool);
+
+/* ========================================================================= */
+/* 2. Modern Tensor Math Primitives (RMSNorm, RoPE, SwiGLU, Flash-GQA)       */
+/* ========================================================================= */
+
+void rcre_llm_rmsnorm(float* out, const float* x, const float* weight, size_t n, float eps);
+void rcre_llm_rope(float* q, float* k, size_t n_heads, size_t n_kv_heads,
+                   size_t head_dim, size_t pos, float theta_base);
+void rcre_llm_swiglu(float* out, const float* gate, const float* up, size_t n);
+
+/**
+ * @brief Flash-Attention style single-query online softmax attention over KV cache.
+ *        Zero O(T) temporary score allocation (running max m + denominator l).
+ */
+void rcre_llm_flash_attention_gqa(
+    float* out,
+    const float* q,
+    const float* k_cache,
+    const float* v_cache,
+    size_t n_heads,
+    size_t n_kv_heads,
+    size_t head_dim,
+    size_t seq_len,
+    size_t kv_stride_elems
+);
+
+/* ========================================================================= */
+/* 3. Zero-Copy GGUF v2/v3 Reader & Writer                                   */
+/* ========================================================================= */
+
+#define RCRE_GGUF_MAGIC 0x46554747U /* 'G','G','U','F' LE */
+
+typedef enum {
+    RCRE_GGUF_TYPE_UINT8   = 0,
+    RCRE_GGUF_TYPE_INT8    = 1,
+    RCRE_GGUF_TYPE_UINT16  = 2,
+    RCRE_GGUF_TYPE_INT16   = 3,
+    RCRE_GGUF_TYPE_UINT32  = 4,
+    RCRE_GGUF_TYPE_INT32   = 5,
+    RCRE_GGUF_TYPE_FLOAT32 = 6,
+    RCRE_GGUF_TYPE_BOOL    = 7,
+    RCRE_GGUF_TYPE_STRING  = 8,
+    RCRE_GGUF_TYPE_ARRAY   = 9,
+    RCRE_GGUF_TYPE_UINT64  = 10,
+    RCRE_GGUF_TYPE_INT64   = 11,
+    RCRE_GGUF_TYPE_FLOAT64 = 12
+} RCRE_GGUFType;
+
+typedef enum {
+    RCRE_GGML_TYPE_F32  = 0,
+    RCRE_GGML_TYPE_F16  = 1,
+    RCRE_GGML_TYPE_Q4_0 = 2,
+    RCRE_GGML_TYPE_Q8_0 = 8,
+    RCRE_GGML_TYPE_I8   = 24,
+    RCRE_GGML_TYPE_I16  = 25,
+    RCRE_GGML_TYPE_I32  = 26,
+    RCRE_GGML_TYPE_I64  = 27,
+    RCRE_GGML_TYPE_F64  = 28,
+    RCRE_GGML_TYPE_BF16 = 30
+} RCRE_GGMLType;
+
+typedef struct {
+    RCRE_Slice    key;
+    RCRE_GGUFType type;
+    union {
+        uint64_t   u64;
+        int64_t    i64;
+        double     f64;
+        bool       b;
+        RCRE_Slice str;
+        struct {
+            RCRE_GGUFType elem_type;
+            uint64_t      len;
+            const uint8_t* raw_data;
+        } arr;
+    } val;
+} RCRE_GGUFKV;
+
+typedef struct {
+    RCRE_Slice    name;
+    uint32_t      n_dims;
+    uint64_t      dims[4];
+    RCRE_GGMLType type;
+    uint64_t      offset; /* Relative to archive data_offset */
+    size_t        nbytes;
+} RCRE_GGUFTensorInfo;
+
+typedef struct {
+    RCRE_MappedFile      map;
+    uint32_t             version;
+    uint32_t             alignment;
+    uint64_t             n_tensors;
+    uint64_t             n_kv;
+    size_t               data_offset;
+    RCRE_GGUFKV*         kvs;
+    RCRE_GGUFTensorInfo* tensors;
+} RCRE_GGUFFile;
+
+RCRE_NODISCARD int rcre_gguf_open(const char* filepath, RCRE_GGUFFile* out_gguf);
+RCRE_NODISCARD int rcre_gguf_open_from_buffer(const void* buf, size_t size, RCRE_GGUFFile* out_gguf);
+void rcre_gguf_close(RCRE_GGUFFile* gguf);
+
+RCRE_NODISCARD const RCRE_GGUFKV* rcre_gguf_find_kv(const RCRE_GGUFFile* gguf, const char* key);
+RCRE_NODISCARD bool rcre_gguf_get_u32(const RCRE_GGUFFile* gguf, const char* key, uint32_t* out_v);
+RCRE_NODISCARD bool rcre_gguf_get_f32(const RCRE_GGUFFile* gguf, const char* key, float* out_v);
+RCRE_NODISCARD bool rcre_gguf_get_str(const RCRE_GGUFFile* gguf, const char* key, RCRE_Slice* out_s);
+RCRE_NODISCARD const RCRE_GGUFTensorInfo* rcre_gguf_find_tensor(const RCRE_GGUFFile* gguf, const char* name);
+RCRE_NODISCARD const void* rcre_gguf_tensor_data(const RCRE_GGUFFile* gguf, const RCRE_GGUFTensorInfo* info);
+
+typedef struct {
+    const char*   name;
+    RCRE_GGMLType type;
+    uint32_t      n_dims;
+    uint64_t      dims[4];
+    const void*   data;
+    size_t        nbytes;
+} RCRE_GGUFWriteTensor;
+
+typedef struct {
+    const char* key;
+    uint32_t    u32_val;
+    float       f32_val;
+    const char* str_val;
+    bool        is_float;
+    bool        is_str;
+} RCRE_GGUFWriteKV;
+
+RCRE_NODISCARD int rcre_gguf_save_v3(
+    const char* filepath,
+    const RCRE_GGUFWriteKV* kvs,
+    size_t n_kvs,
+    const RCRE_GGUFWriteTensor* tensors,
+    size_t n_tensors
+);
+
+/* ========================================================================= */
+/* 4. Large-Vocabulary Byte-Level BPE Tokenizer                              */
+/* ========================================================================= */
+
+typedef struct {
+    uint32_t left;
+    uint32_t right;
+    uint32_t merged;
+} RCRE_ByteBPEMerge;
+
+typedef struct {
+    size_t             vocab_size;
+    size_t             vocab_cap;
+    size_t             n_merges;
+    size_t             merges_cap;
+    char**             pieces;
+    size_t*            piece_lens;
+    RCRE_ByteBPEMerge* merges;
+    /* Open-addressing hash map for piece lookup & pair->merge lookup */
+    uint32_t*          piece_hash_keys; /* 1-based token id, 0 = empty */
+    size_t             piece_hash_cap;
+    uint64_t*          pair_hash_keys;  /* (left<<32)|right, UINT64_MAX = empty */
+    uint32_t*          pair_hash_vals;  /* index into merges[] */
+    size_t             pair_hash_cap;
+    uint32_t           bos_id;
+    uint32_t           eos_id;
+} RCRE_ByteBPE;
+
+RCRE_NODISCARD RCRE_ByteBPE* rcre_byte_bpe_create(size_t max_vocab);
+void rcre_byte_bpe_free(RCRE_ByteBPE* tok);
+RCRE_NODISCARD int rcre_byte_bpe_train_corpus(RCRE_ByteBPE* tok, const uint8_t* corpus,
+                                              size_t corpus_len, size_t target_vocab);
+RCRE_NODISCARD int rcre_byte_bpe_add_token(RCRE_ByteBPE* tok, const uint8_t* bytes, size_t len);
+RCRE_NODISCARD size_t rcre_byte_bpe_encode(const RCRE_ByteBPE* tok, const char* text,
+                                           size_t len, int32_t* out_ids, size_t max_ids);
+RCRE_NODISCARD size_t rcre_byte_bpe_decode(const RCRE_ByteBPE* tok, const int32_t* ids,
+                                           size_t n_ids, char* out_text, size_t max_len);
+
+/* ========================================================================= */
+/* 5. Thread-Safe Advanced Sampler (Temp / Top-K / Top-P / Min-P / RepPen)   */
+/* ========================================================================= */
+
+typedef struct {
+    float    temperature;
+    int      top_k;
+    float    top_p;
+    float    min_p;
+    float    repeat_penalty;
+    size_t   repeat_window;
+    uint64_t rng_state;
+} RCRE_SamplerConfig;
+
+typedef struct {
+    RCRE_SamplerConfig cfg;
+    float*             scratch_probs;
+    int32_t*           scratch_idx;
+    size_t             vocab_size;
+} RCRE_Sampler;
+
+RCRE_NODISCARD RCRE_Sampler* rcre_sampler_create(size_t vocab_size, RCRE_SamplerConfig cfg);
+void rcre_sampler_free(RCRE_Sampler* sampler);
+RCRE_NODISCARD int32_t rcre_sampler_sample(RCRE_Sampler* sampler, const float* logits,
+                                           const int32_t* recent_tokens, size_t n_recent);
+
+/* ========================================================================= */
+/* 6. LLaMA Transformer Model, LoRA Adapters & Sharded Streaming Training    */
+/* ========================================================================= */
+
+typedef struct {
+    size_t vocab_size;
+    size_t dim;
+    size_t hidden_dim;
+    size_t n_layers;
+    size_t n_heads;
+    size_t n_kv_heads;
+    size_t max_seq_len;
+    float  rms_eps;
+    float  rope_theta;
+} RCRE_LlamaConfig;
+
+typedef struct {
+    RCRE_LLMWeightType wtype;
+    void*              rms_att;    /* [dim] float */
+    void*              rms_ffn;    /* [dim] float */
+    void*              wq;         /* [dim, dim] */
+    void*              wk;         /* [kv_dim, dim] */
+    void*              wv;         /* [kv_dim, dim] */
+    void*              wo;         /* [dim, dim] */
+    void*              w_gate;     /* [hidden_dim, dim] */
+    void*              w_up;       /* [hidden_dim, dim] */
+    void*              w_down;     /* [dim, hidden_dim] */
+} RCRE_LlamaLayerWeights;
+
+typedef struct {
+    RCRE_LlamaConfig        cfg;
+    RCRE_LLMWeightType      wtype;
+    float*                  tok_emb;    /* [vocab_size, dim] */
+    float*                  rms_final;  /* [dim] */
+    void*                   lm_head;    /* [vocab_size, dim] */
+    RCRE_LlamaLayerWeights* layers;
+    bool                    owns_memory;
+    RCRE_GGUFFile*          backed_gguf;
+    RCRE_ThreadPool*        pool;
+} RCRE_LlamaModel;
+
+typedef struct {
+    RCRE_LlamaConfig cfg;
+    float*           x;
+    float*           xb;
+    float*           xb2;
+    float*           hb;
+    float*           hb2;
+    float*           q;
+    float*           k;
+    float*           v;
+    float*           att_out;
+    float*           logits;
+    float*           key_cache;   /* [n_layers, max_seq_len, kv_dim] */
+    float*           value_cache; /* [n_layers, max_seq_len, kv_dim] */
+} RCRE_LlamaState;
+
+typedef struct {
+    size_t  rank;
+    size_t  in_dim;
+    size_t  out_dim;
+    float   alpha;
+    float*  A;      /* [rank, in_dim] */
+    float*  B;      /* [out_dim, rank] */
+    float*  grad_A;
+    float*  grad_B;
+    float*  m_A;
+    float*  v_A;
+    float*  m_B;
+    float*  v_B;
+    size_t  step;
+} RCRE_LoRAAdapter;
+
+RCRE_NODISCARD RCRE_LlamaModel* rcre_llama_create(RCRE_LlamaConfig cfg, RCRE_LLMWeightType wtype, uint64_t seed);
+RCRE_NODISCARD RCRE_LlamaModel* rcre_llama_load_gguf(const char* filepath, int* out_err);
+void rcre_llama_free(RCRE_LlamaModel* model);
+
+RCRE_NODISCARD RCRE_LlamaState* rcre_llama_state_create(const RCRE_LlamaConfig* cfg);
+void rcre_llama_state_reset(RCRE_LlamaState* state);
+void rcre_llama_state_free(RCRE_LlamaState* state);
+
+RCRE_NODISCARD int rcre_llama_forward_token(const RCRE_LlamaModel* model, RCRE_LlamaState* state,
+                                            int32_t token, size_t pos);
+
+RCRE_NODISCARD int rcre_llama_generate(
+    const RCRE_LlamaModel* model,
+    RCRE_LlamaState* state,
+    RCRE_Sampler* sampler,
+    const int32_t* prompt_tokens,
+    size_t n_prompt,
+    int32_t* out_tokens,
+    size_t max_new_tokens,
+    size_t* out_generated
+);
+
+RCRE_NODISCARD RCRE_LoRAAdapter* rcre_lora_create(size_t rank, size_t in_dim, size_t out_dim,
+                                                  float alpha, uint64_t seed);
+void rcre_lora_free(RCRE_LoRAAdapter* lora);
+void rcre_lora_forward_add(const RCRE_LoRAAdapter* lora, const float* x, float* y);
+RCRE_NODISCARD float rcre_lora_train_step(
+    RCRE_LoRAAdapter* lora,
+    const float* base_W_rowmajor,
+    const float* x,
+    const float* target_y,
+    float lr
+);
+
+/**
+ * @brief Trains a tiny F32 LLaMA step with gradient checkpointing and optional BF16 activation rounding.
+ *        Returns cross-entropy loss across sequence [seq_len].
+ */
+RCRE_NODISCARD float rcre_llama_train_step_f32(
+    RCRE_LlamaModel* model,
+    const int32_t* tokens,
+    size_t seq_len,
+    float lr,
+    bool bf16_activations,
+    bool grad_checkpoint
+);
+
+/* --- Sharded Binary Token Streamer (mmap rotating shard files) --- */
+typedef struct {
+    const char**    shard_paths;
+    size_t          num_shards;
+    size_t          current_shard;
+    size_t          seq_len;
+    size_t          token_cursor;
+    RCRE_MappedFile active_map;
+} RCRE_ShardStream;
+
+RCRE_NODISCARD int rcre_shard_stream_open(RCRE_ShardStream* stream, const char** shard_paths,
+                                          size_t num_shards, size_t seq_len);
+RCRE_NODISCARD bool rcre_shard_stream_next(RCRE_ShardStream* stream, int32_t* x_out, int32_t* y_out);
+void rcre_shard_stream_close(RCRE_ShardStream* stream);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_LLM_H */
+#endif
+
+/* ========================================================================= */
+/* Zero-Dependency Image Codecs & Minimal ONNX Protobuf Inference            */
+/* ========================================================================= */
+#ifndef RCRE_NO_CODEC
+/**
+ * @file rcre_codec.h
+ * @brief Zero-Dependency Image Codecs (PNG / JPEG / BMP / PPM) & Minimal ONNX Protobuf Runner
+ *
+ * Part of Recep's Code Run Everywhere (RCRE) v2.0.0.
+ * Strict ISO C23 compliant, zero external dependencies (uses rcre_io_mmap_open / write_atomic).
+ */
+
+#ifndef RCRE_CODEC_H
+#define RCRE_CODEC_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Zero-Dependency Raster Image Codecs (PPM, BMP, PNG, Baseline JPEG)     */
+/* ========================================================================= */
+
+/** Outputs [H, W, C] RCRE_DTYPE_U8 tensor (C=1,3, or 4) in arena. */
+RCRE_NODISCARD int rcre_codec_load_ppm(const char* filepath, RCRE_Arena* arena, RCRE_Tensor* out_img);
+RCRE_NODISCARD int rcre_codec_save_ppm(const RCRE_Tensor* img, const char* filepath);
+
+RCRE_NODISCARD int rcre_codec_load_bmp(const char* filepath, RCRE_Arena* arena, RCRE_Tensor* out_img);
+RCRE_NODISCARD int rcre_codec_save_bmp(const RCRE_Tensor* img, const char* filepath);
+
+RCRE_NODISCARD int rcre_codec_load_png_from_buffer(const void* buf, size_t size, RCRE_Arena* arena, RCRE_Tensor* out_img);
+RCRE_NODISCARD int rcre_codec_load_png(const char* filepath, RCRE_Arena* arena, RCRE_Tensor* out_img);
+RCRE_NODISCARD int rcre_codec_save_png(const RCRE_Tensor* img, const char* filepath);
+
+RCRE_NODISCARD int rcre_codec_load_jpeg_from_buffer(const void* buf, size_t size, RCRE_Arena* arena, RCRE_Tensor* out_img);
+RCRE_NODISCARD int rcre_codec_load_jpeg(const char* filepath, RCRE_Arena* arena, RCRE_Tensor* out_img);
+RCRE_NODISCARD int rcre_codec_save_jpeg(const RCRE_Tensor* img, const char* filepath, int quality);
+
+/* ========================================================================= */
+/* 2. Minimal Zero-Dependency ONNX Protobuf Inference Subset                 */
+/* ========================================================================= */
+
+#define RCRE_ONNX_MAX_NODES   128
+#define RCRE_ONNX_MAX_TENSORS 256
+
+typedef enum {
+    RCRE_ONNX_OP_UNKNOWN = 0,
+    RCRE_ONNX_OP_RELU,
+    RCRE_ONNX_OP_GEMM,
+    RCRE_ONNX_OP_MATMUL,
+    RCRE_ONNX_OP_ADD,
+    RCRE_ONNX_OP_SOFTMAX,
+    RCRE_ONNX_OP_CONV,
+    RCRE_ONNX_OP_MAXPOOL,
+    RCRE_ONNX_OP_GLOBAL_AVG_POOL
+} RCRE_ONNXOpType;
+
+typedef struct {
+    char*  name;
+    float* data;
+    size_t dims[4];
+    uint8_t ndim;
+    size_t numel;
+} RCRE_ONNXTensor;
+
+typedef struct {
+    RCRE_ONNXOpType op;
+    char            inputs[4][64];
+    size_t          n_inputs;
+    char            output[64];
+    int             stride;
+    int             pad;
+    int             kernel;
+    int             trans_b;
+} RCRE_ONNXNode;
+
+typedef struct {
+    char            input_name[64];
+    char            output_name[64];
+    RCRE_ONNXTensor initializers[RCRE_ONNX_MAX_TENSORS];
+    size_t          n_init;
+    RCRE_ONNXNode   nodes[RCRE_ONNX_MAX_NODES];
+    size_t          n_nodes;
+} RCRE_ONNXModel;
+
+RCRE_NODISCARD int rcre_onnx_load_buffer(const void* buf, size_t size, RCRE_ONNXModel* out_model);
+RCRE_NODISCARD int rcre_onnx_run(const RCRE_ONNXModel* model, const RCRE_Tensor* input,
+                                 RCRE_Arena* arena, RCRE_Tensor* output);
+void rcre_onnx_free(RCRE_ONNXModel* model);
+
+/** Serializes a 2-layer ONNX protobuf linear/ReLU/Gemm graph into caller buffer for testing. */
+RCRE_NODISCARD size_t rcre_onnx_build_mlp_protobuf(
+    uint8_t* dst,
+    size_t max_bytes,
+    const float* w1, const float* b1, size_t in_dim, size_t hid_dim,
+    const float* w2, const float* b2, size_t out_dim
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_CODEC_H */
+#endif
+#endif /* !RCRE_BUILDING_FROM_SUBHEADER */
+
+/* ========================================================================= */
+/* High-Performance Columnar DataFrame Engine (rcre_df)                      */
+/* ========================================================================= */
+#ifndef RCRE_NO_DF
+/**
+ * @file rcre_df.h
+ * @brief RCRE High-Performance Columnar DataFrame Engine (ISO C23)
+ *
+ * Implements Apache Arrow-compatible columnar layout, null validity bitmasks,
+ * zero-copy tensor/CSV bridges, SIMD row filtering, O(N) LSD radix sort,
+ * and multi-threaded grouped aggregations.
+ */
+
+#ifndef RCRE_DF_H
+#define RCRE_DF_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define RCRE_DF_MAX_COLS 256
+#define RCRE_DF_MAX_NAME 64
+
+/* ========================================================================= */
+/* 1. Columnar Memory Model & Apache Arrow Validity Bitmaps                  */
+/* ========================================================================= */
+
+typedef struct RCRE_Column {
+    char          name[RCRE_DF_MAX_NAME]; /* Column header identifier        */
+    RCRE_DType    dtype;                  /* F32, F64, F16, BF16, I32, I64, U8*/
+    void*         data;                   /* 64-byte aligned data elements   */
+    uint8_t*      validity;               /* Arrow null bitmap (1=valid, 0=null) */
+    size_t        length;                 /* Row count                        */
+    size_t        null_count;             /* Count of null/missing entries   */
+    bool          is_view;                /* true if data points elsewhere   */
+} RCRE_Column;
+
+typedef struct RCRE_DataFrame {
+    RCRE_Column*  columns;                /* Array of columns                */
+    size_t        num_cols;               /* Number of columns               */
+    size_t        num_rows;               /* Row count across all columns    */
+    RCRE_Arena*   arena;                  /* Arena owning DataFrame buffers  */
+} RCRE_DataFrame;
+
+/* ========================================================================= */
+/* 2. Arrow Null Validity Bitmap Primitives                                  */
+/* ========================================================================= */
+
+static inline bool rcre_col_is_null(const RCRE_Column* col, size_t row_idx) {
+    if (!col || !col->validity || col->null_count == 0) {
+        return false;
+    }
+    return (col->validity[row_idx >> 3] & (uint8_t)(1U << (row_idx & 7U))) == 0;
+}
+
+static inline void rcre_col_set_valid(RCRE_Column* col, size_t row_idx, bool is_valid) {
+    if (!col || !col->validity) {
+        return;
+    }
+    uint8_t mask = (uint8_t)(1U << (row_idx & 7U));
+    size_t byte_idx = row_idx >> 3;
+    if (is_valid) {
+        if ((col->validity[byte_idx] & mask) == 0) {
+            col->validity[byte_idx] |= mask;
+            if (col->null_count > 0) col->null_count--;
+        }
+    } else {
+        if ((col->validity[byte_idx] & mask) != 0) {
+            col->validity[byte_idx] &= ~mask;
+            col->null_count++;
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 3. DataFrame Lifecycle & Construction                                     */
+/* ========================================================================= */
+
+/**
+ * @brief Creates an empty DataFrame with specified column schemas and length.
+ * @param col_names Array of column names [num_cols].
+ * @param col_dtypes Array of column dtypes [num_cols].
+ * @param num_cols Number of columns.
+ * @param num_rows Number of rows per column.
+ * @param arena Arena to allocate column metadata and 64B-aligned data buffers.
+ * @param out_df Output initialized DataFrame.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_df_create(
+    const char* const* col_names,
+    const RCRE_DType* col_dtypes,
+    size_t num_cols,
+    size_t num_rows,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+);
+
+/**
+ * @brief Constructs a zero-copy DataFrame view from a 2D numerical tensor.
+ *        Each column references a strided column slice of the tensor.
+ * @param tensor Source 2D contiguous or strided tensor [num_rows, num_cols].
+ * @param col_names Optional array of column names (if NULL, defaults to "col_0", "col_1", ...).
+ * @param arena Arena for column headers.
+ * @param out_df Output DataFrame view.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_df_from_tensor(
+    const RCRE_Tensor* tensor,
+    const char* const* col_names,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+);
+
+/**
+ * @brief Extracts selected numerical columns from a DataFrame into a 2D contiguous RCRE_Tensor.
+ * @param df Source DataFrame.
+ * @param col_indices Indices of columns to extract (must share target dtype).
+ * @param num_cols Number of columns to extract.
+ * @param target_dtype Desired output tensor dtype (F32 recommended).
+ * @param arena Destination arena.
+ * @param out_tensor Output contiguous 2D tensor [num_rows, num_cols].
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_df_to_tensor(
+    const RCRE_DataFrame* df,
+    const size_t* col_indices,
+    size_t num_cols,
+    RCRE_DType target_dtype,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+/**
+ * @brief High-speed ingest of CSV/TSV data directly into columnar DataFrame layout.
+ * @param filepath Path to CSV file.
+ * @param has_header Whether first row contains column headers.
+ * @param delimiter Delimiter character (',' or '\t').
+ * @param arena Arena for allocations.
+ * @param out_df Output parsed DataFrame.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_df_from_csv(
+    const char* filepath,
+    bool has_header,
+    char delimiter,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+);
+
+/* ========================================================================= */
+/* 4. Column Selection, Slicing & Relational Operations                       */
+/* ========================================================================= */
+
+/**
+ * @brief Finds column index by name (case-sensitive).
+ * @return Column index (0 .. num_cols-1) or -1 if not found.
+ */
+RCRE_NODISCARD intptr_t rcre_df_find_col(const RCRE_DataFrame* df, const char* name);
+
+/**
+ * @brief Creates a projection DataFrame containing a subset of columns.
+ */
+RCRE_NODISCARD int rcre_df_select(
+    const RCRE_DataFrame* df,
+    const char* const* col_names,
+    size_t num_selected_cols,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+);
+
+/**
+ * @brief Creates a zero-copy row slice view of an existing DataFrame.
+ */
+RCRE_NODISCARD int rcre_df_slice(
+    const RCRE_DataFrame* df,
+    size_t start_row,
+    size_t num_rows,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+);
+
+/**
+ * @brief Filters rows of a DataFrame using a boolean validity mask.
+ *        Copies matching rows into a contiguous new DataFrame.
+ * @param df Source DataFrame.
+ * @param bool_mask Array of uint8_t boolean flags [num_rows] (1=keep, 0=drop).
+ * @param arena Destination arena.
+ * @param out_df Output filtered DataFrame.
+ */
+RCRE_NODISCARD int rcre_df_filter(
+    const RCRE_DataFrame* df,
+    const uint8_t* bool_mask,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+);
+
+/**
+ * @brief Sorts all columns of a DataFrame by a key column in O(N) using LSD Radix Sort.
+ * @param df Source DataFrame.
+ * @param sort_col_idx Index of column to sort by.
+ * @param ascending True for ascending order, false for descending.
+ * @param arena Destination arena for sorted DataFrame.
+ * @param out_df Output sorted DataFrame.
+ */
+RCRE_NODISCARD int rcre_df_sort(
+    const RCRE_DataFrame* df,
+    size_t sort_col_idx,
+    bool ascending,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+);
+
+/* ========================================================================= */
+/* 5. Parallel GroupBy & Aggregations                                        */
+/* ========================================================================= */
+
+typedef enum {
+    RCRE_AGG_SUM   = 0,
+    RCRE_AGG_MEAN  = 1,
+    RCRE_AGG_COUNT = 2,
+    RCRE_AGG_MIN   = 3,
+    RCRE_AGG_MAX   = 4,
+    RCRE_AGG_VAR   = 5,
+    RCRE_AGG_STD   = 6
+} RCRE_AggOp;
+
+typedef struct RCRE_AggSpec {
+    size_t      target_col_idx; /* Column to aggregate                       */
+    RCRE_AggOp  op;             /* Aggregation operation                     */
+    const char* out_name;       /* Output column name (e.g. "fare_mean")     */
+} RCRE_AggSpec;
+
+/**
+ * @brief Performs high-performance hash-based GroupBy aggregation.
+ * @param df Source DataFrame.
+ * @param group_col_idx Column index to group by (typically integer / categorical).
+ * @param specs Array of aggregation operations [num_specs].
+ * @param num_specs Number of aggregation operations.
+ * @param arena Destination arena.
+ * @param out_df Output DataFrame with [group_key, agg_0, agg_1, ...].
+ */
+RCRE_NODISCARD int rcre_df_groupby(
+    const RCRE_DataFrame* df,
+    size_t group_col_idx,
+    const RCRE_AggSpec* specs,
+    size_t num_specs,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+);
+
+/* ========================================================================= */
+/* 6. Apache Arrow C Data Interface Zero-Copy Export                         */
+/* ========================================================================= */
+
+/**
+ * @brief Exports a single column of a DataFrame as an Apache Arrow C Data Interface array.
+ * @param col Source column.
+ * @param arena Arena for ArrowSchema and ArrowArray pointers.
+ * @param out_schema Output ArrowSchema.
+ * @param out_array Output ArrowArray (references col->data and col->validity with 0 copies).
+ */
+RCRE_NODISCARD int rcre_col_to_arrow(
+    const RCRE_Column* col,
+    RCRE_Arena* arena,
+    RCRE_ArrowSchema* out_schema,
+    RCRE_ArrowArray* out_array
+);
+
+/**
+ * @brief Prints an ASCII tabular preview of the DataFrame to stdout (like head/tail).
+ * @param df Source DataFrame.
+ * @param max_rows Maximum number of rows to display (e.g. 10).
+ */
+void rcre_df_print(const RCRE_DataFrame* df, size_t max_rows);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_DF_H */
+#endif
+
+/* ========================================================================= */
+/* Exploratory Data Analysis & Statistics (rcre_stat)                        */
+/* ========================================================================= */
+#ifndef RCRE_NO_STAT
+/**
+ * @file rcre_stat.h
+ * @brief RCRE Exploratory Data Analysis & Scientific Statistics Core (ISO C23)
+ *
+ * Implements numerically stable Welford moments, SIMD quantiles,
+ * Pearson & Spearman correlation matrices, and Principal Component Analysis (PCA).
+ */
+
+#ifndef RCRE_STAT_H
+#define RCRE_STAT_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Descriptive Summary Statistics (Welford Single-Pass)                   */
+/* ========================================================================= */
+
+typedef struct RCRE_StatSummary {
+    size_t count;      /* Valid element count                                */
+    size_t null_count; /* Number of NaN/missing values                       */
+    float  mean;       /* Arithmetic mean                                    */
+    float  variance;   /* Unbiased sample variance (N-1 denominator)         */
+    float  stddev;     /* Sample standard deviation                          */
+    float  skewness;   /* Sample skewness (3rd standardized moment)          */
+    float  kurtosis;   /* Sample excess kurtosis (4th standardized moment - 3)*/
+    float  min;        /* Minimum value                                      */
+    float  max;        /* Maximum value                                      */
+    float  q25;        /* 25th percentile (1st quartile)                     */
+    float  median;     /* Median value (50th percentile)                     */
+    float  q75;        /* 75th percentile (3rd quartile)                     */
+    float  iqr;        /* Interquartile range (q75 - q25)                    */
+} RCRE_StatSummary;
+
+/**
+ * @brief Computes comprehensive descriptive statistics on a float array in O(N).
+ * @param x Input float array [n].
+ * @param n Element count.
+ * @param scratch Transient arena for percentile quickselect scratch memory.
+ * @return Computed summary structure.
+ */
+RCRE_NODISCARD RCRE_StatSummary rcre_stat_describe(
+    const float* x,
+    size_t n,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Computes exact quantile in O(N) using Quickselect.
+ * @param x Input float array [n].
+ * @param n Element count.
+ * @param q Quantile target between 0.0 and 1.0 (e.g. 0.5 for median).
+ * @param scratch Transient arena for copying elements before partitioning.
+ * @return Computed quantile value.
+ */
+RCRE_NODISCARD float rcre_stat_quantile(
+    const float* x,
+    size_t n,
+    float q,
+    RCRE_Arena* scratch
+);
+
+/* ========================================================================= */
+/* 2. Covariance & Correlation Matrices                                      */
+/* ========================================================================= */
+
+/**
+ * @brief Computes the sample covariance matrix (P x P) for an N x P dataset.
+ * @param X Input matrix [num_samples, num_features] (contiguous F32).
+ * @param arena Destination arena.
+ * @return Output covariance matrix [num_features, num_features].
+ */
+RCRE_NODISCARD RCRE_Tensor rcre_stat_cov_matrix(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+/**
+ * @brief Computes the Pearson correlation matrix (P x P) in [-1, 1].
+ * @param X Input matrix [num_samples, num_features].
+ * @param arena Destination arena.
+ * @return Output correlation matrix [num_features, num_features].
+ */
+RCRE_NODISCARD RCRE_Tensor rcre_stat_corr_matrix(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+/**
+ * @brief Computes the Spearman rank correlation matrix (P x P) in [-1, 1].
+ * @param X Input matrix [num_samples, num_features].
+ * @param arena Destination arena.
+ * @return Output rank correlation matrix.
+ */
+RCRE_NODISCARD RCRE_Tensor rcre_stat_spearman_matrix(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+/* ========================================================================= */
+/* 3. Principal Component Analysis (PCA)                                     */
+/* ========================================================================= */
+
+typedef struct RCRE_PCA {
+    RCRE_Tensor components;               /* Eigenvectors [n_components, n_features] */
+    float*      explained_variance;       /* Eigenvalues [n_components]              */
+    float*      explained_variance_ratio; /* Variance ratio [n_components]           */
+    float*      mean;                     /* Feature means [n_features]              */
+    size_t      n_components;             /* Number of principal components          */
+    size_t      n_features;               /* Input feature dimension                 */
+} RCRE_PCA;
+
+/**
+ * @brief Fits Principal Component Analysis via power-iteration SVD on covariance.
+ * @param X Input dataset [num_samples, num_features].
+ * @param n_components Number of principal components to extract.
+ * @param arena Destination arena.
+ * @return Output fitted PCA model.
+ */
+RCRE_NODISCARD RCRE_PCA rcre_pca_fit(
+    const RCRE_Tensor* X,
+    size_t n_components,
+    RCRE_Arena* arena
+);
+
+/**
+ * @brief Projects high-dimensional data into PCA subspace: Y = (X - mean) * V^T.
+ * @param pca Fitted PCA model.
+ * @param X Input dataset [num_samples, n_features].
+ * @param arena Destination arena.
+ * @return Output coordinates [num_samples, n_components].
+ */
+RCRE_NODISCARD RCRE_Tensor rcre_pca_transform(
+    const RCRE_PCA* pca,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_STAT_H */
+#endif
+
+/* ========================================================================= */
+/* Feature Engineering & Data Preprocessing (rcre_prep)                      */
+/* ========================================================================= */
+#ifndef RCRE_NO_PREP
+/**
+ * @file rcre_prep.h
+ * @brief RCRE Data Preprocessing & Feature Engineering Pipelines (ISO C23)
+ *
+ * Implements StandardScaler, MinMaxScaler, RobustScaler, SimpleImputer,
+ * and One-Hot Encoding with zero-heap arena allocation.
+ */
+
+#ifndef RCRE_PREP_H
+#define RCRE_PREP_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Feature Scalers: Standard, MinMax, Robust                              */
+/* ========================================================================= */
+
+typedef struct {
+    float* mean;     /* Feature means [n_features]                           */
+    float* scale;    /* Feature inverse standard deviations [n_features]     */
+    size_t n_features;
+} RCRE_PrepStandardScaler;
+
+RCRE_NODISCARD RCRE_PrepStandardScaler rcre_prep_standard_scaler_fit(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+RCRE_NODISCARD RCRE_Tensor rcre_prep_standard_scaler_transform(
+    const RCRE_PrepStandardScaler* scaler,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+typedef struct {
+    float* min;      /* Feature minimums [n_features]                        */
+    float* scale;    /* Inverse range: (feature_max - feature_min) / (max - min) */
+    float  feature_min;
+    float  feature_max;
+    size_t n_features;
+} RCRE_PrepMinMaxScaler;
+
+RCRE_NODISCARD RCRE_PrepMinMaxScaler rcre_prep_minmax_scaler_fit(
+    const RCRE_Tensor* X,
+    float feature_min,
+    float feature_max,
+    RCRE_Arena* arena
+);
+
+RCRE_NODISCARD RCRE_Tensor rcre_prep_minmax_scaler_transform(
+    const RCRE_PrepMinMaxScaler* scaler,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+typedef struct {
+    float* center;   /* Feature medians [n_features]                         */
+    float* scale;    /* Feature inverse IQR: 1.0 / (Q75 - Q25) [n_features]  */
+    size_t n_features;
+} RCRE_RobustScaler;
+
+RCRE_NODISCARD RCRE_RobustScaler rcre_prep_robust_scaler_fit(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+RCRE_NODISCARD RCRE_Tensor rcre_prep_robust_scaler_transform(
+    const RCRE_RobustScaler* scaler,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+/* ========================================================================= */
+/* 2. Missing Value Imputation                                               */
+/* ========================================================================= */
+
+typedef enum {
+    RCRE_IMPUTE_MEAN     = 0,
+    RCRE_IMPUTE_MEDIAN   = 1,
+    RCRE_IMPUTE_CONSTANT = 2
+} RCRE_ImputeStrategy;
+
+typedef struct {
+    RCRE_ImputeStrategy strategy;
+    float*              statistics; /* Replacement value per column [n_cols] */
+    size_t              n_features;
+} RCRE_SimpleImputer;
+
+RCRE_NODISCARD RCRE_SimpleImputer rcre_prep_simple_imputer_fit(
+    const RCRE_Tensor* X,
+    RCRE_ImputeStrategy strategy,
+    RCRE_Arena* arena
+);
+
+RCRE_NODISCARD RCRE_Tensor rcre_prep_simple_imputer_transform(
+    const RCRE_SimpleImputer* imputer,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+);
+
+/* ========================================================================= */
+/* 3. Categorical Encoders                                                   */
+/* ========================================================================= */
+
+/**
+ * @brief Expands an integer category column into an N x K one-hot float tensor.
+ * @param categories Array of integer category labels in 0 .. num_classes-1 [n].
+ * @param n Sample count.
+ * @param num_classes Class count (K).
+ * @param arena Destination arena.
+ * @return Output dense float tensor [n, num_classes].
+ */
+RCRE_NODISCARD RCRE_Tensor rcre_one_hot_encode(
+    const int32_t* categories,
+    size_t n,
+    size_t num_classes,
+    RCRE_Arena* arena
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_PREP_H */
+#endif
+
+/* ========================================================================= */
+/* Model Evaluation Metrics & Validation Protocol (rcre_metric)              */
+/* ========================================================================= */
+#ifndef RCRE_NO_METRIC
+/**
+ * @file rcre_metric.h
+ * @brief RCRE Model Evaluation Metrics & Cross-Validation Protocol (ISO C23)
+ *
+ * Implements ROC-AUC, PR-AUC, Confusion Matrix, F1-Score, R2, RMSE, MAE,
+ * Silhouette Score, Davies-Bouldin Index, and Stratified K-Fold CV splits.
+ */
+
+#ifndef RCRE_METRIC_H
+#define RCRE_METRIC_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Classification Metrics                                                 */
+/* ========================================================================= */
+
+typedef struct {
+    float  accuracy;
+    float  precision;
+    float  recall;       /* Sensitivity / True Positive Rate                 */
+    float  specificity;  /* True Negative Rate                               */
+    float  f1_score;     /* 2 * P * R / (P + R)                              */
+    float  mcc;          /* Matthews Correlation Coefficient                 */
+    size_t tp;
+    size_t fp;
+    size_t tn;
+    size_t fn;
+} RCRE_ClassificationReport;
+
+/**
+ * @brief Computes Area Under the Receiver Operating Characteristic Curve (ROC-AUC).
+ * @param y_true Ground truth binary labels (0 or 1) [n].
+ * @param y_score Predicted probability or continuous decision score [n].
+ * @param n Sample count.
+ * @param scratch Transient arena for sorting predictions.
+ * @return Computed ROC-AUC score in [0.0, 1.0].
+ */
+RCRE_NODISCARD float rcre_metric_roc_auc(
+    const float* y_true,
+    const float* y_score,
+    size_t n,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Computes Area Under the Precision-Recall Curve (PR-AUC).
+ */
+RCRE_NODISCARD float rcre_metric_pr_auc(
+    const float* y_true,
+    const float* y_score,
+    size_t n,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Computes C x C confusion matrix for multi-class predictions.
+ * @param y_true Ground truth labels (0 .. num_classes-1) [n].
+ * @param y_pred Predicted labels (0 .. num_classes-1) [n].
+ * @param n Sample count.
+ * @param num_classes Class count (C).
+ * @param arena Destination arena.
+ * @return Output C x C tensor (int32).
+ */
+RCRE_NODISCARD RCRE_Tensor rcre_metric_confusion_matrix(
+    const int32_t* y_true,
+    const int32_t* y_pred,
+    size_t n,
+    size_t num_classes,
+    RCRE_Arena* arena
+);
+
+/**
+ * @brief Computes binary classification performance report (accuracy, F1, MCC).
+ */
+RCRE_NODISCARD RCRE_ClassificationReport rcre_metric_classification_summary(
+    const int32_t* y_true,
+    const int32_t* y_pred,
+    size_t n,
+    float threshold
+);
+
+/**
+ * @brief Computes binary cross-entropy log-loss.
+ */
+RCRE_NODISCARD float rcre_metric_log_loss(
+    const float* y_true,
+    const float* y_prob,
+    size_t n
+);
+
+/* ========================================================================= */
+/* 2. Regression Metrics                                                     */
+/* ========================================================================= */
+
+RCRE_NODISCARD float rcre_metric_mse(
+    const float* y_true,
+    const float* y_pred,
+    size_t n
+);
+
+RCRE_NODISCARD float rcre_metric_rmse(
+    const float* y_true,
+    const float* y_pred,
+    size_t n
+);
+
+RCRE_NODISCARD float rcre_metric_mae(
+    const float* y_true,
+    const float* y_pred,
+    size_t n
+);
+
+/**
+ * @brief Computes R^2 (coefficient of determination): 1 - (SS_res / SS_tot).
+ */
+RCRE_NODISCARD float rcre_metric_r2_score(
+    const float* y_true,
+    const float* y_pred,
+    size_t n
+);
+
+/* ========================================================================= */
+/* 3. Unsupervised Clustering Validation                                     */
+/* ========================================================================= */
+
+/**
+ * @brief Computes mean Silhouette Score over all clustered samples in [-1, 1].
+ * @param X Feature matrix [n_samples, n_features].
+ * @param labels Cluster label per sample (0 .. n_clusters-1) [n_samples].
+ * @param scratch Transient arena.
+ * @return Output mean silhouette score.
+ */
+RCRE_NODISCARD float rcre_metric_silhouette_score(
+    const RCRE_Tensor* X,
+    const int32_t* labels,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Computes Davies-Bouldin Index (lower is better, 0 is optimal separation).
+ */
+RCRE_NODISCARD float rcre_metric_davies_bouldin_score(
+    const RCRE_Tensor* X,
+    const int32_t* labels,
+    size_t n_clusters,
+    RCRE_Arena* scratch
+);
+
+/* ========================================================================= */
+/* 4. Cross-Validation & Resampling Protocol                                 */
+/* ========================================================================= */
+
+typedef struct {
+    size_t* train_indices;
+    size_t  train_count;
+    size_t* test_indices;
+    size_t  test_count;
+} RCRE_FoldSplit;
+
+/**
+ * @brief Generates K-Fold cross validation index splits.
+ * @param n_samples Total dataset size.
+ * @param k Number of folds (e.g. 5 or 10).
+ * @param shuffle Whether to shuffle indices.
+ * @param seed PRNG seed for shuffling.
+ * @param arena Destination arena.
+ * @param out_splits Output array of k fold splits [k].
+ * @return RCRE_OK on success.
+ */
+RCRE_NODISCARD int rcre_cv_kfold(
+    size_t n_samples,
+    size_t k,
+    bool shuffle,
+    uint64_t seed,
+    RCRE_Arena* arena,
+    RCRE_FoldSplit* out_splits
+);
+
+/**
+ * @brief Generates Stratified K-Fold cross validation index splits.
+ */
+RCRE_NODISCARD int rcre_cv_stratified_kfold(
+    const int32_t* y_labels,
+    size_t n_samples,
+    size_t k,
+    RCRE_Arena* arena,
+    RCRE_FoldSplit* out_splits
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_METRIC_H */
+#endif
+
+/* ========================================================================= */
+/* Data Science Terminal & ASCII Visualizations (rcre_vis_ds)                */
+/* ========================================================================= */
+#ifndef RCRE_NO_VIS_DS
+/**
+ * @file rcre_vis_ds.h
+ * @brief RCRE Data Science Terminal Visualizer (ISO C23)
+ *
+ * Implements ANSI 256-color correlation heatmaps, Unicode distribution histograms,
+ * and horizontal boxplots directly in the shell.
+ */
+
+#ifndef RCRE_VIS_DS_H
+#define RCRE_VIS_DS_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Forward declare RCRE_StatSummary */
+typedef struct RCRE_StatSummary RCRE_StatSummary;
+
+/**
+ * @brief Renders an ANSI 256-color correlation matrix heatmap to stdout.
+ * @param corr_matrix P x P Pearson/Spearman correlation tensor.
+ * @param col_names Optional array of column label strings [p].
+ * @param p Feature count.
+ */
+void rcre_vis_terminal_heatmap(
+    const RCRE_Tensor* corr_matrix,
+    const char* const* col_names,
+    size_t p
+);
+
+void rcre_vis_corr_heatmap(
+    const RCRE_Tensor* corr_matrix,
+    const char* const* col_names
+);
+
+/**
+ * @brief Renders a Unicode horizontal histogram to stdout.
+ * @param x Float data array [n].
+ * @param n Element count.
+ * @param num_bins Number of histogram bins (e.g. 10 to 20).
+ * @param title Optional title string.
+ */
+void rcre_vis_terminal_hist(
+    const float* x,
+    size_t n,
+    size_t num_bins,
+    const char* title
+);
+
+void rcre_vis_histogram(
+    const float* x,
+    size_t n,
+    size_t num_bins,
+    const char* title
+);
+
+/**
+ * @brief Renders a Unicode horizontal boxplot to stdout based on summary statistics.
+ * @param stats Precomputed summary statistics (min, q25, median, q75, max).
+ * @param label Variable name or description.
+ */
+void rcre_vis_terminal_boxplot(
+    const RCRE_StatSummary* stats,
+    const char* label
+);
+
+void rcre_vis_boxplot(
+    const float* x,
+    size_t n,
+    const char* label,
+    RCRE_Arena* scratch
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_VIS_DS_H */
 #endif
 
 #ifdef __cplusplus
@@ -2139,7 +4480,23 @@ void rcre_scalar_gemm_f32(size_t M, size_t N, size_t K, float alpha,
                           const float* B, size_t ldb, 
                           float beta, float* C, size_t ldc);
 
+void rcre_scalar_gemv_f32(size_t M, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* x, float beta, float* y);
+
 float rcre_scalar_dot_f32(const float* x, const float* y, size_t n);
+
+int32_t rcre_scalar_dot_i8(const int8_t* x, const int8_t* y, size_t n);
+
+void rcre_scalar_gemm_i8(size_t M, size_t N, size_t K,
+                         const int8_t* A, size_t lda,
+                         const int8_t* B, size_t ldb,
+                         int32_t* C, size_t ldc);
+
+void rcre_scalar_gemm_bf16(size_t M, size_t N, size_t K, float alpha,
+                           const uint16_t* A, size_t lda,
+                           const uint16_t* B, size_t ldb,
+                           float beta, float* C, size_t ldc);
 
 void rcre_scalar_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
@@ -2156,7 +4513,18 @@ void rcre_neon_gemm_f32(size_t M, size_t N, size_t K, float alpha,
                         const float* B, size_t ldb, 
                         float beta, float* C, size_t ldc);
 
+void rcre_neon_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y);
+
 float rcre_neon_dot_f32(const float* x, const float* y, size_t n);
+
+int32_t rcre_neon_dot_i8(const int8_t* x, const int8_t* y, size_t n);
+
+void rcre_neon_gemm_i8(size_t M, size_t N, size_t K,
+                       const int8_t* A, size_t lda,
+                       const int8_t* B, size_t ldb,
+                       int32_t* C, size_t ldc);
 
 void rcre_neon_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
@@ -2174,7 +4542,18 @@ void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha,
                         const float* B, size_t ldb, 
                         float beta, float* C, size_t ldc);
 
+void rcre_avx2_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y);
+
 float rcre_avx2_dot_f32(const float* x, const float* y, size_t n);
+
+int32_t rcre_avx2_dot_i8(const int8_t* x, const int8_t* y, size_t n);
+
+void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
+                       const int8_t* A, size_t lda,
+                       const int8_t* B, size_t ldb,
+                       int32_t* C, size_t ldc);
 
 void rcre_avx2_axpy_f32(size_t n, float alpha, const float* x, float* y);
 
@@ -2185,12 +4564,32 @@ size_t rcre_avx2_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 #endif
 
+/* x86 AVX-512 512-bit Micro-Kernels */
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX512F__) || defined(__clang__) || defined(__GNUC__))
+void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc);
+
+void rcre_avx512_gemv_f32(size_t M, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* x, float beta, float* y);
+
+float rcre_avx512_dot_f32(const float* x, const float* y, size_t n);
+
+void rcre_avx512_axpy_f32(size_t n, float alpha, const float* x, float* y);
+#endif
+
 /* WebAssembly 128-bit SIMD Micro-Kernels */
 #if defined(__wasm_simd128__)
 void rcre_wasm_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
                         const float* A, size_t lda, 
                         const float* B, size_t ldb, 
                         float beta, float* C, size_t ldc);
+
+void rcre_wasm_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y);
 
 float rcre_wasm_dot_f32(const float* x, const float* y, size_t n);
 
@@ -2257,6 +4656,192 @@ static inline float rcre_rand_f32(uint64_t* state) {
 }
 
 #endif /* RCRE_ML_INTERNAL_H */
+
+/* --- e-means State Machine (test-visible internals) --- */
+/**
+ * @file e_means_internal.h
+ * @brief e-means internal state machine (test-visible).
+ *
+ * The three-phase split (init / run-batch / update / finalize) mirrors the
+ * reference's begin/accumulate/update/end_epoch/finalize surface. The
+ * inject entry point is the strict-parity hook: the C state machine is
+ * driven with (sums, counts) streams produced by the Python oracle
+ * (ref/ref_emeans.py) and must reproduce its FP32 (c_j, N_j) trajectory
+ * bit-for-bit (0 ULP). The full fit path produces its own statistics via
+ * assignment instead of injection.
+ *
+ * Documented operation-order contract (docs/exactness.md):
+ *  - batch sums s_j: FP32, unbuffered, rows in processing order (the
+ *    full-run path groups by chunk/slab — fixed for a given (n, k, B);
+ *    the injected path is exactly row order);
+ *  - EMA: N *= decay (all k, FP32), then per touched j in index order:
+ *    t = alpha*n, mass = N + t, mean = s/n, w = t/mass,
+ *    c += w*(mean - c), c = mean when w == 1 (all FP32, no FMA);
+ *  - alpha(t) computed in double (Eq. 5), cast to FP32 once at use;
+ *    decay = (float)(1.0 - alpha_double);
+ *  - revival threshold: total = sequential FP32 sum over j (index order),
+ *    thr = (total * tau) / k in FP32; Gumbel keys: (double)logf(N_j) -
+ *    log(-log(U_j)), U stream consumed for ALL k per check;
+ *  - split: child written first (reads original donor), then donor;
+ *    delta pattern [1,-1,1,-1,...]*1e-4; nextafter on coord 0 when
+ *    donor/child collapse bit-wise;
+ *  - finalization: FP64 pass sums/counts (documented improvement over the
+ *    reference's FP32 pass sums), final division in FP32.
+ */
+
+#ifndef E_MEANS_INTERNAL_H
+#define E_MEANS_INTERNAL_H
+
+
+#define EM_INIT_USAGE_EXP    16               /* N_j(0) = 2^-16 (shipped reference) */
+#define EM_SPLIT_EPSILON     1e-4f            /* donor-split delta (shipped code)   */
+#define EM_UNUSED_TAU        0.1f             /* auto revival threshold             */
+#define EM_NO_REVIVAL_MAX_D  2                /* revival auto-off at d <= 2         */
+#define EM_AUTO_QUALITY_MAX_D 16              /* auto quality law at d <= 16        */
+#define EM_CHECK_EVERY       5                /* revival check cadence (updates)    */
+#define EM_ALPHA_MIN_FACTOR  0.1              /* cosine floor (Eq. 5)               */
+#define EM_DMAT_BUDGET       (16u * 1024u * 1024u) /* chunk*k FP32 cap             */
+#define EM_EXACT_DOTS_MAX    16384ul              /* k*d cap for the exact kernel   */
+#define EM_MAX_STAT_BUFFERS  16               /* per-slab stats buffers             */
+#define EM_MIN_SLAB_ROWS     64               /* don't split chunks below this     */
+#define EM_MAX_EPOCHS        16               /* fixed recipe array                 */
+#define EM_MAX_T             16.0f            /* nepochs cap (16 whole passes)      */
+#define EM_MAX_N             ((size_t)1 << 32)/* uint32 permutation cap             */
+
+/* ========================================================================= */
+/* State                                                                     */
+/* ========================================================================= */
+
+/** Max-heap node for Gumbel-max revival selection. */
+typedef struct EMHeapNode {
+    double key;
+    size_t j;
+} EMHeapNode;
+
+typedef struct EMState {
+    /* geometry */
+    const float* X;
+    size_t n, d, k;          /* n = active rows (subset-capped)              */
+    size_t n_total;          /* full input rows (labels cover all)           */
+
+    /* model (FP32) */
+    float*  c;               /* [k][d] positions                             */
+    float*  N;               /* [k]    masses                                */
+
+    /* recipe */
+    RCRE_EMMeansRecipe recipe;
+    double alpha0_f64;       /* peak step in double (Eq. 5)                  */
+
+    /* run bookkeeping */
+    size_t update_idx;       /* t: 0-based global update index               */
+    size_t epoch_idx;
+    size_t epoch_cursor;
+    bool   last_epoch;
+    bool   capturing;        /* write labels during this batch               */
+    bool   do_shuffle;
+
+    /* active-row id array; per-epoch Fisher-Yates permutation of it */
+    uint32_t* order;
+
+    /* finalization (FP64) */
+    double* pass_sums;       /* [k][d], active on last epoch                 */
+    double* pass_counts;     /* [k]                                          */
+
+    /* batch scratch */
+    float*   cc;             /* [k] centroid norm-squares (per snapshot)     */
+    float*   Dmat;           /* [chunk][k] gemm output (NULL: exact kernel)  */
+    float*   gather;         /* [chunk][d] gathered rows (NULL: exact kernel) */
+    size_t   chunk;          /* assignment chunk rows (adaptive)             */
+    bool     use_exact_dots; /* exact per-row FP32 dots (k*d <= cap)         */
+    float*   batch_s;        /* [k][d] FP32 batch sums                       */
+    float*   batch_n;        /* [k]    FP32 batch counts                     */
+    int32_t* labels;         /* [n_total] last-epoch labels (-1 default)     */
+
+    /* per-slab stats (parallel path; serial uses slab 0) */
+    float**    wsum;         /* [nbuf][k*d]                                  */
+    uint32_t*  wcnt;         /* [nbuf][k]                                    */
+    double*    wobj;         /* [nbuf] slab objectives                       */
+    size_t     nbuf;         /* allocated slab buffers (16 or 1)             */
+
+    /* RNG streams */
+    uint64_t rng_shuf;       /* per-epoch Fisher-Yates                       */
+    uint64_t rng_revive;     /* revival Gumbel U stream                      */
+    uint64_t rng_init;       /* random-row init                              */
+
+    /* reporting */
+    double objective;        /* moving-pass F64 objective (informational)    */
+    double obj_last;         /* last-epoch moving-pass objective             */
+    size_t obj_last_rows;    /* rows of the last epoch                       */
+    int    n_splits;         /* total revival splits (observability)         */
+
+    /* injected revival U stream (strict parity; NULL = own RNG) */
+    const double* inject_U;
+    size_t        inject_U_pos;
+    size_t        inject_U_len;
+
+    /* revival scratch (allocated once in em_state_init; reused across checks) */
+    size_t*     revive_targets;  /* [k] */
+    size_t*     revive_donors;   /* [k] */
+    double*     revive_U;        /* [k] */
+    EMHeapNode* revive_heap;     /* [k] */
+
+    /* parallel */
+    RCRE_ThreadPool* pool;
+
+    /* scratch owner (internal allocations: revival scratch, subset sort) */
+    RCRE_Arena* arena;
+} EMState;
+
+/* ========================================================================= */
+/* Recipe helpers (unit-tested directly)                                     */
+/* ========================================================================= */
+
+/** Round a positive double to the nearest power of two (ties -> higher). */
+size_t em_round_pow2(double v);
+
+/** Alpha schedule (Eq. 5): peak alpha0_f64, cosine to 0.1*alpha0. t 0-based. */
+double em_scheduled_alpha(double alpha0_f64, size_t t, size_t total);
+
+/** Fractional-epoch row count, reference ties-to-even rounding. */
+size_t em_epoch_remainder(float nepochs, size_t n);
+
+/** Resolve the full recipe from problem size + params. Mirrors the
+ *  reference's _resolve_recipe (shipped-code constants). */
+RCRE_NODISCARD int em_resolve_recipe(size_t n, size_t k, size_t d,
+                                     const RCRE_EMMeansParams* params,
+                                     RCRE_EMMeansRecipe* out);
+
+/* ========================================================================= */
+/* State machine                                                             */
+/* ========================================================================= */
+
+RCRE_NODISCARD int em_state_init(EMState* st, const RCRE_Tensor* X, size_t k,
+                                 const RCRE_EMMeansParams* params,
+                                 RCRE_Arena* arena, RCRE_ThreadPool* pool);
+
+/** Apply one batch's statistics with the EMA update, finalization
+ *  accumulation and revival check. `objective` is the batch's F64 sum of
+ *  assigned distances (informational). Mirrors the reference's update().
+ *  Strict-parity entry point (injected streams never touch the model). */
+RCRE_NODISCARD int em_state_update(EMState* st, const float* sums,
+                                   const float* counts, double objective);
+
+/** Run one full batch of `m` row ids against the current centroid snapshot:
+ *  chunked gemm + argmin, slab stats, merge, update. Used by the fit loop. */
+RCRE_NODISCARD int em_state_run_batch(EMState* st, const uint32_t* rows,
+                                      size_t m, bool capture);
+
+/** Fisher-Yates permutation of the epoch's order array (per-epoch seed).
+ *  No-op when shuffle is disabled. */
+void em_state_shuffle_epoch(EMState* st);
+
+/** Finalization: last-epoch means for non-empty clusters. */
+RCRE_NODISCARD int em_state_finalize(EMState* st);
+
+/** Recompute cc[] = ||c_j||^2 (call after any centroid move). */
+void em_state_recompute_cc(EMState* st);
+
+#endif /* E_MEANS_INTERNAL_H */
 
 /* --- Internal Random Number Generation --- */
 /**
@@ -2526,6 +5111,70 @@ size_t rcre_scalar_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
         total += (size_t)(hay[i] == needle);
     }
     return total;
+}
+
+void rcre_scalar_gemv_f32(size_t M, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* x, float beta, float* y) {
+    for (size_t i = 0; i < M; ++i) {
+        float acc = rcre_scalar_dot_f32(&A[i * lda], x, K);
+        float prev = (beta == 0.0f) ? 0.0f : (y[i] * beta);
+        y[i] = prev + alpha * acc;
+    }
+}
+
+int32_t rcre_scalar_dot_i8(const int8_t* x, const int8_t* y, size_t n) {
+    int32_t sum = 0;
+    for (size_t i = 0; i < n; ++i) {
+        sum += (int32_t)x[i] * (int32_t)y[i];
+    }
+    return sum;
+}
+
+void rcre_scalar_gemm_i8(size_t M, size_t N, size_t K,
+                         const int8_t* A, size_t lda,
+                         const int8_t* B, size_t ldb,
+                         int32_t* C, size_t ldc) {
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            C[i * ldc + j] = 0;
+        }
+    }
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t k = 0; k < K; ++k) {
+            int32_t a_val = (int32_t)A[i * lda + k];
+            for (size_t j = 0; j < N; ++j) {
+                C[i * ldc + j] += a_val * (int32_t)B[k * ldb + j];
+            }
+        }
+    }
+}
+
+static inline float scalar_bf16_to_f32(uint16_t b) {
+    uint32_t u = ((uint32_t)b) << 16;
+    float f = 0.0f;
+    __builtin_memcpy(&f, &u, sizeof(float));
+    return f;
+}
+
+void rcre_scalar_gemm_bf16(size_t M, size_t N, size_t K, float alpha,
+                           const uint16_t* A, size_t lda,
+                           const uint16_t* B, size_t ldb,
+                           float beta, float* C, size_t ldc) {
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            C[i * ldc + j] = (beta == 0.0f) ? 0.0f : (C[i * ldc + j] * beta);
+        }
+    }
+    if (alpha == 0.0f) return;
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t k = 0; k < K; ++k) {
+            float a_val = alpha * scalar_bf16_to_f32(A[i * lda + k]);
+            for (size_t j = 0; j < N; ++j) {
+                C[i * ldc + j] += a_val * scalar_bf16_to_f32(B[k * ldb + j]);
+            }
+        }
+    }
 }
 
 /* --- Source: kernels_neon.c --- */
@@ -2890,6 +5539,100 @@ size_t rcre_neon_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
     return total;
 }
 
+void rcre_neon_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y) {
+    size_t i = 0;
+    for (; i + 3 < M; i += 4) {
+        const float* r0 = &A[(i + 0) * lda];
+        const float* r1 = &A[(i + 1) * lda];
+        const float* r2 = &A[(i + 2) * lda];
+        const float* r3 = &A[(i + 3) * lda];
+        float32x4_t acc0 = vdupq_n_f32(0.0f);
+        float32x4_t acc1 = vdupq_n_f32(0.0f);
+        float32x4_t acc2 = vdupq_n_f32(0.0f);
+        float32x4_t acc3 = vdupq_n_f32(0.0f);
+        size_t k = 0;
+        for (; k + 3 < K; k += 4) {
+            float32x4_t xv = vld1q_f32(&x[k]);
+            acc0 = vfmaq_f32(acc0, vld1q_f32(&r0[k]), xv);
+            acc1 = vfmaq_f32(acc1, vld1q_f32(&r1[k]), xv);
+            acc2 = vfmaq_f32(acc2, vld1q_f32(&r2[k]), xv);
+            acc3 = vfmaq_f32(acc3, vld1q_f32(&r3[k]), xv);
+        }
+        float s0 = vaddvq_f32(acc0), s1 = vaddvq_f32(acc1), s2 = vaddvq_f32(acc2), s3 = vaddvq_f32(acc3);
+        for (; k < K; ++k) {
+            float xv = x[k];
+            s0 += r0[k] * xv;
+            s1 += r1[k] * xv;
+            s2 += r2[k] * xv;
+            s3 += r3[k] * xv;
+        }
+        y[i + 0] = (beta == 0.0f ? 0.0f : y[i + 0] * beta) + alpha * s0;
+        y[i + 1] = (beta == 0.0f ? 0.0f : y[i + 1] * beta) + alpha * s1;
+        y[i + 2] = (beta == 0.0f ? 0.0f : y[i + 2] * beta) + alpha * s2;
+        y[i + 3] = (beta == 0.0f ? 0.0f : y[i + 3] * beta) + alpha * s3;
+    }
+    for (; i < M; ++i) {
+        float acc = rcre_neon_dot_f32(&A[i * lda], x, K);
+        y[i] = (beta == 0.0f ? 0.0f : y[i] * beta) + alpha * acc;
+    }
+}
+
+int32_t rcre_neon_dot_i8(const int8_t* x, const int8_t* y, size_t n) {
+    int32x4_t acc = vdupq_n_s32(0);
+    size_t i = 0;
+#if defined(__ARM_FEATURE_DOTPROD)
+    for (; i + 15 < n; i += 16) {
+        acc = vdotq_s32(acc, vld1q_s8(&x[i]), vld1q_s8(&y[i]));
+    }
+#else
+    for (; i + 15 < n; i += 16) {
+        int8x16_t vx = vld1q_s8(&x[i]);
+        int8x16_t vy = vld1q_s8(&y[i]);
+        int16x8_t p_lo = vmull_s8(vget_low_s8(vx), vget_low_s8(vy));
+        int16x8_t p_hi = vmull_s8(vget_high_s8(vx), vget_high_s8(vy));
+        acc = vpadalq_s16(acc, p_lo);
+        acc = vpadalq_s16(acc, p_hi);
+    }
+#endif
+    int32_t sum = vaddvq_s32(acc);
+    for (; i < n; ++i) {
+        sum += (int32_t)x[i] * (int32_t)y[i];
+    }
+    return sum;
+}
+
+void rcre_neon_gemm_i8(size_t M, size_t N, size_t K,
+                       const int8_t* A, size_t lda,
+                       const int8_t* B, size_t ldb,
+                       int32_t* C, size_t ldc) {
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            C[i * ldc + j] = 0;
+        }
+    }
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t k = 0; k < K; ++k) {
+            int16_t a_val = (int16_t)A[i * lda + k];
+            int16x8_t va = vdupq_n_s16(a_val);
+            size_t j = 0;
+            for (; j + 7 < N; j += 8) {
+                int16x8_t vb = vmovl_s8(vld1_s8(&B[k * ldb + j]));
+                int32x4_t c_lo = vld1q_s32(&C[i * ldc + j]);
+                int32x4_t c_hi = vld1q_s32(&C[i * ldc + j + 4]);
+                c_lo = vmlal_s16(c_lo, vget_low_s16(va), vget_low_s16(vb));
+                c_hi = vmlal_s16(c_hi, vget_high_s16(va), vget_high_s16(vb));
+                vst1q_s32(&C[i * ldc + j], c_lo);
+                vst1q_s32(&C[i * ldc + j + 4], c_hi);
+            }
+            for (; j < N; ++j) {
+                C[i * ldc + j] += (int32_t)a_val * (int32_t)B[k * ldb + j];
+            }
+        }
+    }
+}
+
 #endif /* __ARM_NEON || __aarch64__ */
 
 /* --- Source: kernels_avx2.c --- */
@@ -2909,9 +5652,11 @@ size_t rcre_neon_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
 #if !defined(__AVX2__)
   #if defined(__clang__)
     #pragma clang attribute push(__attribute__((target("avx2,fma"))), apply_to = function)
+    #define RCRE_NEED_POP_AVX2 2
   #elif defined(__GNUC__)
     #pragma GCC push_options
     #pragma GCC target("avx2,fma")
+    #define RCRE_NEED_POP_AVX2 1
   #endif
 #endif
 
@@ -3265,15 +6010,239 @@ size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
     return total;
 }
 
-#if !defined(__AVX2__)
-  #if defined(__clang__)
+void rcre_avx2_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y) {
+    for (size_t i = 0; i < M; ++i) {
+        float acc = rcre_avx2_dot_f32(&A[i * lda], x, K);
+        float prev = (beta == 0.0f) ? 0.0f : (y[i] * beta);
+        y[i] = prev + alpha * acc;
+    }
+}
+
+int32_t rcre_avx2_dot_i8(const int8_t* x, const int8_t* y, size_t n) {
+    __m256i acc = _mm256_setzero_si256();
+    size_t i = 0;
+    for (; i + 15 < n; i += 16) {
+        __m128i x8 = _mm_loadu_si128((const __m128i*)&x[i]);
+        __m128i y8 = _mm_loadu_si128((const __m128i*)&y[i]);
+        __m256i x16 = _mm256_cvtepi8_epi16(x8);
+        __m256i y16 = _mm256_cvtepi8_epi16(y8);
+        __m256i prod32 = _mm256_madd_epi16(x16, y16);
+        acc = _mm256_add_epi32(acc, prod32);
+    }
+    int32_t tmp[8];
+    _mm256_storeu_si256((__m256i*)tmp, acc);
+    int32_t sum = tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7];
+    for (; i < n; ++i) {
+        sum += (int32_t)x[i] * (int32_t)y[i];
+    }
+    return sum;
+}
+
+void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
+                       const int8_t* A, size_t lda,
+                       const int8_t* B, size_t ldb,
+                       int32_t* C, size_t ldc) {
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) C[i * ldc + j] = 0;
+    }
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t k = 0; k < K; ++k) {
+            __m256i va = _mm256_set1_epi32((int32_t)A[i * lda + k]);
+            size_t j = 0;
+            for (; j + 7 < N; j += 8) {
+                __m128i b8 = _mm_loadl_epi64((const __m128i*)&B[k * ldb + j]);
+                __m256i vb = _mm256_cvtepi8_epi32(b8);
+                __m256i vc = _mm256_loadu_si256((const __m256i*)&C[i * ldc + j]);
+                vc = _mm256_add_epi32(vc, _mm256_mullo_epi32(va, vb));
+                _mm256_storeu_si256((__m256i*)&C[i * ldc + j], vc);
+            }
+            for (; j < N; ++j) {
+                C[i * ldc + j] += (int32_t)A[i * lda + k] * (int32_t)B[k * ldb + j];
+            }
+        }
+    }
+}
+
+#if defined(RCRE_NEED_POP_AVX2)
+  #if RCRE_NEED_POP_AVX2 == 2
     #pragma clang attribute pop
-  #elif defined(__GNUC__)
+  #elif RCRE_NEED_POP_AVX2 == 1
     #pragma GCC pop_options
   #endif
+  #undef RCRE_NEED_POP_AVX2
 #endif
 
 #endif /* (__x86_64__ || _M_X64) && AVX2-capable compiler */
+
+/* --- Source: kernels_avx512.c --- */
+/**
+ * @file kernels_avx512.c
+ * @brief x86 AVX-512 512-bit Vector Micro-Kernels
+ *
+ * Targets Intel Skylake-X/Sapphire Rapids and AMD Zen 4/5 servers.
+ * Compiled safely with runtime CPUID gating in hal_dispatch.c.
+ */
+
+
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX512F__) || defined(__clang__) || defined(__GNUC__))
+#include <immintrin.h>
+
+#if !defined(__AVX512F__)
+  #if defined(__clang__)
+    #pragma clang attribute push(__attribute__((target("avx512f,fma"))), apply_to = function)
+    #define RCRE_NEED_POP_AVX512 2
+  #elif defined(__GNUC__)
+    #pragma GCC push_options
+    #pragma GCC target("avx512f,fma")
+    #define RCRE_NEED_POP_AVX512 1
+  #endif
+#endif
+
+float rcre_avx512_dot_f32(const float* x, const float* y, size_t n) {
+    __m512 sum0 = _mm512_setzero_ps();
+    __m512 sum1 = _mm512_setzero_ps();
+    size_t i = 0;
+    for (; i + 31 < n; i += 32) {
+        sum0 = _mm512_fmadd_ps(_mm512_loadu_ps(&x[i]),      _mm512_loadu_ps(&y[i]),      sum0);
+        sum1 = _mm512_fmadd_ps(_mm512_loadu_ps(&x[i + 16]), _mm512_loadu_ps(&y[i + 16]), sum1);
+    }
+    __m512 sum = _mm512_add_ps(sum0, sum1);
+    for (; i + 15 < n; i += 16) {
+        sum = _mm512_fmadd_ps(_mm512_loadu_ps(&x[i]), _mm512_loadu_ps(&y[i]), sum);
+    }
+    float total = _mm512_reduce_add_ps(sum);
+    for (; i < n; ++i) {
+        total += x[i] * y[i];
+    }
+    return total;
+}
+
+void rcre_avx512_axpy_f32(size_t n, float alpha, const float* x, float* y) {
+    __m512 va = _mm512_set1_ps(alpha);
+    size_t i = 0;
+    for (; i + 15 < n; i += 16) {
+        __m512 vx = _mm512_loadu_ps(&x[i]);
+        __m512 vy = _mm512_loadu_ps(&y[i]);
+        _mm512_storeu_ps(&y[i], _mm512_fmadd_ps(va, vx, vy));
+    }
+    for (; i < n; ++i) {
+        y[i] += alpha * x[i];
+    }
+}
+
+void rcre_avx512_gemv_f32(size_t M, size_t K, float alpha,
+                            const float* A, size_t lda,
+                            const float* x, float beta, float* y) {
+    for (size_t i = 0; i < M; ++i) {
+        float acc = rcre_avx512_dot_f32(&A[i * lda], x, K);
+        float prev = (beta == 0.0f) ? 0.0f : (y[i] * beta);
+        y[i] = prev + alpha * acc;
+    }
+}
+
+static void avx512_gemm_microkernel_4x16(size_t K, float alpha,
+                                         const float* A, size_t lda,
+                                         const float* B, size_t ldb,
+                                         float beta, float* C, size_t ldc) {
+    __m512 c0 = _mm512_setzero_ps();
+    __m512 c1 = _mm512_setzero_ps();
+    __m512 c2 = _mm512_setzero_ps();
+    __m512 c3 = _mm512_setzero_ps();
+
+    for (size_t k = 0; k < K; ++k) {
+        __m512 b0 = _mm512_loadu_ps(&B[k * ldb]);
+        c0 = _mm512_fmadd_ps(_mm512_set1_ps(A[0 * lda + k]), b0, c0);
+        c1 = _mm512_fmadd_ps(_mm512_set1_ps(A[1 * lda + k]), b0, c1);
+        c2 = _mm512_fmadd_ps(_mm512_set1_ps(A[2 * lda + k]), b0, c2);
+        c3 = _mm512_fmadd_ps(_mm512_set1_ps(A[3 * lda + k]), b0, c3);
+    }
+
+    __m512 valpha = _mm512_set1_ps(alpha);
+    c0 = _mm512_mul_ps(c0, valpha);
+    c1 = _mm512_mul_ps(c1, valpha);
+    c2 = _mm512_mul_ps(c2, valpha);
+    c3 = _mm512_mul_ps(c3, valpha);
+
+    if (beta != 0.0f) {
+        __m512 vbeta = _mm512_set1_ps(beta);
+        c0 = _mm512_fmadd_ps(vbeta, _mm512_loadu_ps(&C[0 * ldc]), c0);
+        c1 = _mm512_fmadd_ps(vbeta, _mm512_loadu_ps(&C[1 * ldc]), c1);
+        c2 = _mm512_fmadd_ps(vbeta, _mm512_loadu_ps(&C[2 * ldc]), c2);
+        c3 = _mm512_fmadd_ps(vbeta, _mm512_loadu_ps(&C[3 * ldc]), c3);
+    }
+
+    _mm512_storeu_ps(&C[0 * ldc], c0);
+    _mm512_storeu_ps(&C[1 * ldc], c1);
+    _mm512_storeu_ps(&C[2 * ldc], c2);
+    _mm512_storeu_ps(&C[3 * ldc], c3);
+}
+
+void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc) {
+    const size_t MB = 64, NB = 64, KB = 64;
+    if (beta != 1.0f) {
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = 0; j < N; ++j) {
+                C[i * ldc + j] = (beta == 0.0f) ? 0.0f : (C[i * ldc + j] * beta);
+            }
+        }
+    }
+    if (alpha == 0.0f) return;
+
+    for (size_t ii = 0; ii < M; ii += MB) {
+        size_t i_end = (ii + MB < M) ? ii + MB : M;
+        for (size_t jj = 0; jj < N; jj += NB) {
+            size_t j_end = (jj + NB < N) ? jj + NB : N;
+            for (size_t kk = 0; kk < K; kk += KB) {
+                size_t k_end = (kk + KB < K) ? kk + KB : K;
+                size_t sub_K = k_end - kk;
+                size_t i = ii;
+                for (; i + 3 < i_end; i += 4) {
+                    size_t j = jj;
+                    for (; j + 15 < j_end; j += 16) {
+                        avx512_gemm_microkernel_4x16(sub_K, alpha,
+                                                     &A[i * lda + kk], lda,
+                                                     &B[kk * ldb + j], ldb,
+                                                     1.0f, &C[i * ldc + j], ldc);
+                    }
+                    for (; j < j_end; ++j) {
+                        for (size_t r = 0; r < 4; ++r) {
+                            float acc = 0.0f;
+                            for (size_t k = kk; k < k_end; ++k) {
+                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                            }
+                            C[(i + r) * ldc + j] += alpha * acc;
+                        }
+                    }
+                }
+                for (; i < i_end; ++i) {
+                    for (size_t j = jj; j < j_end; ++j) {
+                        float acc = 0.0f;
+                        for (size_t k = kk; k < k_end; ++k) {
+                            acc += A[i * lda + k] * B[k * ldb + j];
+                        }
+                        C[i * ldc + j] += alpha * acc;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#if defined(RCRE_NEED_POP_AVX512)
+  #if RCRE_NEED_POP_AVX512 == 2
+    #pragma clang attribute pop
+  #elif RCRE_NEED_POP_AVX512 == 1
+    #pragma GCC pop_options
+  #endif
+  #undef RCRE_NEED_POP_AVX512
+#endif
+
+#endif /* (__x86_64__ || _M_X64) && AVX512F-capable compiler */
 
 /* --- Source: kernels_wasm.c --- */
 /**
@@ -3554,6 +6523,16 @@ size_t rcre_wasm_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
     return total;
 }
 
+void rcre_wasm_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y) {
+    for (size_t i = 0; i < M; ++i) {
+        float acc = rcre_wasm_dot_f32(&A[i * lda], x, K);
+        float prev = (beta == 0.0f) ? 0.0f : (y[i] * beta);
+        y[i] = prev + alpha * acc;
+    }
+}
+
 #endif /* __wasm_simd128__ */
 
 /* --- Source: cpu_probe.c --- */
@@ -3670,6 +6649,12 @@ static void probe_cpu(void) {
 
 #if defined(__ARM_NEON) || defined(__aarch64__) || defined(_M_ARM64)
     feats |= RCRE_CPU_FEAT_NEON;
+#endif
+#if defined(__ARM_FEATURE_DOTPROD)
+    feats |= RCRE_CPU_FEAT_ARM_DOTPROD;
+#endif
+#if defined(__ARM_FEATURE_SVE2)
+    feats |= RCRE_CPU_FEAT_ARM_SVE2;
 #endif
 
 #if defined(__wasm_simd128__)
@@ -3793,7 +6778,7 @@ int rcre_cpu_get_memory_pressure(void) {
 /**
  * @file hal_dispatch.c
  * @brief Dynamic Function Pointer Table & Hardware Acceleration Dispatcher
- * 
+ *
  * Satisfies HAL-REQ-04.
  */
 
@@ -3804,7 +6789,11 @@ RCRE_HalDispatch rcre_hal = {
     .backend_name    = "ISO C23 Scalar Reference",
     .cpu_features    = RCRE_CPU_FEAT_SCALAR,
     .gemm_f32        = rcre_scalar_gemm_f32,
+    .gemv_f32        = rcre_scalar_gemv_f32,
     .dot_f32         = rcre_scalar_dot_f32,
+    .dot_i8          = rcre_scalar_dot_i8,
+    .gemm_i8         = rcre_scalar_gemm_i8,
+    .gemm_bf16       = rcre_scalar_gemm_bf16,
     .axpy_f32        = rcre_scalar_axpy_f32,
     .rgb_to_gray_u8  = rcre_scalar_rgb_to_gray_u8,
     .find_byte       = rcre_scalar_find_byte,
@@ -3825,11 +6814,34 @@ void rcre_hal_init(void) {
         rcre_hal.backend_name   = "ARM NEON 128-bit";
         rcre_hal.cpu_features   = feats;
         rcre_hal.gemm_f32       = rcre_neon_gemm_f32;
+        rcre_hal.gemv_f32       = rcre_neon_gemv_f32;
         rcre_hal.dot_f32        = rcre_neon_dot_f32;
+        rcre_hal.dot_i8         = rcre_neon_dot_i8;
+        rcre_hal.gemm_i8        = rcre_neon_gemm_i8;
+        rcre_hal.gemm_bf16      = rcre_scalar_gemm_bf16;
         rcre_hal.axpy_f32       = rcre_neon_axpy_f32;
         rcre_hal.rgb_to_gray_u8 = rcre_neon_rgb_to_gray_u8;
         rcre_hal.find_byte      = rcre_neon_find_byte;
         rcre_hal.count_byte     = rcre_neon_count_byte;
+        atomic_store(&s_hal_initialized, true);
+        return;
+    }
+#endif
+
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX512F__) || defined(__clang__) || defined(__GNUC__))
+    if (feats & RCRE_CPU_FEAT_AVX512F) {
+        rcre_hal.backend_name   = "x86 AVX-512 512-bit";
+        rcre_hal.cpu_features   = feats;
+        rcre_hal.gemm_f32       = rcre_avx512_gemm_f32;
+        rcre_hal.gemv_f32       = rcre_avx512_gemv_f32;
+        rcre_hal.dot_f32        = rcre_avx512_dot_f32;
+        rcre_hal.dot_i8         = rcre_avx2_dot_i8;
+        rcre_hal.gemm_i8        = rcre_avx2_gemm_i8;
+        rcre_hal.gemm_bf16      = rcre_scalar_gemm_bf16;
+        rcre_hal.axpy_f32       = rcre_avx512_axpy_f32;
+        rcre_hal.rgb_to_gray_u8 = rcre_avx2_rgb_to_gray_u8;
+        rcre_hal.find_byte      = rcre_avx2_find_byte;
+        rcre_hal.count_byte     = rcre_avx2_count_byte;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -3840,7 +6852,11 @@ void rcre_hal_init(void) {
         rcre_hal.backend_name   = "x86 AVX2 256-bit";
         rcre_hal.cpu_features   = feats;
         rcre_hal.gemm_f32       = rcre_avx2_gemm_f32;
+        rcre_hal.gemv_f32       = rcre_avx2_gemv_f32;
         rcre_hal.dot_f32        = rcre_avx2_dot_f32;
+        rcre_hal.dot_i8         = rcre_avx2_dot_i8;
+        rcre_hal.gemm_i8        = rcre_avx2_gemm_i8;
+        rcre_hal.gemm_bf16      = rcre_scalar_gemm_bf16;
         rcre_hal.axpy_f32       = rcre_avx2_axpy_f32;
         rcre_hal.rgb_to_gray_u8 = rcre_avx2_rgb_to_gray_u8;
         rcre_hal.find_byte      = rcre_avx2_find_byte;
@@ -3855,7 +6871,11 @@ void rcre_hal_init(void) {
         rcre_hal.backend_name   = "WebAssembly SIMD 128-bit";
         rcre_hal.cpu_features   = feats;
         rcre_hal.gemm_f32       = rcre_wasm_gemm_f32;
+        rcre_hal.gemv_f32       = rcre_wasm_gemv_f32;
         rcre_hal.dot_f32        = rcre_wasm_dot_f32;
+        rcre_hal.dot_i8         = rcre_scalar_dot_i8;
+        rcre_hal.gemm_i8        = rcre_scalar_gemm_i8;
+        rcre_hal.gemm_bf16      = rcre_scalar_gemm_bf16;
         rcre_hal.axpy_f32       = rcre_wasm_axpy_f32;
         rcre_hal.rgb_to_gray_u8 = rcre_wasm_rgb_to_gray_u8;
         rcre_hal.find_byte      = rcre_wasm_find_byte;
@@ -3868,12 +6888,63 @@ void rcre_hal_init(void) {
     rcre_hal.backend_name   = "ISO C23 Scalar Reference";
     rcre_hal.cpu_features   = feats;
     rcre_hal.gemm_f32       = rcre_scalar_gemm_f32;
+    rcre_hal.gemv_f32       = rcre_scalar_gemv_f32;
     rcre_hal.dot_f32        = rcre_scalar_dot_f32;
+    rcre_hal.dot_i8         = rcre_scalar_dot_i8;
+    rcre_hal.gemm_i8        = rcre_scalar_gemm_i8;
+    rcre_hal.gemm_bf16      = rcre_scalar_gemm_bf16;
     rcre_hal.axpy_f32       = rcre_scalar_axpy_f32;
     rcre_hal.rgb_to_gray_u8 = rcre_scalar_rgb_to_gray_u8;
     rcre_hal.find_byte      = rcre_scalar_find_byte;
     rcre_hal.count_byte     = rcre_scalar_count_byte;
     atomic_store(&s_hal_initialized, true);
+}
+
+typedef struct {
+    size_t M, N, K;
+    float alpha, beta;
+    const float* A; size_t lda;
+    const float* B; size_t ldb;
+    float* C;       size_t ldc;
+    size_t rows_per_task;
+} RCRE_GemmMTCtx;
+
+static void rcre_hal_gemm_mt_worker(void* arg, size_t task_id) {
+    RCRE_GemmMTCtx* ctx = (RCRE_GemmMTCtx*)arg;
+    size_t r0 = task_id * ctx->rows_per_task;
+    if (r0 >= ctx->M) return;
+    size_t r1 = r0 + ctx->rows_per_task;
+    if (r1 > ctx->M) r1 = ctx->M;
+    rcre_hal.gemm_f32(r1 - r0, ctx->N, ctx->K,
+                      ctx->alpha,
+                      ctx->A + r0 * ctx->lda, ctx->lda,
+                      ctx->B, ctx->ldb,
+                      ctx->beta,
+                      ctx->C + r0 * ctx->ldc, ctx->ldc);
+}
+
+void rcre_hal_gemm_f32_mt(RCRE_ThreadPool* pool,
+                          size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc) {
+    if (!pool || M < 16 || (M * N * K) < 16384) {
+        rcre_hal.gemm_f32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+    size_t num_tasks = 16;
+    if (num_tasks > M / 4) num_tasks = M / 4;
+    if (num_tasks < 2) {
+        rcre_hal.gemm_f32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+    size_t rows_per_task = (M + num_tasks - 1) / num_tasks;
+    RCRE_GemmMTCtx ctx = {
+        .M = M, .N = N, .K = K, .alpha = alpha, .beta = beta,
+        .A = A, .lda = lda, .B = B, .ldb = ldb, .C = C, .ldc = ldc,
+        .rows_per_task = rows_per_task
+    };
+    rcre_threadpool_parallel_for(pool, num_tasks, rcre_hal_gemm_mt_worker, &ctx);
 }
 
 /* Run dynamic probe and dispatch selection at program startup */
@@ -3889,11 +6960,31 @@ __attribute__((constructor)) static void rcre_hal_auto_init(void) {
  * Satisfies MEM-REQ-01, MEM-REQ-02, and MEM-REQ-03.
  */
 
+#ifndef RCRE_FREESTANDING
 #include <stdlib.h>
+#endif
 #include <string.h>
 
 #define RCRE_DEFAULT_ALIGNMENT 64
 
+uint32_t rcre_abi_version(void) {
+    return RCRE_ABI_VERSION;
+}
+
+RCRE_NODISCARD int rcre_arena_from_buffer(RCRE_Arena* arena, void* backing_buffer, size_t capacity) {
+    if (!arena || !backing_buffer || capacity == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    arena->buffer         = (uint8_t*)backing_buffer;
+    arena->capacity       = capacity;
+    arena->offset         = 0;
+    arena->high_watermark = 0;
+    arena->alloc_count    = 0;
+    arena->rewind_count   = 0;
+    return RCRE_OK;
+}
+
+#ifndef RCRE_FREESTANDING
 RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity) {
     if (capacity == 0) {
         return NULL;
@@ -3936,6 +7027,7 @@ RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity) {
 
     return arena;
 }
+#endif /* !RCRE_FREESTANDING */
 
 RCRE_NODISCARD void* rcre_arena_alloc(RCRE_Arena* arena, size_t size, size_t align) {
     if (!arena || !arena->buffer || size == 0) {
@@ -3974,6 +7066,7 @@ void rcre_arena_reset(RCRE_Arena* arena) {
     }
 }
 
+#ifndef RCRE_FREESTANDING
 void rcre_arena_destroy(RCRE_Arena* arena) {
     if (arena) {
         if (arena->buffer) {
@@ -3987,6 +7080,7 @@ void rcre_arena_destroy(RCRE_Arena* arena) {
         free(arena);
     }
 }
+#endif /* !RCRE_FREESTANDING */
 
 RCRE_NODISCARD RCRE_ArenaTemp rcre_arena_temp_begin(RCRE_Arena* arena) {
     RCRE_ArenaTemp temp = {
@@ -4003,6 +7097,7 @@ void rcre_arena_temp_end(RCRE_ArenaTemp temp) {
     }
 }
 
+#ifndef RCRE_FREESTANDING
 RCRE_NODISCARD RCRE_GraphCtx* rcre_graph_ctx_create(size_t persistent_cap, size_t tape_cap) {
     RCRE_GraphCtx* ctx = (RCRE_GraphCtx*)malloc(sizeof(RCRE_GraphCtx));
     if (!ctx) return NULL;
@@ -4033,6 +7128,7 @@ void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx) {
         free(ctx);
     }
 }
+#endif /* !RCRE_FREESTANDING */
 
 /* --- Source: slice.c --- */
 /**
@@ -4470,10 +7566,15 @@ char* rcre_sb_to_cstr(RCRE_StrBuilder* sb) {
 
 RCRE_NODISCARD size_t rcre_dtype_size(RCRE_DType dtype) {
     switch (dtype) {
-        case RCRE_DTYPE_U8:  return 1;
-        case RCRE_DTYPE_I32: return 4;
-        case RCRE_DTYPE_F32: return 4;
-        default:             return 0;
+        case RCRE_DTYPE_U8:   return 1;
+        case RCRE_DTYPE_I8:   return 1;
+        case RCRE_DTYPE_F16:  return 2;
+        case RCRE_DTYPE_BF16: return 2;
+        case RCRE_DTYPE_I32:  return 4;
+        case RCRE_DTYPE_F32:  return 4;
+        case RCRE_DTYPE_I64:  return 8;
+        case RCRE_DTYPE_F64:  return 8;
+        default:              return 0;
     }
 }
 
@@ -4518,7 +7619,7 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_create(const size_t* shape, uint8_t ndim,
                                              RCRE_DType dtype, RCRE_Layout layout, 
                                              RCRE_Arena* arena) {
     RCRE_Tensor t = {0};
-    if (ndim == 0 || ndim > 4 || !arena) {
+    if (ndim == 0 || ndim > RCRE_MAX_DIMS || !arena) {
         return t;
     }
 
@@ -4544,7 +7645,7 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_from_buffer(void* data, const size_t* sha
                                                  uint8_t ndim, RCRE_DType dtype, 
                                                  RCRE_Layout layout) {
     RCRE_Tensor t = {0};
-    if (!data || ndim == 0 || ndim > 4) {
+    if (!data || ndim == 0 || ndim > RCRE_MAX_DIMS) {
         return t;
     }
 
@@ -4592,7 +7693,7 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_reshape(const RCRE_Tensor* src,
                                               const size_t* new_shape, 
                                               uint8_t new_ndim) {
     RCRE_Tensor dst = {0};
-    if (!src || !src->data || !new_shape || new_ndim == 0 || new_ndim > 4) {
+    if (!src || !src->data || !new_shape || new_ndim == 0 || new_ndim > RCRE_MAX_DIMS) {
         return dst;
     }
 
@@ -4629,7 +7730,7 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_permute(const RCRE_Tensor* src,
     }
 
     /* Verify order is a valid permutation */
-    bool seen[4] = {false};
+    bool seen[RCRE_MAX_DIMS] = {false};
     for (uint8_t i = 0; i < src->ndim; ++i) {
         if (order[i] >= src->ndim || seen[order[i]]) {
             return dst;
@@ -4667,6 +7768,145 @@ RCRE_NODISCARD RCRE_Tensor rcre_tensor_transpose(const RCRE_Tensor* src,
     dst.is_view = true;
 
     return dst;
+}
+
+/* ========================================================================= */
+/* NumPy-Style Broadcasting (up to RCRE_MAX_DIMS = 8)                        */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_tensor_broadcast_shape(
+    const size_t* shape_a, uint8_t ndim_a,
+    const size_t* shape_b, uint8_t ndim_b,
+    size_t out_shape[RCRE_MAX_DIMS], uint8_t* out_ndim
+) {
+    if (!shape_a || !shape_b || !out_shape || !out_ndim ||
+        ndim_a == 0 || ndim_b == 0 || ndim_a > RCRE_MAX_DIMS || ndim_b > RCRE_MAX_DIMS) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    uint8_t nd = (ndim_a > ndim_b) ? ndim_a : ndim_b;
+    memset(out_shape, 0, sizeof(size_t) * RCRE_MAX_DIMS);
+
+    for (uint8_t k = 0; k < nd; ++k) {
+        int ia = (int)ndim_a - 1 - (int)k;
+        int ib = (int)ndim_b - 1 - (int)k;
+        size_t da = (ia >= 0) ? shape_a[ia] : 1;
+        size_t db = (ib >= 0) ? shape_b[ib] : 1;
+        if (da != db && da != 1 && db != 1) {
+            return RCRE_ERR_SHAPE_MISMATCH;
+        }
+        out_shape[nd - 1 - k] = (da > db) ? da : db;
+    }
+    *out_ndim = nd;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD RCRE_Tensor rcre_tensor_broadcast_to(
+    const RCRE_Tensor* src,
+    const size_t* target_shape,
+    uint8_t target_ndim
+) {
+    RCRE_Tensor dst = {0};
+    if (!src || !src->data || !target_shape ||
+        src->ndim == 0 || src->ndim > RCRE_MAX_DIMS ||
+        target_ndim < src->ndim || target_ndim > RCRE_MAX_DIMS) {
+        return dst;
+    }
+
+    dst.data    = src->data;
+    dst.dtype   = src->dtype;
+    dst.layout  = src->layout;
+    dst.ndim    = target_ndim;
+    dst.is_view = true;
+    dst.grad    = nullptr;
+
+    uint8_t pad = target_ndim - src->ndim;
+    size_t numel = 1;
+    for (uint8_t i = 0; i < target_ndim; ++i) {
+        size_t td = target_shape[i];
+        if (td == 0) {
+            memset(&dst, 0, sizeof(RCRE_Tensor));
+            return dst;
+        }
+        dst.shape[i] = td;
+        numel *= td;
+        if (i < pad) {
+            dst.strides[i] = 0;
+        } else {
+            size_t sd = src->shape[i - pad];
+            if (sd == td) {
+                dst.strides[i] = src->strides[i - pad];
+            } else if (sd == 1) {
+                dst.strides[i] = 0;
+            } else {
+                memset(&dst, 0, sizeof(RCRE_Tensor));
+                return dst;
+            }
+        }
+    }
+    dst.numel = numel;
+    return dst;
+}
+
+static int rcre_tensor_binary_broadcast(
+    const RCRE_Tensor* a, const RCRE_Tensor* b,
+    RCRE_Arena* arena, RCRE_Tensor* dst, bool is_mul
+) {
+    if (!a || !b || !a->data || !b->data || !arena || !dst ||
+        a->dtype != RCRE_DTYPE_F32 || b->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t out_shape[RCRE_MAX_DIMS] = {0};
+    uint8_t out_ndim = 0;
+    int rc = rcre_tensor_broadcast_shape(a->shape, a->ndim, b->shape, b->ndim, out_shape, &out_ndim);
+    if (rc != RCRE_OK) return rc;
+
+    RCRE_Tensor va = rcre_tensor_broadcast_to(a, out_shape, out_ndim);
+    RCRE_Tensor vb = rcre_tensor_broadcast_to(b, out_shape, out_ndim);
+    if (!va.data || !vb.data) return RCRE_ERR_SHAPE_MISMATCH;
+
+    *dst = rcre_tensor_create(out_shape, out_ndim, RCRE_DTYPE_F32, a->layout, arena);
+    if (!dst->data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    const float* pa = (const float*)va.data;
+    const float* pb = (const float*)vb.data;
+    float* pc = (float*)dst->data;
+    size_t n = dst->numel;
+
+    size_t coords[RCRE_MAX_DIMS] = {0};
+    ptrdiff_t off_a = 0;
+    ptrdiff_t off_b = 0;
+
+    for (size_t idx = 0; idx < n; ++idx) {
+        pc[idx] = is_mul ? (pa[off_a] * pb[off_b]) : (pa[off_a] + pb[off_b]);
+        for (int d = (int)out_ndim - 1; d >= 0; --d) {
+            coords[d]++;
+            if (coords[d] < out_shape[d]) {
+                off_a += va.strides[d];
+                off_b += vb.strides[d];
+                break;
+            }
+            off_a -= (ptrdiff_t)(coords[d] - 1) * va.strides[d];
+            off_b -= (ptrdiff_t)(coords[d] - 1) * vb.strides[d];
+            coords[d] = 0;
+        }
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_tensor_add_broadcast(
+    const RCRE_Tensor* a, const RCRE_Tensor* b,
+    RCRE_Arena* arena, RCRE_Tensor* dst
+) {
+    return rcre_tensor_binary_broadcast(a, b, arena, dst, false);
+}
+
+RCRE_NODISCARD int rcre_tensor_mul_broadcast(
+    const RCRE_Tensor* a, const RCRE_Tensor* b,
+    RCRE_Arena* arena, RCRE_Tensor* dst
+) {
+    return rcre_tensor_binary_broadcast(a, b, arena, dst, true);
 }
 
 /* --- Source: adapt.c --- */
@@ -6099,7 +9339,16 @@ int rcre_sparse_bcsr4_spmv(
             uint32_t bc = A->block_col_indices[b];
             const float* x_ptr = &x[bc * 4];
             const float* w = &A->block_values[b * 16];
-            float32x4_t vx = vld1q_f32(x_ptr);
+            float32x4_t vx;
+            if ((size_t)bc * 4 + 4 <= A->cols) {
+                vx = vld1q_f32(x_ptr);
+            } else {
+                float xt[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                for (size_t c = 0; c < 4 && (size_t)bc * 4 + c < A->cols; ++c) {
+                    xt[c] = x_ptr[c];
+                }
+                vx = vld1q_f32(xt);
+            }
 
             float32x4_t r0 = vld1q_f32(w + 0);
             float32x4_t r1 = vld1q_f32(w + 4);
@@ -6132,7 +9381,10 @@ int rcre_sparse_bcsr4_spmv(
             const float* x_ptr = &x[bc * 4];
             const float* w = &A->block_values[b * 16];
 
-            float x0 = x_ptr[0], x1 = x_ptr[1], x2 = x_ptr[2], x3 = x_ptr[3];
+            float x0 = ((size_t)bc * 4 + 0 < A->cols) ? x_ptr[0] : 0.0f;
+            float x1 = ((size_t)bc * 4 + 1 < A->cols) ? x_ptr[1] : 0.0f;
+            float x2 = ((size_t)bc * 4 + 2 < A->cols) ? x_ptr[2] : 0.0f;
+            float x3 = ((size_t)bc * 4 + 3 < A->cols) ? x_ptr[3] : 0.0f;
 
             y0 += w[0]*x0 + w[1]*x1 + w[2]*x2 + w[3]*x3;
             y1 += w[4]*x0 + w[5]*x1 + w[6]*x2 + w[7]*x3;
@@ -6463,6 +9715,4041 @@ int rcre_sparse_bcsr4_load(
     out_bcsr->is_view = false;
 
     return RCRE_OK;
+}
+
+/* --- Source: io.c --- */
+/**
+ * @file io.c
+ * @brief RCRE High-Performance Scientific Data I/O Engine (ISO C23)
+ *
+ * Implements IO-REQ-01 through IO-REQ-06:
+ *  - Cross-platform virtual memory file mapping (mmap / madvise / F_NOCACHE)
+ *  - Atomic file persistence with telemetry hooks into rcre_prof
+ *  - Clinger / Eisel-Lemire 0-ULP fast float32 slice parser
+ *  - SIMD-accelerated & threadpool-parallel CSV/TSV tabular loader
+ *  - NumPy (.npy v1.0 & v2.0) 64-byte aligned writer, loader & zero-copy viewer
+ *  - Hugging Face (.safetensors) zero-allocation parser, zero-copy viewer & 64B writer
+ *  - SIMD Byte-Shuffle filter (NEON / AVX2 / WASM SIMD128 / Scalar) & LZ4-class block codec
+ *  - Out-of-core ping-pong arena double-buffered .npy streamer
+ *  - Zero-copy DLPack v1.0 & Apache Arrow C Data Interface bridges
+ */
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <limits.h>
+#include <stdatomic.h>
+
+#if defined(__APPLE__) || defined(__linux__) || defined(__unix__)
+#define RCRE_IO_HAVE_POSIX 1
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <pthread.h>
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
+#if defined(__linux__)
+#include <sys/syscall.h>
+#ifndef __NR_io_uring_setup
+#if defined(__x86_64__)
+#define __NR_io_uring_setup 425
+#define __NR_io_uring_enter 426
+#define __NR_io_uring_register 427
+#elif defined(__aarch64__)
+#define __NR_io_uring_setup 425
+#define __NR_io_uring_enter 426
+#define __NR_io_uring_register 427
+#endif
+#endif
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
+
+/* ========================================================================= */
+/* Internal Checked Arithmetic, Endianness & Telemetry Helpers               */
+/* ========================================================================= */
+
+static inline bool rcre_io_mul_overflow(size_t a, size_t b, size_t* out) {
+    if (a == 0 || b == 0) {
+        *out = 0;
+        return false;
+    }
+    if (a > SIZE_MAX / b) {
+        return true;
+    }
+    *out = a * b;
+    return false;
+}
+
+static inline bool rcre_io_add_overflow(size_t a, size_t b, size_t* out) {
+    if (b > SIZE_MAX - a) {
+        return true;
+    }
+    *out = a + b;
+    return false;
+}
+
+static inline uint16_t rcre_io_read_u16_le(const uint8_t* p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static inline uint32_t rcre_io_read_u32_le(const uint8_t* p) {
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static inline uint64_t rcre_io_read_u64_le(const uint8_t* p) {
+    return (uint64_t)p[0] |
+           ((uint64_t)p[1] << 8) |
+           ((uint64_t)p[2] << 16) |
+           ((uint64_t)p[3] << 24) |
+           ((uint64_t)p[4] << 32) |
+           ((uint64_t)p[5] << 40) |
+           ((uint64_t)p[6] << 48) |
+           ((uint64_t)p[7] << 56);
+}
+
+static inline void rcre_io_write_u16_le(uint8_t* p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xFFU);
+    p[1] = (uint8_t)((v >> 8) & 0xFFU);
+}
+
+static inline void rcre_io_write_u32_le(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFFU);
+    p[1] = (uint8_t)((v >> 8) & 0xFFU);
+    p[2] = (uint8_t)((v >> 16) & 0xFFU);
+    p[3] = (uint8_t)((v >> 24) & 0xFFU);
+}
+
+static inline void rcre_io_write_u64_le(uint8_t* p, uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+        p[i] = (uint8_t)((v >> (i * 8)) & 0xFFULL);
+    }
+}
+
+static inline void rcre_io_record_telemetry(bool is_write, uint64_t bytes) {
+    RCRE_ProfContext* prof = rcre_prof_global();
+    if (prof) {
+        rcre_prof_io_record(prof, is_write, bytes);
+    }
+}
+
+static inline bool rcre_io_is_space(uint8_t c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+/* ========================================================================= */
+/* 1. Virtual Memory Mapping & OS Page-Cache Control (IO-REQ-01)             */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_io_mmap_open(
+    const char* filepath,
+    RCRE_IOHint hint,
+    RCRE_MappedFile* out_map
+) {
+    if (!filepath || !out_map) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_map, 0, sizeof(RCRE_MappedFile));
+    out_map->os_handle  = -1;
+    out_map->map_handle = -1;
+
+#if defined(RCRE_IO_HAVE_POSIX)
+    int fd = open(filepath, O_RDONLY);
+    if (fd < 0) {
+        return RCRE_ERR_IO;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+        close(fd);
+        return RCRE_ERR_IO;
+    }
+
+    size_t file_size = (size_t)st.st_size;
+
+#if defined(__APPLE__) && defined(F_NOCACHE)
+    if (hint == RCRE_IO_HINT_STREAMING) {
+        (void)fcntl(fd, F_NOCACHE, 1);
+    }
+#endif
+
+    void* addr = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        return RCRE_ERR_IO;
+    }
+
+    out_map->data        = (const uint8_t*)addr;
+    out_map->size        = file_size;
+    out_map->os_handle   = (intptr_t)fd;
+    out_map->map_handle  = -1;
+    out_map->hint        = hint;
+    out_map->is_mapped   = true;
+    out_map->is_heap_buf = false;
+
+    (void)rcre_io_madvise_range(out_map, 0, file_size, hint);
+    rcre_io_record_telemetry(false, (uint64_t)file_size);
+    return RCRE_OK;
+#elif defined(_WIN32)
+    DWORD flags = FILE_ATTRIBUTE_NORMAL;
+    if (hint == RCRE_IO_HINT_SEQUENTIAL) {
+        flags |= FILE_FLAG_SEQUENTIAL_SCAN;
+    } else if (hint == RCRE_IO_HINT_RANDOM) {
+        flags |= FILE_FLAG_RANDOM_ACCESS;
+    }
+    HANDLE hFile = CreateFileA(filepath, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                               OPEN_EXISTING, flags, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return RCRE_ERR_IO;
+    }
+    LARGE_INTEGER fsz;
+    if (!GetFileSizeEx(hFile, &fsz) || fsz.QuadPart <= 0) {
+        CloseHandle(hFile);
+        return RCRE_ERR_IO;
+    }
+    HANDLE hMap = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!hMap) {
+        CloseHandle(hFile);
+        return RCRE_ERR_IO;
+    }
+    void* view = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    if (!view) {
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        return RCRE_ERR_IO;
+    }
+    out_map->data        = (const uint8_t*)view;
+    out_map->size        = (size_t)fsz.QuadPart;
+    out_map->os_handle   = (intptr_t)hFile;
+    out_map->map_handle  = (intptr_t)hMap;
+    out_map->hint        = hint;
+    out_map->is_mapped   = true;
+    out_map->is_heap_buf = false;
+    rcre_io_record_telemetry(false, (uint64_t)out_map->size);
+    return RCRE_OK;
+#else
+    FILE* f = fopen(filepath, "rb");
+    if (!f) {
+        return RCRE_ERR_IO;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return RCRE_ERR_IO;
+    }
+    long fsize = ftell(f);
+    if (fsize <= 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return RCRE_ERR_IO;
+    }
+    size_t file_size = (size_t)fsize;
+    size_t aligned_cap = (file_size + 63) & ~((size_t)63);
+    uint8_t* buf = (uint8_t*)aligned_alloc(64, aligned_cap);
+    if (!buf) {
+        fclose(f);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    if (fread(buf, 1, file_size, f) != file_size) {
+        free(buf);
+        fclose(f);
+        return RCRE_ERR_IO;
+    }
+    fclose(f);
+
+    out_map->data        = buf;
+    out_map->size        = file_size;
+    out_map->os_handle   = -1;
+    out_map->hint        = hint;
+    out_map->is_mapped   = false;
+    out_map->is_heap_buf = true;
+    rcre_io_record_telemetry(false, (uint64_t)file_size);
+    return RCRE_OK;
+#endif
+}
+
+RCRE_NODISCARD int rcre_io_mmap_from_buffer(
+    const void* buf,
+    size_t size,
+    RCRE_MappedFile* out_map
+) {
+    if (!buf || size == 0 || !out_map) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_map, 0, sizeof(RCRE_MappedFile));
+    out_map->data        = (const uint8_t*)buf;
+    out_map->size        = size;
+    out_map->os_handle   = -1;
+    out_map->hint        = RCRE_IO_HINT_DEFAULT;
+    out_map->is_mapped   = false;
+    out_map->is_heap_buf = false;
+    return RCRE_OK;
+}
+
+void rcre_io_mmap_close(RCRE_MappedFile* map) {
+    if (!map) {
+        return;
+    }
+#if defined(RCRE_IO_HAVE_POSIX)
+    if (map->is_mapped && map->data && map->size > 0) {
+        (void)munmap((void*)(uintptr_t)map->data, map->size);
+    }
+    if (map->os_handle >= 0) {
+        (void)close((int)map->os_handle);
+    }
+#elif defined(_WIN32)
+    if (map->is_mapped && map->data) {
+        (void)UnmapViewOfFile((LPCVOID)map->data);
+    }
+    if (map->map_handle != -1 && map->map_handle != 0) {
+        (void)CloseHandle((HANDLE)map->map_handle);
+    }
+    if (map->os_handle != -1 && map->os_handle != 0) {
+        (void)CloseHandle((HANDLE)map->os_handle);
+    }
+#endif
+    if (map->is_heap_buf && map->data) {
+        free((void*)(uintptr_t)map->data);
+    }
+    memset(map, 0, sizeof(RCRE_MappedFile));
+    map->os_handle  = -1;
+    map->map_handle = -1;
+}
+
+RCRE_NODISCARD RCRE_Slice rcre_io_mmap_slice(const RCRE_MappedFile* map) {
+    if (!map || !map->data || map->size == 0) {
+        return rcre_slice_empty();
+    }
+    return rcre_slice_from_parts(map->data, map->size);
+}
+
+RCRE_NODISCARD int rcre_io_madvise_range(
+    const RCRE_MappedFile* map,
+    size_t offset,
+    size_t length,
+    RCRE_IOHint hint
+) {
+    if (!map || !map->data || map->size == 0 || offset >= map->size) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (!map->is_mapped) {
+        return RCRE_OK;
+    }
+    if (length == 0 || offset + length > map->size) {
+        length = map->size - offset;
+    }
+
+#if defined(RCRE_IO_HAVE_POSIX) && defined(POSIX_MADV_NORMAL)
+    long page_sz = sysconf(_SC_PAGESIZE);
+    size_t page_mask = (page_sz > 0) ? ((size_t)page_sz - 1) : 4095;
+    size_t aligned_off = offset & ~page_mask;
+    size_t aligned_len = length + (offset - aligned_off);
+
+    int advice = POSIX_MADV_NORMAL;
+    switch (hint) {
+        case RCRE_IO_HINT_SEQUENTIAL:
+            advice = POSIX_MADV_SEQUENTIAL;
+            (void)posix_madvise((void*)(uintptr_t)(map->data + aligned_off), aligned_len, POSIX_MADV_WILLNEED);
+            break;
+        case RCRE_IO_HINT_RANDOM:
+            advice = POSIX_MADV_RANDOM;
+            break;
+        case RCRE_IO_HINT_STREAMING:
+            advice = POSIX_MADV_DONTNEED;
+            break;
+        default:
+            advice = POSIX_MADV_NORMAL;
+            break;
+    }
+    (void)posix_madvise((void*)(uintptr_t)(map->data + aligned_off), aligned_len, advice);
+#else
+    (void)length;
+    (void)hint;
+#endif
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_write_atomic(
+    const char* filepath,
+    const void* data,
+    size_t size
+) {
+    if (!filepath || (!data && size > 0)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t path_len = strlen(filepath);
+    if (path_len == 0 || path_len > 4000) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    char tmp_path[4096];
+#if defined(RCRE_IO_HAVE_POSIX)
+    int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", filepath, (int)getpid());
+#else
+    int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filepath);
+#endif
+    if (n <= 0 || (size_t)n >= sizeof(tmp_path)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    FILE* f = fopen(tmp_path, "wb");
+    if (!f) {
+        return RCRE_ERR_IO;
+    }
+
+    if (size > 0) {
+        if (fwrite(data, 1, size, f) != size) {
+            fclose(f);
+            (void)remove(tmp_path);
+            return RCRE_ERR_IO;
+        }
+    }
+
+    if (fflush(f) != 0) {
+        fclose(f);
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+
+#if defined(RCRE_IO_HAVE_POSIX)
+    (void)fsync(fileno(f));
+#endif
+    fclose(f);
+
+#if defined(_WIN32)
+    if (!MoveFileExA(tmp_path, filepath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+#else
+    if (rename(tmp_path, filepath) != 0) {
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+#endif
+
+    rcre_io_record_telemetry(true, (uint64_t)size);
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 2. Clinger / Eisel-Lemire Fast Float32 Slice Parser (IO-REQ-02)           */
+/* ========================================================================= */
+
+static const double rcre_io_pow10_exact[23] = {
+    1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,
+    1e8,  1e9,  1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+    1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22
+};
+
+static inline uint8_t rcre_io_ascii_lower(uint8_t c) {
+    return (c >= 'A' && c <= 'Z') ? (uint8_t)(c + ('a' - 'A')) : c;
+}
+
+static bool rcre_io_slice_eq_ci(RCRE_Slice s, const char* lower_lit, size_t lit_len) {
+    if (s.len != lit_len || !s.data) {
+        return false;
+    }
+    for (size_t i = 0; i < lit_len; ++i) {
+        if (rcre_io_ascii_lower(s.data[i]) != (uint8_t)lower_lit[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+RCRE_NODISCARD bool rcre_slice_parse_f32(RCRE_Slice s, float* out_val) {
+    if (!out_val || !s.data || s.len == 0) {
+        return false;
+    }
+
+    s = rcre_slice_trim_ascii(s);
+    if (s.len == 0) {
+        return false;
+    }
+
+    size_t idx = 0;
+    bool neg = false;
+    if (s.data[idx] == '-') {
+        neg = true;
+        idx++;
+    } else if (s.data[idx] == '+') {
+        idx++;
+    }
+
+    if (idx >= s.len) {
+        return false;
+    }
+
+    /* Check special IEEE-754 tokens: nan, inf, infinity */
+    uint8_t first_lower = rcre_io_ascii_lower(s.data[idx]);
+    if (first_lower == 'n' || first_lower == 'i') {
+        RCRE_Slice tail = rcre_slice_sub(s, idx, s.len);
+        if (rcre_io_slice_eq_ci(tail, "nan", 3)) {
+            *out_val = NAN;
+            return true;
+        }
+        if (rcre_io_slice_eq_ci(tail, "inf", 3) || rcre_io_slice_eq_ci(tail, "infinity", 8)) {
+            *out_val = neg ? -INFINITY : INFINITY;
+            return true;
+        }
+        return false;
+    }
+
+    uint64_t mantissa = 0;
+    int32_t exp10 = 0;
+    size_t total_digits = 0;
+    size_t sig_digits = 0;
+    bool seen_dot = false;
+    bool truncated_nonzero = false;
+
+    while (idx < s.len) {
+        uint8_t c = s.data[idx];
+        if (c >= '0' && c <= '9') {
+            total_digits++;
+            uint8_t digit = (uint8_t)(c - '0');
+            if (mantissa == 0 && digit == 0) {
+                if (seen_dot) {
+                    exp10--;
+                }
+            } else {
+                if (sig_digits < 15) {
+                    mantissa = mantissa * 10ULL + (uint64_t)digit;
+                    sig_digits++;
+                    if (seen_dot) {
+                        exp10--;
+                    }
+                } else {
+                    if (!seen_dot) {
+                        exp10++;
+                    }
+                    if (digit != 0) {
+                        truncated_nonzero = true;
+                    }
+                    sig_digits++;
+                }
+            }
+            idx++;
+        } else if (c == '.' && !seen_dot) {
+            seen_dot = true;
+            idx++;
+        } else {
+            break;
+        }
+    }
+
+    if (total_digits == 0) {
+        return false;
+    }
+
+    /* Parse optional scientific exponent (e/E[+-]digits) */
+    if (idx < s.len && (s.data[idx] == 'e' || s.data[idx] == 'E')) {
+        idx++;
+        bool exp_neg = false;
+        if (idx < s.len && (s.data[idx] == '-' || s.data[idx] == '+')) {
+            exp_neg = (s.data[idx] == '-');
+            idx++;
+        }
+        if (idx >= s.len) {
+            return false;
+        }
+        int32_t e_val = 0;
+        size_t e_digits = 0;
+        while (idx < s.len && s.data[idx] >= '0' && s.data[idx] <= '9') {
+            if (e_val < 100000) {
+                e_val = e_val * 10 + (int32_t)(s.data[idx] - '0');
+            }
+            e_digits++;
+            idx++;
+        }
+        if (e_digits == 0) {
+            return false;
+        }
+        exp10 += exp_neg ? -e_val : e_val;
+    }
+
+    /* Reject trailing non-numeric characters */
+    if (idx != s.len) {
+        return false;
+    }
+
+    if (mantissa == 0) {
+        *out_val = neg ? -0.0f : 0.0f;
+        return true;
+    }
+
+    /* Clinger / Eisel-Lemire Fast Exact Path:
+     * In binary64 (53-bit significand), any 15-digit decimal significand
+     * (< 10^15 < 2^53) and 10^|k| for |k| <= 22 are 100% exact.
+     * Single binary64 mul/div has at most 0.5 ULP_f64 error; if the lower
+     * 29 bits of the binary64 result do not lie on the float32 midpoint
+     * (0x10000000), casting to float32 is provably 0-ULP exact. */
+    if (!truncated_nonzero && sig_digits <= 15 && exp10 >= -22 && exp10 <= 22) {
+        double d = (double)mantissa;
+        if (exp10 > 0) {
+            d *= rcre_io_pow10_exact[exp10];
+        } else if (exp10 < 0) {
+            d /= rcre_io_pow10_exact[-exp10];
+        }
+        uint64_t dbits = 0;
+        memcpy(&dbits, &d, sizeof(uint64_t));
+        /* Verify result is not within 1 f64 ULP of a float32 halfway tie */
+        if (((dbits + 1ULL) & 0x1FFFFFFEULL) != 0x10000000ULL) {
+            float res = (float)d;
+            *out_val = neg ? -res : res;
+            return true;
+        }
+    }
+
+    /* Exact fallback for extreme exponents (|exp10| > 22), >15 significant
+     * digits, or near-midpoint ties. */
+    char stack_buf[128];
+    if (s.len < sizeof(stack_buf)) {
+        memcpy(stack_buf, s.data, s.len);
+        stack_buf[s.len] = '\0';
+        char* endp = nullptr;
+        float v = strtof(stack_buf, &endp);
+        if (endp == stack_buf + s.len) {
+            *out_val = v;
+            return true;
+        }
+    }
+
+    /* Ultra-long token fallback (>127 chars of leading/trailing zeros) */
+    double d_approx = (double)mantissa * pow(10.0, (double)exp10);
+    float f_approx = (float)d_approx;
+    *out_val = neg ? -f_approx : f_approx;
+    return true;
+}
+
+/* ========================================================================= */
+/* 3. SIMD-Accelerated & Threadpool-Parallel CSV/TSV Loader (IO-REQ-02)      */
+/* ========================================================================= */
+
+static inline bool rcre_io_is_csv_delim(uint8_t c, uint8_t delim) {
+    if (delim == 0) {
+        return c == ',' || c == '\t';
+    }
+    return c == delim;
+}
+
+/* Extracts the next non-EOF line from cursor, stripping trailing '\r'. */
+static bool rcre_io_csv_next_line(RCRE_Slice* cursor, RCRE_Slice* out_line) {
+    if (!cursor || !cursor->data || cursor->len == 0) {
+        return false;
+    }
+
+    size_t nl = rcre_slice_find_byte(*cursor, '\n');
+    RCRE_Slice line;
+    if (nl == RCRE_NPOS) {
+        line = *cursor;
+        *cursor = rcre_slice_empty();
+    } else {
+        line = rcre_slice_sub(*cursor, 0, nl);
+        *cursor = rcre_slice_sub(*cursor, nl + 1, cursor->len);
+    }
+
+    if (line.len > 0 && line.data[line.len - 1] == '\r') {
+        line.len--;
+    }
+
+    *out_line = line;
+    return true;
+}
+
+/* Counts fields in a CSV/TSV row using consecutive-delimiter skipping
+ * matching strtok_r semantics while executing in zero-copy read-only memory.
+ * When quote_char != 0, delimiters inside paired quotes are treated as field content. */
+static size_t rcre_io_csv_count_cols(RCRE_Slice line, uint8_t delim, uint8_t quote_char) {
+    size_t cols = 0;
+    size_t i = 0;
+    while (i < line.len) {
+        while (i < line.len && rcre_io_is_csv_delim(line.data[i], delim)) {
+            i++;
+        }
+        if (i >= line.len) {
+            break;
+        }
+        cols++;
+        if (quote_char != 0 && line.data[i] == quote_char) {
+            i++;
+            while (i < line.len) {
+                if (line.data[i] == quote_char) {
+                    if (i + 1 < line.len && line.data[i + 1] == quote_char) {
+                        i += 2; /* RFC-4180 escaped quote "" */
+                        continue;
+                    }
+                    i++;
+                    break;
+                }
+                i++;
+            }
+            while (i < line.len && !rcre_io_is_csv_delim(line.data[i], delim)) {
+                i++;
+            }
+        } else {
+            while (i < line.len && !rcre_io_is_csv_delim(line.data[i], delim)) {
+                i++;
+            }
+        }
+    }
+    return cols;
+}
+
+/* Parses a single CSV/TSV row into dst_row[0..expected_cols-1]. */
+static bool rcre_io_csv_parse_row(
+    RCRE_Slice line,
+    uint8_t delim,
+    uint8_t quote_char,
+    bool strict_numbers,
+    size_t expected_cols,
+    float* dst_row
+) {
+    size_t c = 0;
+    size_t i = 0;
+
+    while (i < line.len) {
+        while (i < line.len && rcre_io_is_csv_delim(line.data[i], delim)) {
+            i++;
+        }
+        if (i >= line.len) {
+            break;
+        }
+        size_t tok_start = i;
+        size_t tok_end = i;
+        if (quote_char != 0 && line.data[i] == quote_char) {
+            i++;
+            tok_start = i;
+            bool closed = false;
+            while (i < line.len) {
+                if (line.data[i] == quote_char) {
+                    if (i + 1 < line.len && line.data[i + 1] == quote_char) {
+                        i += 2;
+                        continue;
+                    }
+                    tok_end = i;
+                    i++;
+                    closed = true;
+                    break;
+                }
+                i++;
+            }
+            if (!closed) {
+                tok_end = i;
+            }
+            while (i < line.len && !rcre_io_is_csv_delim(line.data[i], delim)) {
+                i++;
+            }
+        } else {
+            if (delim != 0) {
+                size_t rel = rcre_hal.find_byte(line.data + i, line.len - i, delim);
+                i = (rel == RCRE_NPOS) ? line.len : (i + rel);
+            } else {
+                while (i < line.len && line.data[i] != ',' && line.data[i] != '\t') {
+                    i++;
+                }
+            }
+            tok_end = i;
+        }
+
+        if (c >= expected_cols) {
+            return false; /* Too many columns (ragged row) */
+        }
+
+        RCRE_Slice tok = { .data = line.data + tok_start, .len = tok_end - tok_start };
+        float val = 0.0f;
+        if (!rcre_slice_parse_f32(tok, &val)) {
+            if (strict_numbers) {
+                return false;
+            }
+            val = 0.0f;
+        }
+        dst_row[c++] = val;
+    }
+
+    return c == expected_cols;
+}
+
+typedef struct {
+    const RCRE_Slice* lines;
+    size_t            total_rows;
+    size_t            cols;
+    size_t            rows_per_task;
+    uint8_t           delim;
+    uint8_t           quote_char;
+    bool              strict_numbers;
+    float*            dst_data;
+    atomic_int        failed;
+} RCRE_IOCSVParallelCtx;
+
+static void rcre_io_csv_parallel_worker(void* arg, size_t task_id) {
+    RCRE_IOCSVParallelCtx* ctx = (RCRE_IOCSVParallelCtx*)arg;
+    if (atomic_load_explicit(&ctx->failed, memory_order_relaxed) != 0) {
+        return;
+    }
+
+    size_t r_start = task_id * ctx->rows_per_task;
+    if (r_start >= ctx->total_rows) {
+        return;
+    }
+    size_t r_end = r_start + ctx->rows_per_task;
+    if (r_end > ctx->total_rows) {
+        r_end = ctx->total_rows;
+    }
+
+    for (size_t r = r_start; r < r_end; ++r) {
+        if (!rcre_io_csv_parse_row(
+                ctx->lines[r],
+                ctx->delim,
+                ctx->quote_char,
+                ctx->strict_numbers,
+                ctx->cols,
+                ctx->dst_data + r * ctx->cols)) {
+            atomic_store_explicit(&ctx->failed, 1, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+RCRE_NODISCARD int rcre_io_parse_csv_slice(
+    RCRE_Slice csv_slice,
+    const RCRE_CSVOptions* opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!arena || !out_tensor || !csv_slice.data || csv_slice.len == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_tensor, 0, sizeof(RCRE_Tensor));
+
+    RCRE_CSVOptions default_opts = {
+        .delimiter      = 0,
+        .skip_header    = false,
+        .strict_numbers = false,
+        .max_rows       = 0,
+        .pool           = nullptr,
+        .quote_char     = 0
+    };
+    const RCRE_CSVOptions* cfg = opts ? opts : &default_opts;
+
+    RCRE_Slice cursor = csv_slice;
+    RCRE_Slice line = rcre_slice_empty();
+
+    if (cfg->skip_header) {
+        if (!rcre_io_csv_next_line(&cursor, &line)) {
+            return RCRE_ERR_IO;
+        }
+    }
+
+    RCRE_Slice data_start = cursor;
+    if (!rcre_io_csv_next_line(&cursor, &line)) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t cols = rcre_io_csv_count_cols(line, cfg->delimiter, cfg->quote_char);
+    if (cols == 0) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t rows = 1;
+    if (cfg->max_rows == 0 || rows < cfg->max_rows) {
+        while (rcre_io_csv_next_line(&cursor, &line)) {
+            if (line.len == 0 && cursor.len == 0) {
+                break;
+            }
+            rows++;
+            if (cfg->max_rows > 0 && rows >= cfg->max_rows) {
+                break;
+            }
+        }
+    }
+
+    size_t shape[2] = { rows, cols };
+    RCRE_Tensor t = rcre_tensor_create(shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!t.data) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    float* td = rcre_tensor_f32_data(&t);
+
+    /* Fast Parallel Path if ThreadPool provided and batch is nontrivial */
+    if (cfg->pool && rows >= 64) {
+        RCRE_ArenaTemp temp = rcre_arena_temp_begin(arena);
+        RCRE_Slice* line_index = (RCRE_Slice*)rcre_arena_alloc(arena, rows * sizeof(RCRE_Slice), alignof(RCRE_Slice));
+        if (line_index) {
+            RCRE_Slice p_cur = data_start;
+            size_t indexed = 0;
+            while (indexed < rows && rcre_io_csv_next_line(&p_cur, &line_index[indexed])) {
+                indexed++;
+            }
+            if (indexed == rows) {
+                size_t num_tasks = 16;
+                size_t rows_per_task = (rows + num_tasks - 1) / num_tasks;
+                RCRE_IOCSVParallelCtx pctx = {
+                    .lines          = line_index,
+                    .total_rows     = rows,
+                    .cols           = cols,
+                    .rows_per_task  = rows_per_task,
+                    .delim          = cfg->delimiter,
+                    .quote_char     = cfg->quote_char,
+                    .strict_numbers = cfg->strict_numbers,
+                    .dst_data       = td,
+                    .failed         = 0
+                };
+                rcre_threadpool_parallel_for(cfg->pool, num_tasks, rcre_io_csv_parallel_worker, &pctx);
+                rcre_arena_temp_end(temp);
+
+                if (atomic_load(&pctx.failed) != 0) {
+                    return RCRE_ERR_IO;
+                }
+                *out_tensor = t;
+                return RCRE_OK;
+            }
+        }
+        rcre_arena_temp_end(temp);
+    }
+
+    /* Single-Threaded Zero-Allocation Stream Parse */
+    RCRE_Slice s_cur = data_start;
+    for (size_t r = 0; r < rows; ++r) {
+        if (!rcre_io_csv_next_line(&s_cur, &line)) {
+            return RCRE_ERR_IO;
+        }
+        if (!rcre_io_csv_parse_row(line, cfg->delimiter, cfg->quote_char, cfg->strict_numbers, cols, td + r * cols)) {
+            return RCRE_ERR_IO;
+        }
+    }
+
+    *out_tensor = t;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_load_csv_ex(
+    const char* filepath,
+    const RCRE_CSVOptions* opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!filepath || !arena || !out_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_MappedFile map;
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    rc = rcre_io_parse_csv_slice(rcre_io_mmap_slice(&map), opts, arena, out_tensor);
+    rcre_io_mmap_close(&map);
+    return rc;
+}
+
+/* ========================================================================= */
+/* 4. NumPy (.npy v1.0 / v2.0) Serialization & Zero-Copy Views (IO-REQ-03)   */
+/* ========================================================================= */
+
+static const uint8_t rcre_io_npy_magic[6] = { 0x93, 'N', 'U', 'M', 'P', 'Y' };
+
+static const char* rcre_io_dtype_to_npy_descr(RCRE_DType dtype) {
+    switch (dtype) {
+        case RCRE_DTYPE_U8:   return "|u1";
+        case RCRE_DTYPE_I8:   return "|i1";
+        case RCRE_DTYPE_F16:  return "<f2";
+        case RCRE_DTYPE_BF16: return "<b2";
+        case RCRE_DTYPE_I32:  return "<i4";
+        case RCRE_DTYPE_I64:  return "<i8";
+        case RCRE_DTYPE_F32:  return "<f4";
+        case RCRE_DTYPE_F64:  return "<f8";
+        default:              return nullptr;
+    }
+}
+
+static bool rcre_io_npy_descr_to_dtype(RCRE_Slice descr, RCRE_DType* out_dtype) {
+    if (rcre_slice_eq_cstr(descr, "|u1") || rcre_slice_eq_cstr(descr, "<u1") || rcre_slice_eq_cstr(descr, "u1")) {
+        *out_dtype = RCRE_DTYPE_U8;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "|i1") || rcre_slice_eq_cstr(descr, "<i1") || rcre_slice_eq_cstr(descr, "i1")) {
+        *out_dtype = RCRE_DTYPE_I8;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<f2") || rcre_slice_eq_cstr(descr, "=f2") || rcre_slice_eq_cstr(descr, "f2") || rcre_slice_eq_cstr(descr, "|f2")) {
+        *out_dtype = RCRE_DTYPE_F16;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<b2") || rcre_slice_eq_cstr(descr, "=b2") || rcre_slice_eq_cstr(descr, "b2") || rcre_slice_eq_cstr(descr, "|b2") ||
+        rcre_slice_eq_cstr(descr, "<V2") || rcre_slice_eq_cstr(descr, "|V2")) {
+        *out_dtype = RCRE_DTYPE_BF16;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<i4") || rcre_slice_eq_cstr(descr, "=i4") || rcre_slice_eq_cstr(descr, "i4")) {
+        *out_dtype = RCRE_DTYPE_I32;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<i8") || rcre_slice_eq_cstr(descr, "=i8") || rcre_slice_eq_cstr(descr, "i8")) {
+        *out_dtype = RCRE_DTYPE_I64;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<f4") || rcre_slice_eq_cstr(descr, "=f4") || rcre_slice_eq_cstr(descr, "f4")) {
+        *out_dtype = RCRE_DTYPE_F32;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<f8") || rcre_slice_eq_cstr(descr, "=f8") || rcre_slice_eq_cstr(descr, "f8")) {
+        *out_dtype = RCRE_DTYPE_F64;
+        return true;
+    }
+    return false;
+}
+
+RCRE_NODISCARD int rcre_io_save_npy(
+    const RCRE_Tensor* tensor,
+    const char* filepath
+) {
+    if (!tensor || !tensor->data || !filepath || tensor->ndim == 0 || tensor->ndim > RCRE_MAX_DIMS) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (!rcre_tensor_is_contiguous(tensor)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    const char* descr = rcre_io_dtype_to_npy_descr(tensor->dtype);
+    if (!descr) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    char dict_buf[256];
+    int pos = snprintf(dict_buf, sizeof(dict_buf),
+                       "{'descr': '%s', 'fortran_order': False, 'shape': (", descr);
+    if (pos <= 0 || (size_t)pos >= sizeof(dict_buf)) {
+        return RCRE_ERR_IO;
+    }
+
+    for (uint8_t i = 0; i < tensor->ndim; ++i) {
+        int n = snprintf(dict_buf + pos, sizeof(dict_buf) - (size_t)pos,
+                         (i == 0) ? "%zu" : ", %zu", tensor->shape[i]);
+        if (n <= 0 || (size_t)(pos + n) >= sizeof(dict_buf)) {
+            return RCRE_ERR_IO;
+        }
+        pos += n;
+    }
+
+    int tail_n = snprintf(dict_buf + pos, sizeof(dict_buf) - (size_t)pos,
+                          (tensor->ndim == 1) ? ",), }" : "), }");
+    if (tail_n <= 0 || (size_t)(pos + tail_n) >= sizeof(dict_buf)) {
+        return RCRE_ERR_IO;
+    }
+    size_t dict_len = (size_t)(pos + tail_n);
+
+    /* Pad v1.0 preamble (10 bytes) + dict_len + padding + '\n' to an exact
+     * multiple of 64 bytes so the array payload starts at offset 64 * k. */
+    size_t raw_total = 10 + dict_len + 1;
+    size_t aligned_total = (raw_total + 63) & ~((size_t)63);
+    size_t header_len = aligned_total - 10;
+
+    uint8_t header_block[512];
+    if (aligned_total > sizeof(header_block)) {
+        return RCRE_ERR_IO;
+    }
+
+    memcpy(header_block, rcre_io_npy_magic, 6);
+    header_block[6] = 1; /* major v1 */
+    header_block[7] = 0; /* minor v0 */
+    rcre_io_write_u16_le(&header_block[8], (uint16_t)header_len);
+    memcpy(&header_block[10], dict_buf, dict_len);
+
+    size_t pad_bytes = header_len - dict_len - 1;
+    memset(&header_block[10 + dict_len], ' ', pad_bytes);
+    header_block[aligned_total - 1] = '\n';
+
+    size_t payload_bytes = rcre_tensor_nbytes(tensor);
+
+    char tmp_path[4096];
+#if defined(RCRE_IO_HAVE_POSIX)
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", filepath, (int)getpid());
+#else
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filepath);
+#endif
+    if (tn <= 0 || (size_t)tn >= sizeof(tmp_path)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    FILE* f = fopen(tmp_path, "wb");
+    if (!f) {
+        return RCRE_ERR_IO;
+    }
+
+    if (fwrite(header_block, 1, aligned_total, f) != aligned_total ||
+        (payload_bytes > 0 && fwrite(tensor->data, 1, payload_bytes, f) != payload_bytes)) {
+        fclose(f);
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+
+    if (fflush(f) != 0) {
+        fclose(f);
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+#if defined(RCRE_IO_HAVE_POSIX)
+    (void)fsync(fileno(f));
+#endif
+    fclose(f);
+
+#if defined(_WIN32)
+    if (!MoveFileExA(tmp_path, filepath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+#else
+    if (rename(tmp_path, filepath) != 0) {
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+#endif
+
+    rcre_io_record_telemetry(true, (uint64_t)(aligned_total + payload_bytes));
+    return RCRE_OK;
+}
+
+/* Internal zero-allocation .npy header parser */
+static int rcre_io_parse_npy_header(
+    RCRE_Slice file_slice,
+    RCRE_DType* out_dtype,
+    uint8_t* out_ndim,
+    size_t out_shape[RCRE_MAX_DIMS],
+    size_t* out_data_offset,
+    size_t* out_data_nbytes
+) {
+    if (!file_slice.data || file_slice.len < 10) {
+        return RCRE_ERR_IO;
+    }
+    if (memcmp(file_slice.data, rcre_io_npy_magic, 6) != 0) {
+        return RCRE_ERR_IO;
+    }
+
+    uint8_t major = file_slice.data[6];
+    uint8_t minor = file_slice.data[7];
+    (void)minor;
+
+    size_t preamble_len = 0;
+    size_t header_len = 0;
+    if (major == 1) {
+        preamble_len = 10;
+        header_len = (size_t)rcre_io_read_u16_le(&file_slice.data[8]);
+    } else if (major == 2 || major == 3) {
+        if (file_slice.len < 12) {
+            return RCRE_ERR_IO;
+        }
+        preamble_len = 12;
+        header_len = (size_t)rcre_io_read_u32_le(&file_slice.data[8]);
+    } else {
+        return RCRE_ERR_IO;
+    }
+
+    size_t data_offset = 0;
+    if (header_len == 0 || rcre_io_add_overflow(preamble_len, header_len, &data_offset) ||
+        data_offset > file_slice.len) {
+        return RCRE_ERR_IO;
+    }
+
+    RCRE_Slice hdr = rcre_slice_sub(file_slice, preamble_len, data_offset);
+
+    /* 1. Extract 'descr' */
+    RCRE_SlicePair p_descr = rcre_slice_split_once(hdr, rcre_slice_from_cstr("'descr'"));
+    if (!p_descr.found) {
+        p_descr = rcre_slice_split_once(hdr, rcre_slice_from_cstr("\"descr\""));
+        if (!p_descr.found) return RCRE_ERR_IO;
+    }
+    RCRE_SlicePair p_colon = rcre_slice_split_once_byte(p_descr.tail, ':');
+    if (!p_colon.found) return RCRE_ERR_IO;
+    RCRE_Slice descr_rest = rcre_slice_trim_ascii(p_colon.tail);
+    if (descr_rest.len < 3 || (descr_rest.data[0] != '\'' && descr_rest.data[0] != '"')) {
+        return RCRE_ERR_IO;
+    }
+    uint8_t quote_ch = descr_rest.data[0];
+    RCRE_Slice descr_body = rcre_slice_sub(descr_rest, 1, descr_rest.len);
+    size_t q_end = rcre_slice_find_byte(descr_body, quote_ch);
+    if (q_end == RCRE_NPOS) return RCRE_ERR_IO;
+    RCRE_Slice descr_val = rcre_slice_sub(descr_body, 0, q_end);
+    if (!rcre_io_npy_descr_to_dtype(descr_val, out_dtype)) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    /* 2. Verify 'fortran_order': False */
+    RCRE_SlicePair p_fort = rcre_slice_split_once(hdr, rcre_slice_from_cstr("'fortran_order'"));
+    if (!p_fort.found) {
+        p_fort = rcre_slice_split_once(hdr, rcre_slice_from_cstr("\"fortran_order\""));
+        if (!p_fort.found) return RCRE_ERR_IO;
+    }
+    RCRE_SlicePair p_fcolon = rcre_slice_split_once_byte(p_fort.tail, ':');
+    if (!p_fcolon.found) return RCRE_ERR_IO;
+    RCRE_Slice fort_val = rcre_slice_trim_ascii(p_fcolon.tail);
+    if (!rcre_slice_starts_with(fort_val, rcre_slice_from_cstr("False"))) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    /* 3. Extract 'shape': (d0, d1, ...) */
+    RCRE_SlicePair p_shape = rcre_slice_split_once(hdr, rcre_slice_from_cstr("'shape'"));
+    if (!p_shape.found) {
+        p_shape = rcre_slice_split_once(hdr, rcre_slice_from_cstr("\"shape\""));
+        if (!p_shape.found) return RCRE_ERR_IO;
+    }
+    size_t lparen = rcre_slice_find_byte(p_shape.tail, '(');
+    size_t rparen = rcre_slice_find_byte(p_shape.tail, ')');
+    if (lparen == RCRE_NPOS || rparen == RCRE_NPOS || lparen >= rparen) {
+        return RCRE_ERR_IO;
+    }
+
+    RCRE_Slice shape_tuple = rcre_slice_sub(p_shape.tail, lparen + 1, rparen);
+    uint8_t ndim = 0;
+    size_t numel = 1;
+    memset(out_shape, 0, RCRE_MAX_DIMS * sizeof(size_t));
+
+    while (shape_tuple.len > 0) {
+        RCRE_SlicePair sp = rcre_slice_split_once_byte(shape_tuple, ',');
+        RCRE_Slice item = rcre_slice_trim_ascii(sp.head);
+        shape_tuple = sp.tail;
+        if (item.len == 0) {
+            continue;
+        }
+        if (ndim >= RCRE_MAX_DIMS) {
+            return RCRE_ERR_UNSUPPORTED_OP;
+        }
+        uint64_t dim_u64 = 0;
+        if (!rcre_slice_parse_u64(item, &dim_u64) || dim_u64 == 0 || dim_u64 > (uint64_t)SIZE_MAX) {
+            return RCRE_ERR_IO;
+        }
+        size_t dim = (size_t)dim_u64;
+        if (rcre_io_mul_overflow(numel, dim, &numel)) {
+            return RCRE_ERR_IO;
+        }
+        out_shape[ndim++] = dim;
+    }
+
+    if (ndim == 0) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t elem_size = rcre_dtype_size(*out_dtype);
+    size_t data_nbytes = 0;
+    if (rcre_io_mul_overflow(numel, elem_size, &data_nbytes)) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t expected_file_size = 0;
+    if (rcre_io_add_overflow(data_offset, data_nbytes, &expected_file_size) ||
+        expected_file_size != file_slice.len) {
+        return RCRE_ERR_IO;
+    }
+
+    *out_ndim = ndim;
+    *out_data_offset = data_offset;
+    *out_data_nbytes = data_nbytes;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_view_npy(
+    const RCRE_MappedFile* map,
+    RCRE_Tensor* out_view
+) {
+    if (!map || !map->data || map->size == 0 || !out_view) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_view, 0, sizeof(RCRE_Tensor));
+
+    RCRE_DType dtype = RCRE_DTYPE_F32;
+    uint8_t ndim = 0;
+    size_t shape[RCRE_MAX_DIMS] = {0};
+    size_t data_offset = 0;
+    size_t data_nbytes = 0;
+
+    int rc = rcre_io_parse_npy_header(rcre_io_mmap_slice(map), &dtype, &ndim, shape, &data_offset, &data_nbytes);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    const uint8_t* payload_ptr = map->data + data_offset;
+    /* Enforce 64-byte SIMD alignment invariant on zero-copy views */
+    if (((uintptr_t)payload_ptr & 63U) != 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_Layout layout = (ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    *out_view = rcre_tensor_from_buffer((void*)(uintptr_t)payload_ptr, shape, ndim, dtype, layout);
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_load_npy(
+    const char* filepath,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!filepath || !arena || !out_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_tensor, 0, sizeof(RCRE_Tensor));
+
+    RCRE_MappedFile map;
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    RCRE_DType dtype = RCRE_DTYPE_F32;
+    uint8_t ndim = 0;
+    size_t shape[RCRE_MAX_DIMS] = {0};
+    size_t data_offset = 0;
+    size_t data_nbytes = 0;
+
+    rc = rcre_io_parse_npy_header(rcre_io_mmap_slice(&map), &dtype, &ndim, shape, &data_offset, &data_nbytes);
+    if (rc != RCRE_OK) {
+        rcre_io_mmap_close(&map);
+        return rc;
+    }
+
+    RCRE_Layout layout = (ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    RCRE_Tensor t = rcre_tensor_create(shape, ndim, dtype, layout, arena);
+    if (!t.data) {
+        rcre_io_mmap_close(&map);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    memcpy(t.data, map.data + data_offset, data_nbytes);
+    rcre_io_mmap_close(&map);
+    *out_tensor = t;
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 5. Multi-Tensor Safetensors (.safetensors) Container Engine (IO-REQ-04)   */
+/* ========================================================================= */
+
+static const char* rcre_io_dtype_to_st_str(RCRE_DType dtype) {
+    switch (dtype) {
+        case RCRE_DTYPE_U8:   return "U8";
+        case RCRE_DTYPE_I8:   return "I8";
+        case RCRE_DTYPE_F16:  return "F16";
+        case RCRE_DTYPE_BF16: return "BF16";
+        case RCRE_DTYPE_I32:  return "I32";
+        case RCRE_DTYPE_I64:  return "I64";
+        case RCRE_DTYPE_F32:  return "F32";
+        case RCRE_DTYPE_F64:  return "F64";
+        default:              return nullptr;
+    }
+}
+
+static bool rcre_io_st_str_to_dtype(RCRE_Slice s, RCRE_DType* out_dtype) {
+    if (rcre_slice_eq_cstr(s, "F32")) {
+        *out_dtype = RCRE_DTYPE_F32;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "F64")) {
+        *out_dtype = RCRE_DTYPE_F64;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "F16")) {
+        *out_dtype = RCRE_DTYPE_F16;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "BF16")) {
+        *out_dtype = RCRE_DTYPE_BF16;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "I32")) {
+        *out_dtype = RCRE_DTYPE_I32;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "I64")) {
+        *out_dtype = RCRE_DTYPE_I64;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "I8")) {
+        *out_dtype = RCRE_DTYPE_I8;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "U8")) {
+        *out_dtype = RCRE_DTYPE_U8;
+        return true;
+    }
+    return false;
+}
+
+static void rcre_io_json_skip_ws(RCRE_Slice s, size_t* pos) {
+    while (*pos < s.len && rcre_io_is_space(s.data[*pos])) {
+        (*pos)++;
+    }
+}
+
+static bool rcre_io_json_parse_string(RCRE_Slice s, size_t* pos, RCRE_Slice* out_str) {
+    rcre_io_json_skip_ws(s, pos);
+    if (*pos >= s.len || s.data[*pos] != '"') {
+        return false;
+    }
+    (*pos)++;
+    size_t start = *pos;
+    while (*pos < s.len) {
+        uint8_t c = s.data[*pos];
+        if (c == '\\') {
+            *pos += 2;
+            if (*pos > s.len) return false;
+            continue;
+        }
+        if (c == '"') {
+            *out_str = rcre_slice_sub(s, start, *pos);
+            (*pos)++;
+            return true;
+        }
+        (*pos)++;
+    }
+    return false;
+}
+
+static bool rcre_io_json_skip_value(RCRE_Slice s, size_t* pos) {
+    rcre_io_json_skip_ws(s, pos);
+    if (*pos >= s.len) return false;
+    uint8_t c = s.data[*pos];
+    if (c == '"') {
+        RCRE_Slice dummy;
+        return rcre_io_json_parse_string(s, pos, &dummy);
+    }
+    if (c == '{' || c == '[') {
+        uint8_t open_ch = c;
+        uint8_t close_ch = (c == '{') ? '}' : ']';
+        int depth = 1;
+        (*pos)++;
+        while (*pos < s.len && depth > 0) {
+            if (s.data[*pos] == '"') {
+                RCRE_Slice dummy;
+                if (!rcre_io_json_parse_string(s, pos, &dummy)) return false;
+                continue;
+            }
+            if (s.data[*pos] == open_ch) depth++;
+            else if (s.data[*pos] == close_ch) depth--;
+            (*pos)++;
+        }
+        return depth == 0;
+    }
+    while (*pos < s.len && s.data[*pos] != ',' && s.data[*pos] != '}' &&
+           s.data[*pos] != ']' && !rcre_io_is_space(s.data[*pos])) {
+        (*pos)++;
+    }
+    return true;
+}
+
+static bool rcre_io_json_parse_u64_array(
+    RCRE_Slice s,
+    size_t* pos,
+    size_t* out_vals,
+    size_t max_count,
+    size_t* out_count
+) {
+    rcre_io_json_skip_ws(s, pos);
+    if (*pos >= s.len || s.data[*pos] != '[') {
+        return false;
+    }
+    (*pos)++;
+    size_t count = 0;
+
+    for (;;) {
+        rcre_io_json_skip_ws(s, pos);
+        if (*pos >= s.len) return false;
+        if (s.data[*pos] == ']') {
+            (*pos)++;
+            *out_count = count;
+            return true;
+        }
+        if (count > 0) {
+            if (s.data[*pos] != ',') return false;
+            (*pos)++;
+            rcre_io_json_skip_ws(s, pos);
+        }
+        size_t num_start = *pos;
+        while (*pos < s.len && s.data[*pos] >= '0' && s.data[*pos] <= '9') {
+            (*pos)++;
+        }
+        if (*pos == num_start || count >= max_count) {
+            return false;
+        }
+        uint64_t val = 0;
+        if (!rcre_slice_parse_u64(rcre_slice_sub(s, num_start, *pos), &val) ||
+            val > (uint64_t)SIZE_MAX) {
+            return false;
+        }
+        out_vals[count++] = (size_t)val;
+    }
+}
+
+static int rcre_io_safetensors_parse_archive(RCRE_SafeTensorsArchive* arch) {
+    if (!arch || !arch->map.data || arch->map.size < 8) {
+        return RCRE_ERR_IO;
+    }
+
+    uint64_t hdr_len_u64 = rcre_io_read_u64_le(arch->map.data);
+    /* Reject empty or excessively large (> 100 MiB) headers */
+    if (hdr_len_u64 == 0 || hdr_len_u64 > (100ULL * 1024ULL * 1024ULL)) {
+        return RCRE_ERR_IO;
+    }
+    size_t hdr_len = (size_t)hdr_len_u64;
+    size_t data_base = 0;
+    if (rcre_io_add_overflow(8, hdr_len, &data_base) || data_base > arch->map.size) {
+        return RCRE_ERR_IO;
+    }
+
+    size_t payload_limit = arch->map.size - data_base;
+    arch->header_nbytes    = hdr_len;
+    arch->data_base_offset = data_base;
+    arch->num_tensors      = 0;
+
+    RCRE_Slice json = rcre_slice_from_parts(arch->map.data + 8, hdr_len);
+    size_t pos = 0;
+    rcre_io_json_skip_ws(json, &pos);
+    if (pos >= json.len || json.data[pos] != '{') {
+        return RCRE_ERR_IO;
+    }
+    pos++;
+
+    for (;;) {
+        rcre_io_json_skip_ws(json, &pos);
+        if (pos >= json.len) return RCRE_ERR_IO;
+        if (json.data[pos] == '}') {
+            pos++;
+            break;
+        }
+        if (arch->num_tensors > 0 || pos > 1) {
+            if (json.data[pos] == ',') {
+                pos++;
+                rcre_io_json_skip_ws(json, &pos);
+            }
+        }
+
+        RCRE_Slice key_name;
+        if (!rcre_io_json_parse_string(json, &pos, &key_name)) {
+            return RCRE_ERR_IO;
+        }
+        rcre_io_json_skip_ws(json, &pos);
+        if (pos >= json.len || json.data[pos] != ':') {
+            return RCRE_ERR_IO;
+        }
+        pos++;
+
+        if (rcre_slice_eq_cstr(key_name, "__metadata__")) {
+            if (!rcre_io_json_skip_value(json, &pos)) {
+                return RCRE_ERR_IO;
+            }
+            continue;
+        }
+
+        if (arch->num_tensors >= RCRE_SAFETENSORS_MAX_TENSORS || key_name.len == 0) {
+            return RCRE_ERR_IO;
+        }
+
+        rcre_io_json_skip_ws(json, &pos);
+        if (pos >= json.len || json.data[pos] != '{') {
+            return RCRE_ERR_IO;
+        }
+        pos++;
+
+        bool has_dtype = false;
+        bool has_shape = false;
+        bool has_offsets = false;
+        RCRE_SafeTensorEntry entry;
+        memset(&entry, 0, sizeof(entry));
+        entry.name = key_name;
+
+        for (;;) {
+            rcre_io_json_skip_ws(json, &pos);
+            if (pos >= json.len) return RCRE_ERR_IO;
+            if (json.data[pos] == '}') {
+                pos++;
+                break;
+            }
+            if (json.data[pos] == ',') {
+                pos++;
+                rcre_io_json_skip_ws(json, &pos);
+            }
+
+            RCRE_Slice field_name;
+            if (!rcre_io_json_parse_string(json, &pos, &field_name)) {
+                return RCRE_ERR_IO;
+            }
+            rcre_io_json_skip_ws(json, &pos);
+            if (pos >= json.len || json.data[pos] != ':') {
+                return RCRE_ERR_IO;
+            }
+            pos++;
+
+            if (rcre_slice_eq_cstr(field_name, "dtype")) {
+                RCRE_Slice dtype_str;
+                if (!rcre_io_json_parse_string(json, &pos, &dtype_str) ||
+                    !rcre_io_st_str_to_dtype(dtype_str, &entry.dtype)) {
+                    return RCRE_ERR_IO;
+                }
+                has_dtype = true;
+            } else if (rcre_slice_eq_cstr(field_name, "shape")) {
+                size_t dim_count = 0;
+                if (!rcre_io_json_parse_u64_array(json, &pos, entry.shape, RCRE_MAX_DIMS, &dim_count) ||
+                    dim_count == 0 || dim_count > RCRE_MAX_DIMS) {
+                    return RCRE_ERR_IO;
+                }
+                entry.ndim = (uint8_t)dim_count;
+                has_shape = true;
+            } else if (rcre_slice_eq_cstr(field_name, "data_offsets")) {
+                size_t offs[2] = {0, 0};
+                size_t off_count = 0;
+                if (!rcre_io_json_parse_u64_array(json, &pos, offs, 2, &off_count) ||
+                    off_count != 2 || offs[0] > offs[1] || offs[1] > payload_limit) {
+                    return RCRE_ERR_IO;
+                }
+                entry.data_offset = offs[0];
+                entry.data_nbytes = offs[1] - offs[0];
+                has_offsets = true;
+            } else {
+                if (!rcre_io_json_skip_value(json, &pos)) {
+                    return RCRE_ERR_IO;
+                }
+            }
+        }
+
+        if (!has_dtype || !has_shape || !has_offsets) {
+            return RCRE_ERR_IO;
+        }
+
+        /* Verify exact byte size matches prod(shape) * sizeof(dtype) */
+        size_t numel = 1;
+        for (uint8_t d = 0; d < entry.ndim; ++d) {
+            if (entry.shape[d] == 0 || rcre_io_mul_overflow(numel, entry.shape[d], &numel)) {
+                return RCRE_ERR_IO;
+            }
+        }
+        size_t expected_bytes = 0;
+        if (rcre_io_mul_overflow(numel, rcre_dtype_size(entry.dtype), &expected_bytes) ||
+            expected_bytes != entry.data_nbytes) {
+            return RCRE_ERR_IO;
+        }
+
+        /* Check for duplicate tensor names or overlapping byte intervals */
+        size_t cur_begin = entry.data_offset;
+        size_t cur_end   = entry.data_offset + entry.data_nbytes;
+        for (size_t prev = 0; prev < arch->num_tensors; ++prev) {
+            if (rcre_slice_eq(arch->entries[prev].name, entry.name)) {
+                return RCRE_ERR_IO;
+            }
+            size_t p_begin = arch->entries[prev].data_offset;
+            size_t p_end   = p_begin + arch->entries[prev].data_nbytes;
+            if (cur_begin < p_end && p_begin < cur_end) {
+                return RCRE_ERR_IO; /* Overlapping tensor slices */
+            }
+        }
+
+        arch->entries[arch->num_tensors++] = entry;
+    }
+
+    rcre_io_json_skip_ws(json, &pos);
+    if (pos != json.len || arch->num_tensors == 0) {
+        return RCRE_ERR_IO;
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_open(
+    const char* filepath,
+    RCRE_SafeTensorsArchive* out_archive
+) {
+    if (!filepath || !out_archive) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_archive, 0, sizeof(RCRE_SafeTensorsArchive));
+
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_RANDOM, &out_archive->map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    rc = rcre_io_safetensors_parse_archive(out_archive);
+    if (rc != RCRE_OK) {
+        rcre_io_mmap_close(&out_archive->map);
+        return rc;
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_open_from_buffer(
+    const void* buf,
+    size_t size,
+    RCRE_SafeTensorsArchive* out_archive
+) {
+    if (!buf || size == 0 || !out_archive) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_archive, 0, sizeof(RCRE_SafeTensorsArchive));
+
+    int rc = rcre_io_mmap_from_buffer(buf, size, &out_archive->map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    rc = rcre_io_safetensors_parse_archive(out_archive);
+    if (rc != RCRE_OK) {
+        rcre_io_mmap_close(&out_archive->map);
+        return rc;
+    }
+    return RCRE_OK;
+}
+
+void rcre_io_safetensors_close(RCRE_SafeTensorsArchive* archive) {
+    if (!archive) {
+        return;
+    }
+    rcre_io_mmap_close(&archive->map);
+    memset(archive, 0, sizeof(RCRE_SafeTensorsArchive));
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    RCRE_Arena* fallback_arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!archive || !archive->map.data || !name || !out_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_tensor, 0, sizeof(RCRE_Tensor));
+
+    RCRE_Slice target_name = rcre_slice_from_cstr(name);
+    const RCRE_SafeTensorEntry* found = nullptr;
+    for (size_t i = 0; i < archive->num_tensors; ++i) {
+        if (rcre_slice_eq(archive->entries[i].name, target_name)) {
+            found = &archive->entries[i];
+            break;
+        }
+    }
+    if (!found) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    const uint8_t* ptr = archive->map.data + archive->data_base_offset + found->data_offset;
+    RCRE_Layout layout = (found->ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+
+    if (((uintptr_t)ptr & 63U) == 0) {
+        *out_tensor = rcre_tensor_from_buffer((void*)(uintptr_t)ptr, found->shape, found->ndim, found->dtype, layout);
+        return RCRE_OK;
+    }
+
+    if (!fallback_arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_Tensor copy_t = rcre_tensor_create(found->shape, found->ndim, found->dtype, layout, fallback_arena);
+    if (!copy_t.data) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memcpy(copy_t.data, ptr, found->data_nbytes);
+    *out_tensor = copy_t;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_save(
+    const char* filepath,
+    const char* const* names,
+    const RCRE_Tensor* tensors,
+    size_t num_tensors,
+    RCRE_Arena* scratch
+) {
+    if (!filepath || !names || !tensors || !scratch ||
+        num_tensors == 0 || num_tensors > RCRE_SAFETENSORS_MAX_TENSORS) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_ArenaTemp temp = rcre_arena_temp_begin(scratch);
+    RCRE_StrBuilder sb = rcre_sb_init(scratch, 512);
+    (void)rcre_sb_append_byte(&sb, '{');
+
+    size_t current_offset = 0;
+    for (size_t i = 0; i < num_tensors; ++i) {
+        const char* tname = names[i];
+        const RCRE_Tensor* t = &tensors[i];
+        if (!tname || tname[0] == '\0' || !t->data || t->ndim == 0 || t->ndim > RCRE_MAX_DIMS ||
+            !rcre_tensor_is_contiguous(t)) {
+            rcre_arena_temp_end(temp);
+            return RCRE_ERR_INVALID_ARG;
+        }
+
+        const char* dt_str = rcre_io_dtype_to_st_str(t->dtype);
+        if (!dt_str) {
+            rcre_arena_temp_end(temp);
+            return RCRE_ERR_UNSUPPORTED_OP;
+        }
+
+        size_t nbytes = rcre_tensor_nbytes(t);
+        size_t next_offset = 0;
+        if (rcre_io_add_overflow(current_offset, nbytes, &next_offset)) {
+            rcre_arena_temp_end(temp);
+            return RCRE_ERR_INVALID_ARG;
+        }
+
+        if (i > 0) {
+            (void)rcre_sb_append_byte(&sb, ',');
+        }
+        (void)rcre_sb_append_byte(&sb, '"');
+        (void)rcre_sb_append_cstr(&sb, tname);
+        (void)rcre_sb_append_cstr(&sb, "\":{\"dtype\":\"");
+        (void)rcre_sb_append_cstr(&sb, dt_str);
+        (void)rcre_sb_append_cstr(&sb, "\",\"shape\":[");
+        for (uint8_t d = 0; d < t->ndim; ++d) {
+            if (d > 0) (void)rcre_sb_append_byte(&sb, ',');
+            (void)rcre_sb_append_u64(&sb, (uint64_t)t->shape[d]);
+        }
+        (void)rcre_sb_append_cstr(&sb, "],\"data_offsets\":[");
+        (void)rcre_sb_append_u64(&sb, (uint64_t)current_offset);
+        (void)rcre_sb_append_byte(&sb, ',');
+        (void)rcre_sb_append_u64(&sb, (uint64_t)next_offset);
+        (void)rcre_sb_append_cstr(&sb, "]}");
+
+        current_offset = next_offset;
+    }
+
+    (void)rcre_sb_append_byte(&sb, '}');
+
+    /* Pad JSON header with trailing spaces (' ') so that (8 + header_len)
+     * lands on an exact 64-byte boundary for zero-copy SIMD mmap views. */
+    size_t raw_preamble = 8 + sb.len;
+    size_t aligned_preamble = (raw_preamble + 63) & ~((size_t)63);
+    size_t pad_spaces = aligned_preamble - raw_preamble;
+    for (size_t p = 0; p < pad_spaces; ++p) {
+        (void)rcre_sb_append_byte(&sb, ' ');
+    }
+
+    RCRE_Slice hdr_slice = rcre_sb_to_slice(&sb);
+    if (!hdr_slice.data || hdr_slice.len == 0) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    char tmp_path[4096];
+#if defined(RCRE_IO_HAVE_POSIX)
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", filepath, (int)getpid());
+#else
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filepath);
+#endif
+    if (tn <= 0 || (size_t)tn >= sizeof(tmp_path)) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    FILE* f = fopen(tmp_path, "wb");
+    if (!f) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_IO;
+    }
+
+    uint8_t len_prefix[8];
+    rcre_io_write_u64_le(len_prefix, (uint64_t)hdr_slice.len);
+
+    if (fwrite(len_prefix, 1, 8, f) != 8 ||
+        fwrite(hdr_slice.data, 1, hdr_slice.len, f) != hdr_slice.len) {
+        fclose(f);
+        (void)remove(tmp_path);
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_IO;
+    }
+
+    for (size_t i = 0; i < num_tensors; ++i) {
+        size_t nb = rcre_tensor_nbytes(&tensors[i]);
+        if (nb > 0 && fwrite(tensors[i].data, 1, nb, f) != nb) {
+            fclose(f);
+            (void)remove(tmp_path);
+            rcre_arena_temp_end(temp);
+            return RCRE_ERR_IO;
+        }
+    }
+
+    if (fflush(f) != 0) {
+        fclose(f);
+        (void)remove(tmp_path);
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_IO;
+    }
+#if defined(RCRE_IO_HAVE_POSIX)
+    (void)fsync(fileno(f));
+#endif
+    fclose(f);
+    rcre_arena_temp_end(temp);
+
+    if (rename(tmp_path, filepath) != 0) {
+        (void)remove(tmp_path);
+        return RCRE_ERR_IO;
+    }
+
+    rcre_io_record_telemetry(true, (uint64_t)(8 + hdr_slice.len + current_offset));
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* Half-Precision (IEEE FP16 & Google BF16) SIMD Conversion Engine           */
+/* ========================================================================= */
+
+static inline float rcre_f16_to_f32_scalar(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000U) << 16;
+    uint32_t exp  = (h >> 10) & 0x1FU;
+    uint32_t mant = h & 0x03FFU;
+    uint32_t u;
+    if (exp == 31) {
+        u = sign | 0x7F800000U | (mant << 13);
+    } else if (exp == 0) {
+        if (mant == 0) {
+            u = sign;
+        } else {
+            int e = 0;
+            while ((mant & 0x0400U) == 0) {
+                mant <<= 1;
+                e--;
+            }
+            e++;
+            mant &= ~0x0400U;
+            u = sign | ((uint32_t)(e + (127 - 15)) << 23) | (mant << 13);
+        }
+    } else {
+        u = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+    float f;
+    memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+static inline uint16_t rcre_f32_to_f16_scalar(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    uint32_t sign = (u >> 16) & 0x8000U;
+    int32_t  exp  = (int32_t)((u >> 23) & 0xFFU) - 127 + 15;
+    uint32_t mant = u & 0x007FFFFFU;
+
+    if (exp <= 0) {
+        if (exp < -10) return (uint16_t)sign;
+        mant = (mant | 0x00800000U) >> (1 - exp);
+        return (uint16_t)(sign | (mant >> 13));
+    } else if (exp >= 31) {
+        return (uint16_t)(sign | 0x7C00U | ((mant != 0) ? 0x0200U : 0));
+    }
+    return (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
+}
+
+static inline uint16_t rcre_f32_to_bf16_scalar(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    uint32_t lsb = (u >> 16) & 1U;
+    uint32_t bias = 0x7FFFU + lsb;
+    u += bias;
+    return (uint16_t)(u >> 16);
+}
+
+void rcre_f16_to_f32(const void* src, float* dst, size_t numel) {
+    if (!src || !dst || numel == 0) return;
+    const uint16_t* s = (const uint16_t*)src;
+    size_t i = 0;
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 4 <= numel; i += 4) {
+        float16x4_t h = vld1_f16((const float16_t*)(s + i));
+        float32x4_t f = vcvt_f32_f16(h);
+        vst1q_f32(dst + i, f);
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__) && defined(__F16C__)
+    for (; i + 8 <= numel; i += 8) {
+        __m128i h = _mm_loadu_si128((const __m128i*)(s + i));
+        __m256 f = _mm256_cvtph_ps(h);
+        _mm256_storeu_ps(dst + i, f);
+    }
+#endif
+    for (; i < numel; ++i) {
+        dst[i] = rcre_f16_to_f32_scalar(s[i]);
+    }
+}
+
+void rcre_bf16_to_f32(const void* src, float* dst, size_t numel) {
+    if (!src || !dst || numel == 0) return;
+    const uint16_t* s = (const uint16_t*)src;
+    size_t i = 0;
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 4 <= numel; i += 4) {
+        uint16x4_t h = vld1_u16(s + i);
+        uint32x4_t w = vshll_n_u16(h, 16);
+        vst1q_f32(dst + i, vreinterpretq_f32_u32(w));
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+    for (; i + 8 <= numel; i += 8) {
+        __m128i h = _mm_loadu_si128((const __m128i*)(s + i));
+        __m256i w = _mm256_slli_epi32(_mm256_cvtepu16_epi32(h), 16);
+        _mm256_storeu_ps(dst + i, _mm256_castsi256_ps(w));
+    }
+#endif
+    for (; i < numel; ++i) {
+        uint32_t u = (uint32_t)s[i] << 16;
+        memcpy(dst + i, &u, 4);
+    }
+}
+
+void rcre_f32_to_f16(const float* src, void* dst, size_t numel) {
+    if (!src || !dst || numel == 0) return;
+    uint16_t* d = (uint16_t*)dst;
+    size_t i = 0;
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 4 <= numel; i += 4) {
+        float32x4_t f = vld1q_f32(src + i);
+        float16x4_t h = vcvt_f16_f32(f);
+        vst1_f16((float16_t*)(d + i), h);
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__) && defined(__F16C__)
+    for (; i + 8 <= numel; i += 8) {
+        __m256 f = _mm256_loadu_ps(src + i);
+        __m128i h = _mm256_cvtps_ph(f, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        _mm_storeu_si128((__m128i*)(d + i), h);
+    }
+#endif
+    for (; i < numel; ++i) {
+        d[i] = rcre_f32_to_f16_scalar(src[i]);
+    }
+}
+
+void rcre_f32_to_bf16(const float* src, void* dst, size_t numel) {
+    if (!src || !dst || numel == 0) return;
+    uint16_t* d = (uint16_t*)dst;
+    for (size_t i = 0; i < numel; ++i) {
+        d[i] = rcre_f32_to_bf16_scalar(src[i]);
+    }
+}
+
+RCRE_NODISCARD int rcre_tensor_to_f32(
+    const RCRE_Tensor* src,
+    RCRE_Arena* arena,
+    RCRE_Tensor* dst_f32
+) {
+    if (!src || !src->data || !dst_f32) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype == RCRE_DTYPE_F32) {
+        *dst_f32 = *src;
+        return RCRE_OK;
+    }
+    if (!arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t numel = rcre_tensor_numel(src);
+    *dst_f32 = rcre_tensor_create(src->shape, src->ndim, RCRE_DTYPE_F32, src->layout, arena);
+    if (!dst_f32->data) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    float* out = (float*)dst_f32->data;
+
+    switch (src->dtype) {
+        case RCRE_DTYPE_F16:
+            rcre_f16_to_f32(src->data, out, numel);
+            return RCRE_OK;
+        case RCRE_DTYPE_BF16:
+            rcre_bf16_to_f32(src->data, out, numel);
+            return RCRE_OK;
+        case RCRE_DTYPE_U8: {
+            const uint8_t* u = (const uint8_t*)src->data;
+            for (size_t i = 0; i < numel; ++i) out[i] = (float)u[i];
+            return RCRE_OK;
+        }
+        case RCRE_DTYPE_I8: {
+            const int8_t* iv = (const int8_t*)src->data;
+            for (size_t i = 0; i < numel; ++i) out[i] = (float)iv[i];
+            return RCRE_OK;
+        }
+        case RCRE_DTYPE_I32: {
+            const int32_t* iv = (const int32_t*)src->data;
+            for (size_t i = 0; i < numel; ++i) out[i] = (float)iv[i];
+            return RCRE_OK;
+        }
+        case RCRE_DTYPE_I64: {
+            const int64_t* iv = (const int64_t*)src->data;
+            for (size_t i = 0; i < numel; ++i) out[i] = (float)iv[i];
+            return RCRE_OK;
+        }
+        case RCRE_DTYPE_F64: {
+            const double* dv = (const double*)src->data;
+            for (size_t i = 0; i < numel; ++i) out[i] = (float)dv[i];
+            return RCRE_OK;
+        }
+        default:
+            return RCRE_ERR_UNSUPPORTED_OP;
+    }
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_f32_tensor
+) {
+    if (!archive || !name || !out_f32_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    RCRE_Tensor raw_tensor = {0};
+    int rc = rcre_io_safetensors_get_tensor(archive, name, arena, &raw_tensor);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    if (raw_tensor.dtype == RCRE_DTYPE_F32) {
+        *out_f32_tensor = raw_tensor;
+        return RCRE_OK;
+    }
+
+    return rcre_tensor_to_f32(&raw_tensor, arena, out_f32_tensor);
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_slice_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    size_t start_row,
+    size_t num_rows,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_slice
+) {
+    if (!archive || !archive->map.data || !name || !arena || !out_slice || num_rows == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_slice, 0, sizeof(RCRE_Tensor));
+
+    RCRE_Slice target_name = rcre_slice_from_cstr(name);
+    const RCRE_SafeTensorEntry* found = nullptr;
+    for (size_t i = 0; i < archive->num_tensors; ++i) {
+        if (rcre_slice_eq(archive->entries[i].name, target_name)) {
+            found = &archive->entries[i];
+            break;
+        }
+    }
+    if (!found || found->ndim == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t total_rows = found->shape[0];
+    if (start_row >= total_rows || (start_row + num_rows) > total_rows) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t row_elements = 1;
+    for (uint8_t d = 1; d < found->ndim; ++d) {
+        row_elements *= found->shape[d];
+    }
+    size_t elem_size = rcre_dtype_size(found->dtype);
+    size_t row_bytes = row_elements * elem_size;
+    size_t slice_bytes = num_rows * row_bytes;
+    size_t slice_offset = archive->data_base_offset + found->data_offset + start_row * row_bytes;
+
+    if (slice_offset + slice_bytes > archive->map.size) {
+        return RCRE_ERR_IO;
+    }
+
+    const uint8_t* src_ptr = archive->map.data + slice_offset;
+    size_t slice_shape[4] = {0};
+    memcpy(slice_shape, found->shape, found->ndim * sizeof(size_t));
+    slice_shape[0] = num_rows;
+
+    RCRE_Layout layout = (found->ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+
+    if (found->dtype == RCRE_DTYPE_F32) {
+        if (((uintptr_t)src_ptr & 63U) == 0) {
+            *out_slice = rcre_tensor_from_buffer((void*)(uintptr_t)src_ptr, slice_shape, found->ndim, RCRE_DTYPE_F32, layout);
+            return RCRE_OK;
+        }
+        *out_slice = rcre_tensor_create(slice_shape, found->ndim, RCRE_DTYPE_F32, layout, arena);
+        if (!out_slice->data) return RCRE_ERR_OUT_OF_MEMORY;
+        memcpy(out_slice->data, src_ptr, slice_bytes);
+        return RCRE_OK;
+    }
+
+    *out_slice = rcre_tensor_create(slice_shape, found->ndim, RCRE_DTYPE_F32, layout, arena);
+    if (!out_slice->data) return RCRE_ERR_OUT_OF_MEMORY;
+    float* dst = (float*)out_slice->data;
+    size_t slice_numel = num_rows * row_elements;
+
+    if (found->dtype == RCRE_DTYPE_F16) {
+        rcre_f16_to_f32(src_ptr, dst, slice_numel);
+    } else if (found->dtype == RCRE_DTYPE_BF16) {
+        rcre_bf16_to_f32(src_ptr, dst, slice_numel);
+    } else if (found->dtype == RCRE_DTYPE_U8) {
+        for (size_t i = 0; i < slice_numel; ++i) dst[i] = (float)src_ptr[i];
+    } else if (found->dtype == RCRE_DTYPE_I32) {
+        const int32_t* iv = (const int32_t*)src_ptr;
+        for (size_t i = 0; i < slice_numel; ++i) dst[i] = (float)iv[i];
+    } else {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 6. SIMD Byte-Shuffle Codec & Out-of-Core Ping-Pong Streamer (IO-REQ-05)   */
+/* ========================================================================= */
+
+void rcre_io_byte_shuffle_16(const void* src, void* dst, size_t num_elements) {
+    if (!src || !dst || num_elements == 0) {
+        return;
+    }
+
+    const uint8_t* s = (const uint8_t*)src;
+    uint8_t* d0 = (uint8_t*)dst;
+    uint8_t* d1 = d0 + num_elements;
+
+    size_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 15 < num_elements; i += 16) {
+        uint8x16x2_t v = vld2q_u8(s + i * 2);
+        vst1q_u8(d0 + i, v.val[0]);
+        vst1q_u8(d1 + i, v.val[1]);
+    }
+#endif
+
+    for (; i < num_elements; ++i) {
+        d0[i] = s[i * 2 + 0];
+        d1[i] = s[i * 2 + 1];
+    }
+}
+
+void rcre_io_byte_unshuffle_16(const void* src, void* dst, size_t num_elements) {
+    if (!src || !dst || num_elements == 0) {
+        return;
+    }
+
+    const uint8_t* s0 = (const uint8_t*)src;
+    const uint8_t* s1 = s0 + num_elements;
+    uint8_t* d = (uint8_t*)dst;
+
+    size_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 15 < num_elements; i += 16) {
+        uint8x16x2_t v;
+        v.val[0] = vld1q_u8(s0 + i);
+        v.val[1] = vld1q_u8(s1 + i);
+        vst2q_u8(d + i * 2, v);
+    }
+#endif
+
+    for (; i < num_elements; ++i) {
+        d[i * 2 + 0] = s0[i];
+        d[i * 2 + 1] = s1[i];
+    }
+}
+
+void rcre_io_byte_shuffle_32(const void* src, void* dst, size_t num_elements) {
+    if (!src || !dst || num_elements == 0) {
+        return;
+    }
+
+    const uint8_t* s = (const uint8_t*)src;
+    uint8_t* d0 = (uint8_t*)dst;
+    uint8_t* d1 = d0 + num_elements;
+    uint8_t* d2 = d1 + num_elements;
+    uint8_t* d3 = d2 + num_elements;
+
+    size_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 15 < num_elements; i += 16) {
+        uint8x16x4_t v = vld4q_u8(s + i * 4);
+        vst1q_u8(d0 + i, v.val[0]);
+        vst1q_u8(d1 + i, v.val[1]);
+        vst1q_u8(d2 + i, v.val[2]);
+        vst1q_u8(d3 + i, v.val[3]);
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+    const __m128i shuf_mask = _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+    for (; i + 3 < num_elements; i += 4) {
+        __m128i v = _mm_loadu_si128((const __m128i*)(s + i * 4));
+        __m128i t = _mm_shuffle_epi8(v, shuf_mask);
+        uint32_t lane0 = (uint32_t)_mm_extract_epi32(t, 0);
+        uint32_t lane1 = (uint32_t)_mm_extract_epi32(t, 1);
+        uint32_t lane2 = (uint32_t)_mm_extract_epi32(t, 2);
+        uint32_t lane3 = (uint32_t)_mm_extract_epi32(t, 3);
+        memcpy(d0 + i, &lane0, 4);
+        memcpy(d1 + i, &lane1, 4);
+        memcpy(d2 + i, &lane2, 4);
+        memcpy(d3 + i, &lane3, 4);
+    }
+#elif defined(__wasm_simd128__)
+    for (; i + 3 < num_elements; i += 4) {
+        v128_t v = wasm_v128_load(s + i * 4);
+        v128_t t = wasm_i8x16_shuffle(v, v, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+        uint32_t lane0 = (uint32_t)wasm_i32x4_extract_lane(t, 0);
+        uint32_t lane1 = (uint32_t)wasm_i32x4_extract_lane(t, 1);
+        uint32_t lane2 = (uint32_t)wasm_i32x4_extract_lane(t, 2);
+        uint32_t lane3 = (uint32_t)wasm_i32x4_extract_lane(t, 3);
+        memcpy(d0 + i, &lane0, 4);
+        memcpy(d1 + i, &lane1, 4);
+        memcpy(d2 + i, &lane2, 4);
+        memcpy(d3 + i, &lane3, 4);
+    }
+#endif
+
+    for (; i < num_elements; ++i) {
+        d0[i] = s[i * 4 + 0];
+        d1[i] = s[i * 4 + 1];
+        d2[i] = s[i * 4 + 2];
+        d3[i] = s[i * 4 + 3];
+    }
+}
+
+void rcre_io_byte_unshuffle_32(const void* src, void* dst, size_t num_elements) {
+    if (!src || !dst || num_elements == 0) {
+        return;
+    }
+
+    const uint8_t* s0 = (const uint8_t*)src;
+    const uint8_t* s1 = s0 + num_elements;
+    const uint8_t* s2 = s1 + num_elements;
+    const uint8_t* s3 = s2 + num_elements;
+    uint8_t* d = (uint8_t*)dst;
+
+    size_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 15 < num_elements; i += 16) {
+        uint8x16x4_t v;
+        v.val[0] = vld1q_u8(s0 + i);
+        v.val[1] = vld1q_u8(s1 + i);
+        v.val[2] = vld1q_u8(s2 + i);
+        v.val[3] = vld1q_u8(s3 + i);
+        vst4q_u8(d + i * 4, v);
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+    const __m128i unshuf_mask = _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+    for (; i + 3 < num_elements; i += 4) {
+        uint32_t lane0, lane1, lane2, lane3;
+        memcpy(&lane0, s0 + i, 4);
+        memcpy(&lane1, s1 + i, 4);
+        memcpy(&lane2, s2 + i, 4);
+        memcpy(&lane3, s3 + i, 4);
+        __m128i v = _mm_setr_epi32((int)lane0, (int)lane1, (int)lane2, (int)lane3);
+        __m128i t = _mm_shuffle_epi8(v, unshuf_mask);
+        _mm_storeu_si128((__m128i*)(d + i * 4), t);
+    }
+#elif defined(__wasm_simd128__)
+    for (; i + 3 < num_elements; i += 4) {
+        int32_t lane0, lane1, lane2, lane3;
+        memcpy(&lane0, s0 + i, 4);
+        memcpy(&lane1, s1 + i, 4);
+        memcpy(&lane2, s2 + i, 4);
+        memcpy(&lane3, s3 + i, 4);
+        v128_t v = wasm_i32x4_make(lane0, lane1, lane2, lane3);
+        v128_t t = wasm_i8x16_shuffle(v, v, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+        wasm_v128_store(d + i * 4, t);
+    }
+#endif
+
+    for (; i < num_elements; ++i) {
+        d[i * 4 + 0] = s0[i];
+        d[i * 4 + 1] = s1[i];
+        d[i * 4 + 2] = s2[i];
+        d[i * 4 + 3] = s3[i];
+    }
+}
+
+/*
+ * RCRE Compressed Tensor Frame Format ("RCRZ", 64-byte header):
+ *  - bytes 0..3:   Magic "RCRZ"
+ *  - bytes 4..7:   Version (1)
+ *  - bytes 8..11:  dtype (RCRE_DType)
+ *  - bytes 12..15: ndim (1..4)
+ *  - bytes 16..47: shape[4] as uint64_le
+ *  - bytes 48..55: uncompressed_bytes as uint64_le
+ *  - bytes 56..63: compressed_payload_bytes as uint64_le
+ *
+ * Payload encoding on byte-shuffled buffer:
+ *  Zero-dependency LZ4-architecture token + literal + 16-bit offset match stream.
+ */
+static size_t rcre_io_lz_compress(const uint8_t* src, size_t src_len, uint8_t* dst) {
+    if (src_len == 0) {
+        return 0;
+    }
+
+    uint32_t hash_table[1024];
+    memset(hash_table, 0, sizeof(hash_table));
+
+    size_t anchor = 0;
+    size_t cur = 0;
+    size_t d_pos = 0;
+    const size_t match_limit = (src_len > 12) ? (src_len - 5) : 0;
+
+    while (cur < match_limit) {
+        uint32_t v = rcre_io_read_u32_le(src + cur);
+        uint32_t h = (v * 2654435761U) >> 22;
+        size_t ref = (size_t)hash_table[h];
+        hash_table[h] = (uint32_t)cur;
+
+        size_t dist = cur - ref;
+        if (dist > 0 && dist <= 65535 && rcre_io_read_u32_le(src + ref) == v) {
+            /* Found >= 4-byte match */
+            size_t lit_len = cur - anchor;
+            size_t m_len = 4;
+            while (cur + m_len < src_len && src[ref + m_len] == src[cur + m_len]) {
+                m_len++;
+            }
+
+            size_t m_code = m_len - 4;
+            uint8_t lit_nib = (lit_len >= 15) ? 15 : (uint8_t)lit_len;
+            uint8_t mat_nib = (m_code >= 15)  ? 15 : (uint8_t)m_code;
+            dst[d_pos++] = (uint8_t)((lit_nib << 4) | mat_nib);
+
+            if (lit_len >= 15) {
+                size_t rem = lit_len - 15;
+                while (rem >= 255) {
+                    dst[d_pos++] = 255;
+                    rem -= 255;
+                }
+                dst[d_pos++] = (uint8_t)rem;
+            }
+
+            if (lit_len > 0) {
+                memcpy(dst + d_pos, src + anchor, lit_len);
+                d_pos += lit_len;
+            }
+
+            rcre_io_write_u16_le(dst + d_pos, (uint16_t)dist);
+            d_pos += 2;
+
+            if (m_code >= 15) {
+                size_t rem = m_code - 15;
+                while (rem >= 255) {
+                    dst[d_pos++] = 255;
+                    rem -= 255;
+                }
+                dst[d_pos++] = (uint8_t)rem;
+            }
+
+            cur += m_len;
+            anchor = cur;
+            continue;
+        }
+        cur++;
+    }
+
+    /* Emit final trailing literal sequence */
+    size_t tail_lit = src_len - anchor;
+    uint8_t lit_nib = (tail_lit >= 15) ? 15 : (uint8_t)tail_lit;
+    dst[d_pos++] = (uint8_t)(lit_nib << 4);
+    if (tail_lit >= 15) {
+        size_t rem = tail_lit - 15;
+        while (rem >= 255) {
+            dst[d_pos++] = 255;
+            rem -= 255;
+        }
+        dst[d_pos++] = (uint8_t)rem;
+    }
+    if (tail_lit > 0) {
+        memcpy(dst + d_pos, src + anchor, tail_lit);
+        d_pos += tail_lit;
+    }
+    return d_pos;
+}
+
+static bool rcre_io_lz_decompress(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_cap) {
+    size_t s_pos = 0;
+    size_t d_pos = 0;
+
+    while (s_pos < src_len) {
+        uint8_t token = src[s_pos++];
+        size_t lit_len = (size_t)(token >> 4);
+        if (lit_len == 15) {
+            uint8_t s_byte = 0;
+            do {
+                if (s_pos >= src_len) return false;
+                s_byte = src[s_pos++];
+                if (rcre_io_add_overflow(lit_len, (size_t)s_byte, &lit_len)) return false;
+            } while (s_byte == 255);
+        }
+
+        if (s_pos + lit_len > src_len || d_pos + lit_len > dst_cap) {
+            return false;
+        }
+        if (lit_len > 0) {
+            memcpy(dst + d_pos, src + s_pos, lit_len);
+            s_pos += lit_len;
+            d_pos += lit_len;
+        }
+
+        /* Last sequence in block ends immediately after literals */
+        if (s_pos == src_len) {
+            break;
+        }
+
+        if (s_pos + 2 > src_len) {
+            return false;
+        }
+        size_t offset = (size_t)rcre_io_read_u16_le(src + s_pos);
+        s_pos += 2;
+        if (offset == 0 || offset > d_pos) {
+            return false;
+        }
+
+        size_t m_code = (size_t)(token & 0x0FU);
+        if (m_code == 15) {
+            uint8_t s_byte = 0;
+            do {
+                if (s_pos >= src_len) return false;
+                s_byte = src[s_pos++];
+                if (rcre_io_add_overflow(m_code, (size_t)s_byte, &m_code)) return false;
+            } while (s_byte == 255);
+        }
+        size_t match_len = m_code + 4;
+        if (d_pos + match_len > dst_cap) {
+            return false;
+        }
+
+        size_t ref = d_pos - offset;
+        if (offset >= match_len) {
+            memcpy(dst + d_pos, dst + ref, match_len);
+            d_pos += match_len;
+        } else {
+            for (size_t i = 0; i < match_len; ++i) {
+                dst[d_pos++] = dst[ref + i];
+            }
+        }
+    }
+
+    return d_pos == dst_cap;
+}
+
+RCRE_NODISCARD int rcre_io_compress_tensor(
+    const RCRE_Tensor* tensor,
+    RCRE_Arena* arena,
+    RCRE_Slice* out_slice
+) {
+    if (!tensor || !tensor->data || !arena || !out_slice ||
+        tensor->ndim == 0 || tensor->ndim > 4 || !rcre_tensor_is_contiguous(tensor)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (tensor->dtype != RCRE_DTYPE_F32 && tensor->dtype != RCRE_DTYPE_I32 &&
+        tensor->dtype != RCRE_DTYPE_F16 && tensor->dtype != RCRE_DTYPE_BF16) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t numel = rcre_tensor_numel(tensor);
+    size_t elem_size = rcre_dtype_size(tensor->dtype);
+    size_t raw_bytes = numel * elem_size;
+    if (numel == 0 || raw_bytes == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    /* Worst-case RLE size is raw_bytes + ceil(raw_bytes / 128) + 64 header */
+    size_t max_comp = 64 + raw_bytes + (raw_bytes / 128) + 16;
+    uint8_t* out_buf = (uint8_t*)rcre_arena_alloc(arena, max_comp, 64);
+    if (!out_buf) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    RCRE_ArenaTemp temp = rcre_arena_temp_begin(arena);
+    uint8_t* shuffled = (uint8_t*)rcre_arena_alloc(arena, raw_bytes, 64);
+    if (!shuffled) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    if (elem_size == 4) {
+        rcre_io_byte_shuffle_32(tensor->data, shuffled, numel);
+    } else if (elem_size == 2) {
+        rcre_io_byte_shuffle_16(tensor->data, shuffled, numel);
+    }
+    size_t comp_payload = rcre_io_lz_compress(shuffled, raw_bytes, out_buf + 64);
+    rcre_arena_temp_end(temp);
+
+    memset(out_buf, 0, 64);
+    memcpy(out_buf, "RCRZ", 4);
+    rcre_io_write_u32_le(out_buf + 4, 1U);
+    rcre_io_write_u32_le(out_buf + 8, (uint32_t)tensor->dtype);
+    rcre_io_write_u32_le(out_buf + 12, (uint32_t)tensor->ndim);
+    for (uint8_t d = 0; d < tensor->ndim; ++d) {
+        rcre_io_write_u64_le(out_buf + 16 + d * 8, (uint64_t)tensor->shape[d]);
+    }
+    rcre_io_write_u64_le(out_buf + 48, (uint64_t)raw_bytes);
+    rcre_io_write_u64_le(out_buf + 56, (uint64_t)comp_payload);
+
+    *out_slice = rcre_slice_from_parts(out_buf, 64 + comp_payload);
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_decompress_tensor(
+    RCRE_Slice compressed_frame,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!compressed_frame.data || compressed_frame.len < 64 || !arena || !out_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_tensor, 0, sizeof(RCRE_Tensor));
+
+    const uint8_t* hdr = compressed_frame.data;
+    if (memcmp(hdr, "RCRZ", 4) != 0 || rcre_io_read_u32_le(hdr + 4) != 1U) {
+        return RCRE_ERR_IO;
+    }
+
+    RCRE_DType dtype = (RCRE_DType)rcre_io_read_u32_le(hdr + 8);
+    uint32_t ndim_u32 = rcre_io_read_u32_le(hdr + 12);
+    if ((dtype != RCRE_DTYPE_F32 && dtype != RCRE_DTYPE_I32 &&
+         dtype != RCRE_DTYPE_F16 && dtype != RCRE_DTYPE_BF16) || ndim_u32 == 0 || ndim_u32 > 4) {
+        return RCRE_ERR_IO;
+    }
+    uint8_t ndim = (uint8_t)ndim_u32;
+    size_t elem_size = rcre_dtype_size(dtype);
+
+    size_t shape[4] = {0};
+    size_t numel = 1;
+    for (uint8_t d = 0; d < ndim; ++d) {
+        uint64_t dim_u64 = rcre_io_read_u64_le(hdr + 16 + d * 8);
+        if (dim_u64 == 0 || dim_u64 > (uint64_t)SIZE_MAX ||
+            rcre_io_mul_overflow(numel, (size_t)dim_u64, &numel)) {
+            return RCRE_ERR_IO;
+        }
+        shape[d] = (size_t)dim_u64;
+    }
+
+    uint64_t raw_bytes_u64  = rcre_io_read_u64_le(hdr + 48);
+    uint64_t comp_bytes_u64 = rcre_io_read_u64_le(hdr + 56);
+    size_t expected_raw = 0;
+    if (rcre_io_mul_overflow(numel, elem_size, &expected_raw) ||
+        raw_bytes_u64 != (uint64_t)expected_raw ||
+        64ULL + comp_bytes_u64 != (uint64_t)compressed_frame.len) {
+        return RCRE_ERR_IO;
+    }
+
+    RCRE_Layout layout = (ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    RCRE_Tensor t = rcre_tensor_create(shape, ndim, dtype, layout, arena);
+    if (!t.data) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    RCRE_ArenaTemp temp = rcre_arena_temp_begin(arena);
+    uint8_t* shuffled = (uint8_t*)rcre_arena_alloc(arena, expected_raw, 64);
+    if (!shuffled) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    if (!rcre_io_lz_decompress(hdr + 64, (size_t)comp_bytes_u64, shuffled, expected_raw)) {
+        rcre_arena_temp_end(temp);
+        return RCRE_ERR_IO;
+    }
+
+    if (elem_size == 4) {
+        rcre_io_byte_unshuffle_32(shuffled, t.data, numel);
+    } else if (elem_size == 2) {
+        rcre_io_byte_unshuffle_16(shuffled, t.data, numel);
+    }
+    rcre_arena_temp_end(temp);
+
+    *out_tensor = t;
+    return RCRE_OK;
+}
+
+/* --- Out-of-Core Ping-Pong Arena Double-Buffered Streamer --- */
+
+#if defined(RCRE_IO_HAVE_POSIX)
+typedef struct RCRE_IOAsyncPrefetch {
+    RCRE_TensorStream* stream;
+    pthread_mutex_t    mu;
+    pthread_cond_t     cv_req;
+    pthread_cond_t     cv_done;
+    pthread_t          thr;
+    bool               started;
+    bool               stop;
+    bool               req_pending;
+    size_t             req_row;
+    uint8_t            req_slot;
+    bool               has_ready;
+    size_t             ready_row;
+    size_t             ready_rows;
+    uint8_t            ready_slot;
+} RCRE_IOAsyncPrefetch;
+
+static void* rcre_io_prefetch_worker(void* arg) {
+    RCRE_IOAsyncPrefetch* pf = (RCRE_IOAsyncPrefetch*)arg;
+    pthread_mutex_lock(&pf->mu);
+    for (;;) {
+        while (!pf->stop && !pf->req_pending) {
+            pthread_cond_wait(&pf->cv_req, &pf->mu);
+        }
+        if (pf->stop) {
+            break;
+        }
+        size_t row = pf->req_row;
+        uint8_t slot = pf->req_slot;
+        RCRE_TensorStream* s = pf->stream;
+        size_t rem_rows = (row < s->total_rows) ? (s->total_rows - row) : 0;
+        size_t cur_rows = (rem_rows < s->batch_rows) ? rem_rows : s->batch_rows;
+        size_t copy_bytes = cur_rows * s->row_bytes;
+        size_t file_off = s->data_offset + row * s->row_bytes;
+        const uint8_t* src_ptr = s->map.data + file_off;
+        uint8_t* dst_ptr = s->ping_pong_buf[slot];
+        pthread_mutex_unlock(&pf->mu);
+
+        if (copy_bytes > 0) {
+            (void)rcre_io_madvise_range(&s->map, file_off, copy_bytes, RCRE_IO_HINT_SEQUENTIAL);
+            memcpy(dst_ptr, src_ptr, copy_bytes);
+        }
+
+        pthread_mutex_lock(&pf->mu);
+        pf->req_pending = false;
+        pf->has_ready   = (cur_rows > 0);
+        pf->ready_row   = row;
+        pf->ready_rows  = cur_rows;
+        pf->ready_slot  = slot;
+        pthread_cond_broadcast(&pf->cv_done);
+    }
+    pthread_mutex_unlock(&pf->mu);
+    return nullptr;
+}
+#endif
+
+RCRE_NODISCARD int rcre_io_stream_open_npy(
+    const char* filepath,
+    size_t batch_rows,
+    RCRE_Arena* arena,
+    RCRE_TensorStream* out_stream
+) {
+    if (!filepath || batch_rows == 0 || !arena || !out_stream) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_stream, 0, sizeof(RCRE_TensorStream));
+
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &out_stream->map);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    size_t data_nbytes = 0;
+    rc = rcre_io_parse_npy_header(
+        rcre_io_mmap_slice(&out_stream->map),
+        &out_stream->dtype,
+        &out_stream->ndim,
+        out_stream->full_shape,
+        &out_stream->data_offset,
+        &data_nbytes
+    );
+    if (rc != RCRE_OK) {
+        rcre_io_mmap_close(&out_stream->map);
+        return rc;
+    }
+
+    size_t row_elems = 1;
+    for (uint8_t d = 1; d < out_stream->ndim; ++d) {
+        row_elems *= out_stream->full_shape[d];
+    }
+    size_t row_bytes = row_elems * rcre_dtype_size(out_stream->dtype);
+    size_t buf_bytes = 0;
+    if (rcre_io_mul_overflow(batch_rows, row_bytes, &buf_bytes)) {
+        rcre_io_mmap_close(&out_stream->map);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    out_stream->ping_pong_buf[0] = (uint8_t*)rcre_arena_alloc(arena, buf_bytes, 64);
+    out_stream->ping_pong_buf[1] = (uint8_t*)rcre_arena_alloc(arena, buf_bytes, 64);
+    if (!out_stream->ping_pong_buf[0] || !out_stream->ping_pong_buf[1]) {
+        rcre_io_mmap_close(&out_stream->map);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    out_stream->layout       = (out_stream->ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    out_stream->row_elements = row_elems;
+    out_stream->row_bytes    = row_bytes;
+    out_stream->total_rows   = out_stream->full_shape[0];
+    out_stream->batch_rows   = batch_rows;
+    out_stream->current_row  = 0;
+    out_stream->active_slot  = 0;
+    out_stream->async_enabled = false;
+    out_stream->use_io_uring = false;
+    out_stream->async_handle = 0;
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD bool rcre_io_is_io_uring_available(void) {
+#if defined(__linux__) && defined(__NR_io_uring_setup)
+    static int s_cached = -1;
+    if (s_cached != -1) {
+        return s_cached == 1;
+    }
+    struct {
+        uint32_t sq_entries;
+        uint32_t cq_entries;
+        uint32_t flags;
+        uint32_t sq_thread_cpu;
+        uint32_t sq_thread_idle;
+        uint32_t features;
+        uint32_t wq_fd;
+        uint32_t resv[3];
+        struct { uint32_t head, tail, ring_mask, ring_entries, flags, dropped, array, resv[3]; } sq_off;
+        struct { uint32_t head, tail, ring_mask, ring_entries, overflow, cqes, flags, resv[3]; } cq_off;
+    } p;
+    memset(&p, 0, sizeof(p));
+    long fd = syscall(__NR_io_uring_setup, 1, &p);
+    if (fd >= 0) {
+        close((int)fd);
+        s_cached = 1;
+        return true;
+    }
+    s_cached = 0;
+    return false;
+#else
+    return false;
+#endif
+}
+
+RCRE_NODISCARD int rcre_io_stream_enable_async(RCRE_TensorStream* stream) {
+    if (!stream || !stream->map.data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    stream->async_enabled = true;
+    if (rcre_io_is_io_uring_available()) {
+        stream->use_io_uring = true;
+    } else {
+        stream->use_io_uring = false;
+        (void)rcre_io_madvise_range(&stream->map, 0, stream->map.size, RCRE_IO_HINT_SEQUENTIAL);
+    }
+#if defined(RCRE_IO_HAVE_POSIX)
+    if (!stream->prefetch_ctx && stream->total_rows > stream->batch_rows) {
+        RCRE_IOAsyncPrefetch* pf = (RCRE_IOAsyncPrefetch*)calloc(1, sizeof(RCRE_IOAsyncPrefetch));
+        if (pf) {
+            pf->stream = stream;
+            pthread_mutex_init(&pf->mu, nullptr);
+            pthread_cond_init(&pf->cv_req, nullptr);
+            pthread_cond_init(&pf->cv_done, nullptr);
+            if (pthread_create(&pf->thr, nullptr, rcre_io_prefetch_worker, pf) == 0) {
+                pf->started = true;
+                stream->prefetch_ctx = pf;
+                /* Kick off slot 0 prefetch immediately */
+                pthread_mutex_lock(&pf->mu);
+                pf->req_row     = 0;
+                pf->req_slot    = 0;
+                pf->req_pending = true;
+                pthread_cond_signal(&pf->cv_req);
+                pthread_mutex_unlock(&pf->mu);
+            } else {
+                pthread_cond_destroy(&pf->cv_done);
+                pthread_cond_destroy(&pf->cv_req);
+                pthread_mutex_destroy(&pf->mu);
+                free(pf);
+            }
+        }
+    }
+#endif
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD bool rcre_io_stream_next(
+    RCRE_TensorStream* stream,
+    RCRE_Tensor* out_batch
+) {
+    if (!stream || !stream->map.data || !out_batch || stream->current_row >= stream->total_rows) {
+        return false;
+    }
+
+    size_t cur_rows = 0;
+    uint8_t slot = stream->active_slot;
+    uint8_t* dst = stream->ping_pong_buf[slot];
+
+#if defined(RCRE_IO_HAVE_POSIX)
+    RCRE_IOAsyncPrefetch* pf = (RCRE_IOAsyncPrefetch*)stream->prefetch_ctx;
+    if (pf && pf->started) {
+        pthread_mutex_lock(&pf->mu);
+        while (pf->req_pending) {
+            pthread_cond_wait(&pf->cv_done, &pf->mu);
+        }
+        if (pf->has_ready && pf->ready_row == stream->current_row) {
+            slot = pf->ready_slot;
+            dst = stream->ping_pong_buf[slot];
+            cur_rows = pf->ready_rows;
+            pf->has_ready = false;
+        } else {
+            size_t rem_rows = stream->total_rows - stream->current_row;
+            cur_rows = (rem_rows < stream->batch_rows) ? rem_rows : stream->batch_rows;
+            size_t copy_bytes = cur_rows * stream->row_bytes;
+            size_t file_off = stream->data_offset + stream->current_row * stream->row_bytes;
+            memcpy(dst, stream->map.data + file_off, copy_bytes);
+            pf->has_ready = false;
+        }
+        size_t next_row = stream->current_row + cur_rows;
+        if (next_row < stream->total_rows) {
+            pf->req_row     = next_row;
+            pf->req_slot    = slot ^ 1U;
+            pf->req_pending = true;
+            pthread_cond_signal(&pf->cv_req);
+        }
+        pthread_mutex_unlock(&pf->mu);
+    } else
+#endif
+    {
+        size_t rem_rows = stream->total_rows - stream->current_row;
+        cur_rows = (rem_rows < stream->batch_rows) ? rem_rows : stream->batch_rows;
+        size_t copy_bytes = cur_rows * stream->row_bytes;
+        size_t file_off = stream->data_offset + stream->current_row * stream->row_bytes;
+        memcpy(dst, stream->map.data + file_off, copy_bytes);
+
+        size_t next_off = file_off + copy_bytes;
+        if (next_off < stream->map.size) {
+            size_t next_rem = stream->total_rows - (stream->current_row + cur_rows);
+            size_t next_rows = (next_rem < stream->batch_rows) ? next_rem : stream->batch_rows;
+            size_t next_bytes = next_rows * stream->row_bytes;
+            (void)rcre_io_madvise_range(&stream->map, next_off, next_bytes, RCRE_IO_HINT_SEQUENTIAL);
+        }
+    }
+
+    size_t batch_shape[RCRE_MAX_DIMS] = {0};
+    memcpy(batch_shape, stream->full_shape, stream->ndim * sizeof(size_t));
+    batch_shape[0] = cur_rows;
+
+    *out_batch = rcre_tensor_from_buffer(dst, batch_shape, stream->ndim, stream->dtype, stream->layout);
+
+    stream->current_row += cur_rows;
+    stream->active_slot = slot ^ 1U;
+    return true;
+}
+
+void rcre_io_stream_reset(RCRE_TensorStream* stream) {
+    if (stream) {
+#if defined(RCRE_IO_HAVE_POSIX)
+        RCRE_IOAsyncPrefetch* pf = (RCRE_IOAsyncPrefetch*)stream->prefetch_ctx;
+        if (pf && pf->started) {
+            pthread_mutex_lock(&pf->mu);
+            while (pf->req_pending) {
+                pthread_cond_wait(&pf->cv_done, &pf->mu);
+            }
+            pf->has_ready = false;
+            pthread_mutex_unlock(&pf->mu);
+        }
+#endif
+        stream->current_row = 0;
+        stream->active_slot = 0;
+    }
+}
+
+void rcre_io_stream_close(RCRE_TensorStream* stream) {
+    if (!stream) {
+        return;
+    }
+#if defined(RCRE_IO_HAVE_POSIX)
+    RCRE_IOAsyncPrefetch* pf = (RCRE_IOAsyncPrefetch*)stream->prefetch_ctx;
+    if (pf) {
+        if (pf->started) {
+            pthread_mutex_lock(&pf->mu);
+            while (pf->req_pending) {
+                pthread_cond_wait(&pf->cv_done, &pf->mu);
+            }
+            pf->stop = true;
+            pthread_cond_signal(&pf->cv_req);
+            pthread_mutex_unlock(&pf->mu);
+            pthread_join(pf->thr, nullptr);
+        }
+        pthread_cond_destroy(&pf->cv_done);
+        pthread_cond_destroy(&pf->cv_req);
+        pthread_mutex_destroy(&pf->mu);
+        free(pf);
+        stream->prefetch_ctx = nullptr;
+    }
+#endif
+#if defined(__linux__)
+    if (stream->use_io_uring && stream->async_handle > 0) {
+        close((int)stream->async_handle);
+        stream->async_handle = 0;
+    }
+#endif
+    rcre_io_mmap_close(&stream->map);
+    memset(stream, 0, sizeof(RCRE_TensorStream));
+}
+
+/* ========================================================================= */
+/* 7. Zero-Copy Cross-Framework C ABI Bridges: DLPack & Arrow (IO-REQ-06)    */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_io_to_dlpack(
+    const RCRE_Tensor* src,
+    RCRE_Arena* meta_arena,
+    RCRE_DLTensor* out_dl
+) {
+    if (!src || !src->data || !meta_arena || !out_dl || src->ndim == 0 || src->ndim > RCRE_MAX_DIMS) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_dl, 0, sizeof(RCRE_DLTensor));
+
+    uint8_t code = 0;
+    uint8_t bits = 0;
+    switch (src->dtype) {
+        case RCRE_DTYPE_U8:   code = (uint8_t)RCRE_DL_UINT;  bits = 8;  break;
+        case RCRE_DTYPE_I8:   code = (uint8_t)RCRE_DL_INT;   bits = 8;  break;
+        case RCRE_DTYPE_F16:  code = (uint8_t)RCRE_DL_FLOAT; bits = 16; break;
+        case RCRE_DTYPE_BF16: code = 4;                       bits = 16; break; /* kDLBfloat = 4 */
+        case RCRE_DTYPE_I32:  code = (uint8_t)RCRE_DL_INT;   bits = 32; break;
+        case RCRE_DTYPE_I64:  code = (uint8_t)RCRE_DL_INT;   bits = 64; break;
+        case RCRE_DTYPE_F32:  code = (uint8_t)RCRE_DL_FLOAT; bits = 32; break;
+        case RCRE_DTYPE_F64:  code = (uint8_t)RCRE_DL_FLOAT; bits = 64; break;
+        default: return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    int64_t* dl_shape   = (int64_t*)rcre_arena_alloc(meta_arena, src->ndim * sizeof(int64_t), alignof(int64_t));
+    int64_t* dl_strides = (int64_t*)rcre_arena_alloc(meta_arena, src->ndim * sizeof(int64_t), alignof(int64_t));
+    if (!dl_shape || !dl_strides) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    for (uint8_t i = 0; i < src->ndim; ++i) {
+        dl_shape[i]   = (int64_t)src->shape[i];
+        dl_strides[i] = (int64_t)src->strides[i];
+    }
+
+    out_dl->data        = src->data;
+    out_dl->device_type = (int32_t)RCRE_DL_DEVICE_CPU;
+    out_dl->device_id   = 0;
+    out_dl->ndim        = (int32_t)src->ndim;
+    out_dl->dtype_code  = code;
+    out_dl->dtype_bits  = bits;
+    out_dl->dtype_lanes = 1;
+    out_dl->shape       = dl_shape;
+    out_dl->strides     = dl_strides;
+    out_dl->byte_offset = 0;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_from_dlpack(
+    const RCRE_DLTensor* dl,
+    RCRE_Tensor* out_view
+) {
+    if (!dl || !dl->data || !dl->shape || !out_view || dl->ndim <= 0 || dl->ndim > RCRE_MAX_DIMS) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (dl->device_type != (int32_t)RCRE_DL_DEVICE_CPU || dl->dtype_lanes != 1) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    RCRE_DType dtype = RCRE_DTYPE_F32;
+    if (dl->dtype_code == (uint8_t)RCRE_DL_UINT && dl->dtype_bits == 8) {
+        dtype = RCRE_DTYPE_U8;
+    } else if (dl->dtype_code == (uint8_t)RCRE_DL_INT && dl->dtype_bits == 8) {
+        dtype = RCRE_DTYPE_I8;
+    } else if (dl->dtype_code == (uint8_t)RCRE_DL_INT && dl->dtype_bits == 32) {
+        dtype = RCRE_DTYPE_I32;
+    } else if (dl->dtype_code == (uint8_t)RCRE_DL_INT && dl->dtype_bits == 64) {
+        dtype = RCRE_DTYPE_I64;
+    } else if (dl->dtype_code == (uint8_t)RCRE_DL_FLOAT && dl->dtype_bits == 32) {
+        dtype = RCRE_DTYPE_F32;
+    } else if (dl->dtype_code == (uint8_t)RCRE_DL_FLOAT && dl->dtype_bits == 64) {
+        dtype = RCRE_DTYPE_F64;
+    } else if (dl->dtype_code == (uint8_t)RCRE_DL_FLOAT && dl->dtype_bits == 16) {
+        dtype = RCRE_DTYPE_F16;
+    } else if (dl->dtype_code == 4 && dl->dtype_bits == 16) {
+        dtype = RCRE_DTYPE_BF16;
+    } else {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t shape[RCRE_MAX_DIMS] = {0};
+    for (int32_t i = 0; i < dl->ndim; ++i) {
+        if (dl->shape[i] <= 0) {
+            return RCRE_ERR_INVALID_ARG;
+        }
+        shape[i] = (size_t)dl->shape[i];
+    }
+
+    uint8_t* base_ptr = (uint8_t*)dl->data + dl->byte_offset;
+    RCRE_Layout layout = (dl->ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+    RCRE_Tensor view = rcre_tensor_from_buffer(base_ptr, shape, (uint8_t)dl->ndim, dtype, layout);
+
+    if (dl->strides) {
+        for (int32_t i = 0; i < dl->ndim; ++i) {
+            view.strides[i] = (ptrdiff_t)dl->strides[i];
+        }
+    }
+
+    *out_view = view;
+    return RCRE_OK;
+}
+
+static void rcre_io_arrow_noop_release_schema(RCRE_ArrowSchema* schema) {
+    if (schema) {
+        schema->release = nullptr;
+    }
+}
+
+static void rcre_io_arrow_noop_release_array(RCRE_ArrowArray* array) {
+    if (array) {
+        array->release = nullptr;
+    }
+}
+
+RCRE_NODISCARD int rcre_io_to_arrow(
+    const RCRE_Tensor* src,
+    RCRE_Arena* meta_arena,
+    RCRE_ArrowSchema* out_schema,
+    RCRE_ArrowArray* out_array
+) {
+    if (!src || !src->data || !meta_arena || !out_schema || !out_array ||
+        src->ndim != 1 || !rcre_tensor_is_contiguous(src)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_schema, 0, sizeof(RCRE_ArrowSchema));
+    memset(out_array, 0, sizeof(RCRE_ArrowArray));
+
+    const char* fmt = nullptr;
+    switch (src->dtype) {
+        case RCRE_DTYPE_U8:   fmt = "C"; break;
+        case RCRE_DTYPE_I8:   fmt = "c"; break;
+        case RCRE_DTYPE_F16:  fmt = "e"; break;
+        case RCRE_DTYPE_BF16: fmt = "b"; break;
+        case RCRE_DTYPE_I32:  fmt = "i"; break;
+        case RCRE_DTYPE_I64:  fmt = "l"; break;
+        case RCRE_DTYPE_F32:  fmt = "f"; break;
+        case RCRE_DTYPE_F64:  fmt = "g"; break;
+        default: return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    const void** bufs = (const void**)rcre_arena_alloc(meta_arena, 2 * sizeof(void*), alignof(void*));
+    if (!bufs) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    bufs[0] = nullptr;   /* No null validity bitmap (null_count == 0) */
+    bufs[1] = src->data; /* Zero-copy data buffer pointer             */
+
+    out_schema->format       = fmt;
+    out_schema->name         = src->label ? src->label : "rcre_col";
+    out_schema->flags        = 0;
+    out_schema->n_children   = 0;
+    out_schema->release      = rcre_io_arrow_noop_release_schema;
+
+    out_array->length        = (int64_t)src->shape[0];
+    out_array->null_count    = 0;
+    out_array->offset        = 0;
+    out_array->n_buffers     = 2;
+    out_array->n_children    = 0;
+    out_array->buffers       = bufs;
+    out_array->release       = rcre_io_arrow_noop_release_array;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_io_from_arrow(
+    const RCRE_ArrowSchema* schema,
+    const RCRE_ArrowArray* array,
+    RCRE_Tensor* out_view
+) {
+    if (!schema || !schema->format || !array || !array->buffers || !out_view ||
+        array->n_buffers < 2 || !array->buffers[1] || array->length <= 0 || array->null_count != 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_DType dtype = RCRE_DTYPE_F32;
+    if (strcmp(schema->format, "f") == 0) {
+        dtype = RCRE_DTYPE_F32;
+    } else if (strcmp(schema->format, "g") == 0) {
+        dtype = RCRE_DTYPE_F64;
+    } else if (strcmp(schema->format, "e") == 0) {
+        dtype = RCRE_DTYPE_F16;
+    } else if (strcmp(schema->format, "b") == 0) {
+        dtype = RCRE_DTYPE_BF16;
+    } else if (strcmp(schema->format, "i") == 0) {
+        dtype = RCRE_DTYPE_I32;
+    } else if (strcmp(schema->format, "l") == 0) {
+        dtype = RCRE_DTYPE_I64;
+    } else if (strcmp(schema->format, "c") == 0) {
+        dtype = RCRE_DTYPE_I8;
+    } else if (strcmp(schema->format, "C") == 0) {
+        dtype = RCRE_DTYPE_U8;
+    } else {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t elem_sz = rcre_dtype_size(dtype);
+    uint8_t* ptr = (uint8_t*)(uintptr_t)array->buffers[1] + ((size_t)array->offset * elem_sz);
+    size_t shape[1] = { (size_t)array->length };
+    *out_view = rcre_tensor_from_buffer(ptr, shape, 1, dtype, RCRE_LAYOUT_TABULAR);
+    return RCRE_OK;
+}
+
+/* --- Source: df.c --- */
+/**
+ * @file df.c
+ * @brief RCRE Columnar DataFrame Engine Implementation (ISO C23)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+/* ========================================================================= */
+/* 1. DataFrame Lifecycle & Construction                                     */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_df_create(
+    const char* const* col_names,
+    const RCRE_DType* col_dtypes,
+    size_t num_cols,
+    size_t num_rows,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+) {
+    if (!col_dtypes || num_cols == 0 || num_cols > RCRE_DF_MAX_COLS || !arena || !out_df) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_df, 0, sizeof(RCRE_DataFrame));
+
+    RCRE_Column* cols = (RCRE_Column*)rcre_arena_alloc(arena, num_cols * sizeof(RCRE_Column), alignof(RCRE_Column));
+    if (!cols) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    size_t val_bytes = (num_rows + 7) >> 3;
+
+    for (size_t c = 0; c < num_cols; ++c) {
+        if (col_names && col_names[c]) {
+            strncpy(cols[c].name, col_names[c], RCRE_DF_MAX_NAME - 1);
+            cols[c].name[RCRE_DF_MAX_NAME - 1] = '\0';
+        } else {
+            snprintf(cols[c].name, sizeof(cols[c].name), "col_%zu", c);
+        }
+
+        cols[c].dtype = col_dtypes[c];
+        cols[c].length = num_rows;
+        cols[c].null_count = 0;
+        cols[c].is_view = false;
+
+        size_t elem_sz = rcre_dtype_size(cols[c].dtype);
+        size_t col_bytes = num_rows * elem_sz;
+        if (col_bytes > 0) {
+            cols[c].data = rcre_arena_alloc(arena, col_bytes, 64);
+            if (!cols[c].data) return RCRE_ERR_OUT_OF_MEMORY;
+            memset(cols[c].data, 0, col_bytes);
+        } else {
+            cols[c].data = nullptr;
+        }
+
+        if (val_bytes > 0) {
+            cols[c].validity = (uint8_t*)rcre_arena_alloc(arena, val_bytes, 8);
+            if (!cols[c].validity) return RCRE_ERR_OUT_OF_MEMORY;
+            memset(cols[c].validity, 0xFF, val_bytes); /* Default all valid */
+        } else {
+            cols[c].validity = nullptr;
+        }
+    }
+
+    out_df->columns = cols;
+    out_df->num_cols = num_cols;
+    out_df->num_rows = num_rows;
+    out_df->arena = arena;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_df_from_tensor(
+    const RCRE_Tensor* tensor,
+    const char* const* col_names,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+) {
+    if (!tensor || !tensor->data || tensor->ndim != 2 || !arena || !out_df) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t num_rows = tensor->shape[0];
+    size_t num_cols = tensor->shape[1];
+    if (num_cols == 0 || num_cols > RCRE_DF_MAX_COLS) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_DType* dtypes = (RCRE_DType*)rcre_arena_alloc(arena, num_cols * sizeof(RCRE_DType), alignof(RCRE_DType));
+    if (!dtypes) return RCRE_ERR_OUT_OF_MEMORY;
+    for (size_t c = 0; c < num_cols; ++c) {
+        dtypes[c] = tensor->dtype;
+    }
+
+    int rc = rcre_df_create(col_names, dtypes, num_cols, num_rows, arena, out_df);
+    if (rc != RCRE_OK) return rc;
+
+    size_t elem_sz = rcre_dtype_size(tensor->dtype);
+    const uint8_t* src_base = (const uint8_t*)tensor->data;
+    ptrdiff_t row_stride = tensor->strides[0] * (ptrdiff_t)elem_sz;
+    ptrdiff_t col_stride = tensor->strides[1] * (ptrdiff_t)elem_sz;
+
+    /* Copy into column-contiguous layout for SIMD memory locality */
+    for (size_t c = 0; c < num_cols; ++c) {
+        uint8_t* dst_col = (uint8_t*)out_df->columns[c].data;
+        for (size_t r = 0; r < num_rows; ++r) {
+            const uint8_t* elem_ptr = src_base + r * row_stride + c * col_stride;
+            memcpy(dst_col + r * elem_sz, elem_ptr, elem_sz);
+        }
+    }
+
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_df_to_tensor(
+    const RCRE_DataFrame* df,
+    const size_t* col_indices,
+    size_t num_cols,
+    RCRE_DType target_dtype,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!df || !arena || !out_tensor || num_cols == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t num_rows = df->num_rows;
+    size_t shape[2] = { num_rows, num_cols };
+    RCRE_Tensor t = rcre_tensor_create(shape, 2, target_dtype, RCRE_LAYOUT_TABULAR, arena);
+    if (!t.data) return RCRE_ERR_OUT_OF_MEMORY;
+
+    size_t elem_sz = rcre_dtype_size(target_dtype);
+    uint8_t* dst_base = (uint8_t*)t.data;
+
+    for (size_t c = 0; c < num_cols; ++c) {
+        size_t c_idx = col_indices ? col_indices[c] : c;
+        if (c_idx >= df->num_cols) return RCRE_ERR_INVALID_ARG;
+
+        const RCRE_Column* col = &df->columns[c_idx];
+        const uint8_t* src_col = (const uint8_t*)col->data;
+
+        if (col->dtype == target_dtype) {
+            for (size_t r = 0; r < num_rows; ++r) {
+                uint8_t* dst_elem = dst_base + (r * num_cols + c) * elem_sz;
+                memcpy(dst_elem, src_col + r * elem_sz, elem_sz);
+            }
+        } else if (col->dtype == RCRE_DTYPE_F32 && target_dtype == RCRE_DTYPE_F32) {
+            const float* s = (const float*)col->data;
+            float* d = (float*)t.data;
+            for (size_t r = 0; r < num_rows; ++r) {
+                d[r * num_cols + c] = s[r];
+            }
+        } else if (col->dtype == RCRE_DTYPE_I32 && target_dtype == RCRE_DTYPE_F32) {
+            const int32_t* s = (const int32_t*)col->data;
+            float* d = (float*)t.data;
+            for (size_t r = 0; r < num_rows; ++r) {
+                d[r * num_cols + c] = (float)s[r];
+            }
+        } else {
+            /* General casting fallback */
+            for (size_t r = 0; r < num_rows; ++r) {
+                float val = 0.0f;
+                if (col->dtype == RCRE_DTYPE_U8)  val = (float)((const uint8_t*)col->data)[r];
+                if (col->dtype == RCRE_DTYPE_I32) val = (float)((const int32_t*)col->data)[r];
+                if (col->dtype == RCRE_DTYPE_F32) val = ((const float*)col->data)[r];
+                ((float*)t.data)[r * num_cols + c] = val;
+            }
+        }
+    }
+
+    *out_tensor = t;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_df_from_csv(
+    const char* filepath,
+    bool has_header,
+    char delimiter,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+) {
+    if (!filepath || !arena || !out_df) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_MappedFile map = {0};
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map);
+    if (rc != RCRE_OK) return rc;
+
+    RCRE_Slice s = rcre_io_mmap_slice(&map);
+    if (s.len == 0) {
+        rcre_io_mmap_close(&map);
+        return RCRE_ERR_IO;
+    }
+
+    /* 1. Identify header line and count columns */
+    size_t pos = 0;
+    while (pos < s.len && (s.data[pos] == ' ' || s.data[pos] == '\t' || s.data[pos] == '\r' || s.data[pos] == '\n')) {
+        pos++;
+    }
+
+    size_t line_start = pos;
+    while (pos < s.len && s.data[pos] != '\n' && s.data[pos] != '\r') {
+        pos++;
+    }
+    size_t line_end = pos;
+
+    /* Count columns in first line */
+    size_t num_cols = 1;
+    for (size_t i = line_start; i < line_end; ++i) {
+        if (s.data[i] == delimiter) num_cols++;
+    }
+    if (num_cols > RCRE_DF_MAX_COLS) {
+        rcre_io_mmap_close(&map);
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    char col_names_buf[RCRE_DF_MAX_COLS][RCRE_DF_MAX_NAME];
+    const char* col_names[RCRE_DF_MAX_COLS];
+
+    if (has_header) {
+        size_t tok_start = line_start;
+        size_t c = 0;
+        for (size_t i = line_start; i <= line_end && c < num_cols; ++i) {
+            if (i == line_end || s.data[i] == delimiter) {
+                size_t tok_len = i - tok_start;
+                while (tok_len > 0 && (s.data[tok_start] == ' ' || s.data[tok_start] == '"')) {
+                    tok_start++;
+                    tok_len--;
+                }
+                while (tok_len > 0 && (s.data[tok_start + tok_len - 1] == ' ' || s.data[tok_start + tok_len - 1] == '"' || s.data[tok_start + tok_len - 1] == '\r')) {
+                    tok_len--;
+                }
+                size_t cp_len = tok_len < (RCRE_DF_MAX_NAME - 1) ? tok_len : (RCRE_DF_MAX_NAME - 1);
+                memcpy(col_names_buf[c], s.data + tok_start, cp_len);
+                col_names_buf[c][cp_len] = '\0';
+                col_names[c] = col_names_buf[c];
+                c++;
+                tok_start = i + 1;
+            }
+        }
+        /* Advance pos to next line */
+        while (pos < s.len && (s.data[pos] == '\n' || s.data[pos] == '\r')) pos++;
+    } else {
+        for (size_t c = 0; c < num_cols; ++c) {
+            snprintf(col_names_buf[c], sizeof(col_names_buf[c]), "col_%zu", c);
+            col_names[c] = col_names_buf[c];
+        }
+        pos = line_start;
+    }
+
+    /* 2. Count data rows */
+    size_t data_start = pos;
+    size_t num_rows = 0;
+    while (pos < s.len) {
+        if (s.data[pos] == '\n') {
+            num_rows++;
+        }
+        pos++;
+    }
+    if (s.len > data_start && s.data[s.len - 1] != '\n') {
+        num_rows++;
+    }
+
+    /* 3. Allocate DataFrame columns as F32 by default */
+    RCRE_DType dtypes[RCRE_DF_MAX_COLS];
+    for (size_t c = 0; c < num_cols; ++c) {
+        dtypes[c] = RCRE_DTYPE_F32;
+    }
+
+    rc = rcre_df_create(col_names, dtypes, num_cols, num_rows, arena, out_df);
+    if (rc != RCRE_OK) {
+        rcre_io_mmap_close(&map);
+        return rc;
+    }
+
+    /* 4. Parse rows into columns */
+    pos = data_start;
+    size_t r = 0;
+    while (pos < s.len && r < num_rows) {
+        /* Skip leading whitespace/newlines */
+        if (s.data[pos] == '\r' || s.data[pos] == '\n') {
+            pos++;
+            continue;
+        }
+
+        size_t row_end = pos;
+        while (row_end < s.len && s.data[row_end] != '\n' && s.data[row_end] != '\r') {
+            row_end++;
+        }
+
+        size_t tok_start = pos;
+        size_t c = 0;
+        for (size_t i = pos; i <= row_end && c < num_cols; ++i) {
+            if (i == row_end || s.data[i] == delimiter) {
+                RCRE_Slice tok = rcre_slice_from_parts(s.data + tok_start, i - tok_start);
+                tok = rcre_slice_trim_ascii(tok);
+
+                float val = 0.0f;
+                if (tok.len == 0 || rcre_slice_eq(tok, rcre_slice_from_cstr("NaN")) ||
+                    rcre_slice_eq(tok, rcre_slice_from_cstr("null")) ||
+                    rcre_slice_eq(tok, rcre_slice_from_cstr("NA"))) {
+                    rcre_col_set_valid(&out_df->columns[c], r, false);
+                } else if (rcre_slice_parse_f32(tok, &val)) {
+                    ((float*)out_df->columns[c].data)[r] = val;
+                } else {
+                    rcre_col_set_valid(&out_df->columns[c], r, false);
+                }
+
+                c++;
+                tok_start = i + 1;
+            }
+        }
+        r++;
+        pos = row_end;
+        while (pos < s.len && (s.data[pos] == '\r' || s.data[pos] == '\n')) pos++;
+    }
+
+    out_df->num_rows = r;
+    rcre_io_mmap_close(&map);
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 2. Column Selection, Slicing & Relational Operations                       */
+/* ========================================================================= */
+
+RCRE_NODISCARD intptr_t rcre_df_find_col(const RCRE_DataFrame* df, const char* name) {
+    if (!df || !name) return -1;
+    for (size_t i = 0; i < df->num_cols; ++i) {
+        if (strcmp(df->columns[i].name, name) == 0) {
+            return (intptr_t)i;
+        }
+    }
+    return -1;
+}
+
+RCRE_NODISCARD int rcre_df_select(
+    const RCRE_DataFrame* df,
+    const char* const* col_names,
+    size_t num_selected_cols,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+) {
+    if (!df || !col_names || num_selected_cols == 0 || !arena || !out_df) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_df, 0, sizeof(RCRE_DataFrame));
+
+    RCRE_Column* cols = (RCRE_Column*)rcre_arena_alloc(arena, num_selected_cols * sizeof(RCRE_Column), alignof(RCRE_Column));
+    if (!cols) return RCRE_ERR_OUT_OF_MEMORY;
+
+    for (size_t i = 0; i < num_selected_cols; ++i) {
+        intptr_t idx = rcre_df_find_col(df, col_names[i]);
+        if (idx < 0) return RCRE_ERR_INVALID_ARG;
+        cols[i] = df->columns[idx];
+        cols[i].is_view = true;
+    }
+
+    out_df->columns = cols;
+    out_df->num_cols = num_selected_cols;
+    out_df->num_rows = df->num_rows;
+    out_df->arena = arena;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_df_slice(
+    const RCRE_DataFrame* df,
+    size_t start_row,
+    size_t num_rows,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+) {
+    if (!df || !arena || !out_df || (start_row + num_rows > df->num_rows)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_df, 0, sizeof(RCRE_DataFrame));
+
+    RCRE_Column* cols = (RCRE_Column*)rcre_arena_alloc(arena, df->num_cols * sizeof(RCRE_Column), alignof(RCRE_Column));
+    if (!cols) return RCRE_ERR_OUT_OF_MEMORY;
+
+    size_t val_bytes = (num_rows + 7) >> 3;
+
+    for (size_t c = 0; c < df->num_cols; ++c) {
+        cols[c] = df->columns[c];
+        cols[c].length = num_rows;
+        cols[c].is_view = true;
+
+        size_t elem_sz = rcre_dtype_size(cols[c].dtype);
+        cols[c].data = (uint8_t*)df->columns[c].data + start_row * elem_sz;
+
+        /* Re-slice validity mask */
+        if (cols[c].validity && val_bytes > 0) {
+            uint8_t* val_slice = (uint8_t*)rcre_arena_alloc(arena, val_bytes, 8);
+            if (!val_slice) return RCRE_ERR_OUT_OF_MEMORY;
+            memset(val_slice, 0xFF, val_bytes);
+
+            size_t nulls = 0;
+            for (size_t r = 0; r < num_rows; ++r) {
+                if (rcre_col_is_null(&df->columns[c], start_row + r)) {
+                    val_slice[r >> 3] &= ~(uint8_t)(1U << (r & 7U));
+                    nulls++;
+                }
+            }
+            cols[c].validity = val_slice;
+            cols[c].null_count = nulls;
+        }
+    }
+
+    out_df->columns = cols;
+    out_df->num_cols = df->num_cols;
+    out_df->num_rows = num_rows;
+    out_df->arena = arena;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_df_filter(
+    const RCRE_DataFrame* df,
+    const uint8_t* bool_mask,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+) {
+    if (!df || !bool_mask || !arena || !out_df) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    /* 1. Count matching rows */
+    size_t keep_count = 0;
+    for (size_t r = 0; r < df->num_rows; ++r) {
+        if (bool_mask[r]) keep_count++;
+    }
+
+    /* 2. Build schema and create filtered DataFrame */
+    const char* col_names[RCRE_DF_MAX_COLS];
+    RCRE_DType col_dtypes[RCRE_DF_MAX_COLS];
+    for (size_t c = 0; c < df->num_cols; ++c) {
+        col_names[c] = df->columns[c].name;
+        col_dtypes[c] = df->columns[c].dtype;
+    }
+
+    int rc = rcre_df_create(col_names, col_dtypes, df->num_cols, keep_count, arena, out_df);
+    if (rc != RCRE_OK) return rc;
+
+    if (keep_count == 0) {
+        return RCRE_OK;
+    }
+
+    /* 3. Copy filtered row elements across all columns */
+    for (size_t c = 0; c < df->num_cols; ++c) {
+        const RCRE_Column* src_col = &df->columns[c];
+        RCRE_Column* dst_col = &out_df->columns[c];
+        size_t elem_sz = rcre_dtype_size(src_col->dtype);
+
+        const uint8_t* s_data = (const uint8_t*)src_col->data;
+        uint8_t* d_data = (uint8_t*)dst_col->data;
+
+        size_t dst_r = 0;
+        for (size_t src_r = 0; src_r < df->num_rows; ++src_r) {
+            if (bool_mask[src_r]) {
+                memcpy(d_data + dst_r * elem_sz, s_data + src_r * elem_sz, elem_sz);
+                if (rcre_col_is_null(src_col, src_r)) {
+                    rcre_col_set_valid(dst_col, dst_r, false);
+                }
+                dst_r++;
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 3. LSD Radix Sort (O(N) Linear Time)                                      */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_df_sort(
+    const RCRE_DataFrame* df,
+    size_t sort_col_idx,
+    bool ascending,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+) {
+    if (!df || sort_col_idx >= df->num_cols || !arena || !out_df) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    size_t N = df->num_rows;
+    if (N == 0) {
+        return rcre_df_slice(df, 0, 0, arena, out_df);
+    }
+
+    const RCRE_Column* key_col = &df->columns[sort_col_idx];
+    if (key_col->dtype != RCRE_DTYPE_F32 && key_col->dtype != RCRE_DTYPE_I32 && key_col->dtype != RCRE_DTYPE_U8) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    /* Allocate permutation index array */
+    uint32_t* perm = (uint32_t*)rcre_arena_alloc(arena, N * sizeof(uint32_t), 64);
+    uint32_t* temp_perm = (uint32_t*)rcre_arena_alloc(arena, N * sizeof(uint32_t), 64);
+    uint32_t* keys = (uint32_t*)rcre_arena_alloc(arena, N * sizeof(uint32_t), 64);
+    uint32_t* temp_keys = (uint32_t*)rcre_arena_alloc(arena, N * sizeof(uint32_t), 64);
+    if (!perm || !temp_perm || !keys || !temp_keys) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Convert keys to sortable unsigned 32-bit integers */
+    if (key_col->dtype == RCRE_DTYPE_F32) {
+        const float* fdata = (const float*)key_col->data;
+        for (size_t i = 0; i < N; ++i) {
+            perm[i] = (uint32_t)i;
+            uint32_t u;
+            memcpy(&u, &fdata[i], 4);
+            /* Flip sign bit so IEEE-754 floats sort correctly as unsigned ints */
+            keys[i] = (u & 0x80000000U) ? (~u) : (u ^ 0x80000000U);
+        }
+    } else if (key_col->dtype == RCRE_DTYPE_I32) {
+        const int32_t* idata = (const int32_t*)key_col->data;
+        for (size_t i = 0; i < N; ++i) {
+            perm[i] = (uint32_t)i;
+            keys[i] = (uint32_t)(idata[i] ^ 0x80000000U);
+        }
+    } else {
+        const uint8_t* udata = (const uint8_t*)key_col->data;
+        for (size_t i = 0; i < N; ++i) {
+            perm[i] = (uint32_t)i;
+            keys[i] = (uint32_t)udata[i];
+        }
+    }
+
+    /* 4 passes of 8-bit radix sort */
+    for (int pass = 0; pass < 4; ++pass) {
+        uint32_t counts[256] = {0};
+        int shift = pass * 8;
+
+        for (size_t i = 0; i < N; ++i) {
+            uint8_t byte = (uint8_t)((keys[i] >> shift) & 0xFFU);
+            counts[byte]++;
+        }
+
+        uint32_t offsets[256] = {0};
+        for (int i = 1; i < 256; ++i) {
+            offsets[i] = offsets[i - 1] + counts[i - 1];
+        }
+
+        for (size_t i = 0; i < N; ++i) {
+            uint8_t byte = (uint8_t)((keys[i] >> shift) & 0xFFU);
+            uint32_t dst_idx = offsets[byte]++;
+            temp_perm[dst_idx] = perm[i];
+            temp_keys[dst_idx] = keys[i];
+        }
+
+        memcpy(perm, temp_perm, N * sizeof(uint32_t));
+        memcpy(keys, temp_keys, N * sizeof(uint32_t));
+    }
+
+    /* Handle descending order */
+    if (!ascending) {
+        for (size_t i = 0; i < N / 2; ++i) {
+            uint32_t tmp = perm[i];
+            perm[i] = perm[N - 1 - i];
+            perm[N - 1 - i] = tmp;
+        }
+    }
+
+    /* Build sorted DataFrame */
+    const char* col_names[RCRE_DF_MAX_COLS];
+    RCRE_DType col_dtypes[RCRE_DF_MAX_COLS];
+    for (size_t c = 0; c < df->num_cols; ++c) {
+        col_names[c] = df->columns[c].name;
+        col_dtypes[c] = df->columns[c].dtype;
+    }
+
+    int rc = rcre_df_create(col_names, col_dtypes, df->num_cols, N, arena, out_df);
+    if (rc != RCRE_OK) return rc;
+
+    for (size_t c = 0; c < df->num_cols; ++c) {
+        const RCRE_Column* src_col = &df->columns[c];
+        RCRE_Column* dst_col = &out_df->columns[c];
+        size_t elem_sz = rcre_dtype_size(src_col->dtype);
+
+        const uint8_t* s_data = (const uint8_t*)src_col->data;
+        uint8_t* d_data = (uint8_t*)dst_col->data;
+
+        for (size_t i = 0; i < N; ++i) {
+            uint32_t src_idx = perm[i];
+            memcpy(d_data + i * elem_sz, s_data + src_idx * elem_sz, elem_sz);
+            if (rcre_col_is_null(src_col, src_idx)) {
+                rcre_col_set_valid(dst_col, i, false);
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 4. Parallel GroupBy & Aggregations                                        */
+/* ========================================================================= */
+
+typedef struct RCRE_GroupNode {
+    int32_t  key;
+    size_t   count;
+    double   sum;
+    double   min;
+    double   max;
+    double   m2; /* For Welford variance */
+} RCRE_GroupNode;
+
+RCRE_NODISCARD int rcre_df_groupby(
+    const RCRE_DataFrame* df,
+    size_t group_col_idx,
+    const RCRE_AggSpec* specs,
+    size_t num_specs,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+) {
+    if (!df || group_col_idx >= df->num_cols || !specs || num_specs == 0 || !arena || !out_df) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    const RCRE_Column* gcol = &df->columns[group_col_idx];
+    if (gcol->dtype != RCRE_DTYPE_I32 && gcol->dtype != RCRE_DTYPE_U8) {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    /* Hash table to track distinct keys */
+    size_t hash_cap = 2048;
+    int32_t* hash_keys = (int32_t*)rcre_arena_alloc(arena, hash_cap * sizeof(int32_t), 16);
+    size_t*  hash_entry_idx = (size_t*)rcre_arena_alloc(arena, hash_cap * sizeof(size_t), 16);
+    bool*    hash_occupied = (bool*)rcre_arena_alloc(arena, hash_cap * sizeof(bool), 16);
+    if (!hash_keys || !hash_entry_idx || !hash_occupied) return RCRE_ERR_OUT_OF_MEMORY;
+    memset(hash_occupied, 0, hash_cap * sizeof(bool));
+
+    size_t max_distinct = 1024;
+    int32_t* distinct_keys = (int32_t*)rcre_arena_alloc(arena, max_distinct * sizeof(int32_t), 16);
+    size_t num_distinct = 0;
+
+    for (size_t r = 0; r < df->num_rows; ++r) {
+        int32_t key = (gcol->dtype == RCRE_DTYPE_I32) ? ((const int32_t*)gcol->data)[r] : (int32_t)((const uint8_t*)gcol->data)[r];
+
+        uint32_t h = (uint32_t)(key * 2654435761U) % (uint32_t)hash_cap;
+        while (hash_occupied[h]) {
+            if (hash_keys[h] == key) break;
+            h = (h + 1) % (uint32_t)hash_cap;
+        }
+
+        if (!hash_occupied[h]) {
+            hash_occupied[h] = true;
+            hash_keys[h] = key;
+            hash_entry_idx[h] = num_distinct;
+            if (num_distinct < max_distinct) {
+                distinct_keys[num_distinct++] = key;
+            }
+        }
+    }
+
+    /* Allocate output columns: 1 key col + num_specs aggregation cols */
+    size_t total_out_cols = 1 + num_specs;
+    const char* out_names[RCRE_DF_MAX_COLS];
+    RCRE_DType  out_dtypes[RCRE_DF_MAX_COLS];
+
+    out_names[0] = gcol->name;
+    out_dtypes[0] = gcol->dtype;
+
+    for (size_t s = 0; s < num_specs; ++s) {
+        out_names[1 + s] = specs[s].out_name ? specs[s].out_name : "agg";
+        out_dtypes[1 + s] = (specs[s].op == RCRE_AGG_COUNT) ? RCRE_DTYPE_I32 : RCRE_DTYPE_F32;
+    }
+
+    int rc = rcre_df_create(out_names, out_dtypes, total_out_cols, num_distinct, arena, out_df);
+    if (rc != RCRE_OK) return rc;
+
+    /* Write group keys into column 0 */
+    for (size_t g = 0; g < num_distinct; ++g) {
+        if (gcol->dtype == RCRE_DTYPE_I32) {
+            ((int32_t*)out_df->columns[0].data)[g] = distinct_keys[g];
+        } else {
+            ((uint8_t*)out_df->columns[0].data)[g] = (uint8_t)distinct_keys[g];
+        }
+    }
+
+    /* Compute aggregations per spec */
+    for (size_t s = 0; s < num_specs; ++s) {
+        size_t t_idx = specs[s].target_col_idx;
+        if (t_idx >= df->num_cols) return RCRE_ERR_INVALID_ARG;
+        const RCRE_Column* target_col = &df->columns[t_idx];
+
+        RCRE_GroupNode* stats = (RCRE_GroupNode*)rcre_arena_alloc(arena, num_distinct * sizeof(RCRE_GroupNode), alignof(RCRE_GroupNode));
+        if (!stats) return RCRE_ERR_OUT_OF_MEMORY;
+
+        for (size_t g = 0; g < num_distinct; ++g) {
+            stats[g].key = distinct_keys[g];
+            stats[g].count = 0;
+            stats[g].sum = 0.0;
+            stats[g].min = INFINITY;
+            stats[g].max = -INFINITY;
+            stats[g].m2 = 0.0;
+        }
+
+        for (size_t r = 0; r < df->num_rows; ++r) {
+            if (rcre_col_is_null(target_col, r)) continue;
+
+            int32_t key = (gcol->dtype == RCRE_DTYPE_I32) ? ((const int32_t*)gcol->data)[r] : (int32_t)((const uint8_t*)gcol->data)[r];
+            uint32_t h = (uint32_t)(key * 2654435761U) % (uint32_t)hash_cap;
+            while (hash_occupied[h] && hash_keys[h] != key) {
+                h = (h + 1) % (uint32_t)hash_cap;
+            }
+            size_t g_idx = hash_entry_idx[h];
+
+            double val = (target_col->dtype == RCRE_DTYPE_F32) ? (double)((const float*)target_col->data)[r] : (double)((const int32_t*)target_col->data)[r];
+
+            stats[g_idx].count++;
+            stats[g_idx].sum += val;
+            if (val < stats[g_idx].min) stats[g_idx].min = val;
+            if (val > stats[g_idx].max) stats[g_idx].max = val;
+
+            /* Welford update */
+            double delta = val - (stats[g_idx].sum / (double)stats[g_idx].count);
+            stats[g_idx].m2 += delta * (val - ((stats[g_idx].sum - val) / (stats[g_idx].count > 1 ? (double)(stats[g_idx].count - 1) : 1.0)));
+        }
+
+        /* Write results into output column */
+        RCRE_Column* dst_col = &out_df->columns[1 + s];
+        for (size_t g = 0; g < num_distinct; ++g) {
+            if (stats[g].count == 0) {
+                rcre_col_set_valid(dst_col, g, false);
+                continue;
+            }
+
+            switch (specs[s].op) {
+                case RCRE_AGG_COUNT:
+                    ((int32_t*)dst_col->data)[g] = (int32_t)stats[g].count;
+                    break;
+                case RCRE_AGG_SUM:
+                    ((float*)dst_col->data)[g] = (float)stats[g].sum;
+                    break;
+                case RCRE_AGG_MEAN:
+                    ((float*)dst_col->data)[g] = (float)(stats[g].sum / (double)stats[g].count);
+                    break;
+                case RCRE_AGG_MIN:
+                    ((float*)dst_col->data)[g] = (float)stats[g].min;
+                    break;
+                case RCRE_AGG_MAX:
+                    ((float*)dst_col->data)[g] = (float)stats[g].max;
+                    break;
+                case RCRE_AGG_VAR:
+                    ((float*)dst_col->data)[g] = (stats[g].count > 1) ? (float)(stats[g].m2 / (double)(stats[g].count - 1)) : 0.0f;
+                    break;
+                case RCRE_AGG_STD:
+                    ((float*)dst_col->data)[g] = (stats[g].count > 1) ? sqrtf((float)(stats[g].m2 / (double)(stats[g].count - 1))) : 0.0f;
+                    break;
+            }
+        }
+    }
+
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 5. Apache Arrow C Data Interface Zero-Copy Export                         */
+/* ========================================================================= */
+
+static void rcre_df_arrow_noop_release_schema(RCRE_ArrowSchema* s) { if (s) s->release = nullptr; }
+static void rcre_df_arrow_noop_release_array(RCRE_ArrowArray* a) { if (a) a->release = nullptr; }
+
+RCRE_NODISCARD int rcre_col_to_arrow(
+    const RCRE_Column* col,
+    RCRE_Arena* arena,
+    RCRE_ArrowSchema* out_schema,
+    RCRE_ArrowArray* out_array
+) {
+    if (!col || !arena || !out_schema || !out_array) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_schema, 0, sizeof(RCRE_ArrowSchema));
+    memset(out_array, 0, sizeof(RCRE_ArrowArray));
+
+    const char* fmt = nullptr;
+    switch (col->dtype) {
+        case RCRE_DTYPE_U8:   fmt = "C"; break;
+        case RCRE_DTYPE_I32:  fmt = "i"; break;
+        case RCRE_DTYPE_I64:  fmt = "l"; break;
+        case RCRE_DTYPE_F32:  fmt = "f"; break;
+        case RCRE_DTYPE_F64:  fmt = "g"; break;
+        case RCRE_DTYPE_F16:  fmt = "e"; break;
+        case RCRE_DTYPE_BF16: fmt = "b"; break;
+        default: return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    const void** bufs = (const void**)rcre_arena_alloc(arena, 2 * sizeof(void*), alignof(void*));
+    if (!bufs) return RCRE_ERR_OUT_OF_MEMORY;
+
+    bufs[0] = col->validity;
+    bufs[1] = col->data;
+
+    out_schema->format     = fmt;
+    out_schema->name       = col->name;
+    out_schema->flags      = 0;
+    out_schema->n_children = 0;
+    out_schema->release    = rcre_df_arrow_noop_release_schema;
+
+    out_array->length      = (int64_t)col->length;
+    out_array->null_count  = (int64_t)col->null_count;
+    out_array->offset      = 0;
+    out_array->n_buffers   = 2;
+    out_array->n_children  = 0;
+    out_array->buffers     = bufs;
+    out_array->release     = rcre_df_arrow_noop_release_array;
+
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 6. Formatted Terminal Preview                                             */
+/* ========================================================================= */
+
+void rcre_df_print(const RCRE_DataFrame* df, size_t max_rows) {
+    if (!df || df->num_cols == 0) {
+        printf("Empty DataFrame\n");
+        return;
+    }
+
+    size_t display_rows = (df->num_rows < max_rows) ? df->num_rows : max_rows;
+
+    printf("\nDataFrame: [%zu rows x %zu columns]\n", df->num_rows, df->num_cols);
+
+    /* Print header */
+    for (size_t c = 0; c < df->num_cols; ++c) {
+        printf("%-16s ", df->columns[c].name);
+    }
+    printf("\n");
+
+    for (size_t c = 0; c < df->num_cols; ++c) {
+        printf("---------------- ");
+    }
+    printf("\n");
+
+    /* Print rows */
+    for (size_t r = 0; r < display_rows; ++r) {
+        for (size_t c = 0; c < df->num_cols; ++c) {
+            const RCRE_Column* col = &df->columns[c];
+            if (rcre_col_is_null(col, r)) {
+                printf("%-16s ", "null");
+                continue;
+            }
+
+            char buf[32];
+            if (col->dtype == RCRE_DTYPE_F32) {
+                snprintf(buf, sizeof(buf), "%10.4f", (double)((const float*)col->data)[r]);
+            } else if (col->dtype == RCRE_DTYPE_I32) {
+                snprintf(buf, sizeof(buf), "%10d", ((const int32_t*)col->data)[r]);
+            } else if (col->dtype == RCRE_DTYPE_U8) {
+                snprintf(buf, sizeof(buf), "%10u", (unsigned)((const uint8_t*)col->data)[r]);
+            } else {
+                snprintf(buf, sizeof(buf), "%10p", col->data);
+            }
+            printf("%-16s ", buf);
+        }
+        printf("\n");
+    }
+
+    if (df->num_rows > display_rows) {
+        printf("... (%zu more rows)\n", df->num_rows - display_rows);
+    }
+    printf("\n");
 }
 
 /* --- Source: color.c --- */
@@ -8121,6 +15408,198 @@ void rcre_cv_draw_markers(RCRE_Tensor* image, const RCRE_CV_Point* points, int c
     }
 }
 
+/* ========================================================================= */
+/* FAST-9 Corner Detector & Rotated BRIEF (ORB) Binary Descriptors           */
+/* ========================================================================= */
+
+static const int feat_fast_dx[16] = {0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1};
+static const int feat_fast_dy[16] = {-3, -3, -2, -1, 0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3};
+
+static int feat_cmp_orb_desc(const void* a, const void* b) {
+    const RCRE_ORBKeypoint* ka = (const RCRE_ORBKeypoint*)a;
+    const RCRE_ORBKeypoint* kb = (const RCRE_ORBKeypoint*)b;
+    if (kb->score > ka->score) return 1;
+    if (kb->score < ka->score) return -1;
+    return 0;
+}
+
+RCRE_NODISCARD int rcre_cv_fast_detect(const RCRE_Tensor* gray_f32, float threshold,
+                                       int max_keypoints, RCRE_ORBKeypoint** out_kps,
+                                       int* out_count, RCRE_Arena* arena) {
+    if (!gray_f32 || !gray_f32->data || !out_kps || !out_count || !arena ||
+        gray_f32->dtype != RCRE_DTYPE_F32 || gray_f32->ndim < 2) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    int H = (int)gray_f32->shape[0];
+    int W = (int)gray_f32->shape[1];
+    if (H < 12 || W < 12) {
+        *out_kps = nullptr;
+        *out_count = 0;
+        return RCRE_OK;
+    }
+    const float* d = (const float*)gray_f32->data;
+    int sy = (int)gray_f32->strides[0];
+    int sx = (int)gray_f32->strides[1];
+
+    int cap = (max_keypoints > 0 && max_keypoints < 4096) ? 4096 : (max_keypoints > 0 ? max_keypoints : 2048);
+    RCRE_ORBKeypoint* cands = (RCRE_ORBKeypoint*)rcre_arena_alloc(arena, (size_t)cap * sizeof(RCRE_ORBKeypoint), 16);
+    if (!cands) return RCRE_ERR_OUT_OF_MEMORY;
+
+    int count = 0;
+    for (int y = 5; y < H - 5 && count < cap; ++y) {
+        for (int x = 5; x < W - 5 && count < cap; ++x) {
+            float center = d[y * sy + x * sx];
+            /* Quick 4-cardinal rejection check (0, 4, 8, 12) */
+            float c0  = d[(y + feat_fast_dy[0]) * sy + (x + feat_fast_dx[0]) * sx];
+            float c4  = d[(y + feat_fast_dy[4]) * sy + (x + feat_fast_dx[4]) * sx];
+            float c8  = d[(y + feat_fast_dy[8]) * sy + (x + feat_fast_dx[8]) * sx];
+            float c12 = d[(y + feat_fast_dy[12]) * sy + (x + feat_fast_dx[12]) * sx];
+            int nb = (c0 > center + threshold) + (c4 > center + threshold) +
+                     (c8 > center + threshold) + (c12 > center + threshold);
+            int nd = (c0 < center - threshold) + (c4 < center - threshold) +
+                     (c8 < center - threshold) + (c12 < center - threshold);
+            if (nb < 2 && nd < 2) continue;
+
+            int run_b = 0, run_d = 0, max_b = 0, max_d = 0;
+            float score_sum = 0.0f;
+            for (int k = 0; k < 25; ++k) { /* wrap around ring of 16 + 9 */
+                int idx = k & 15;
+                float val = d[(y + feat_fast_dy[idx]) * sy + (x + feat_fast_dx[idx]) * sx];
+                if (val > center + threshold) {
+                    run_b++;
+                    run_d = 0;
+                    if (run_b > max_b) max_b = run_b;
+                    score_sum += val - center;
+                } else if (val < center - threshold) {
+                    run_d++;
+                    run_b = 0;
+                    if (run_d > max_d) max_d = run_d;
+                    score_sum += center - val;
+                } else {
+                    run_b = 0;
+                    run_d = 0;
+                }
+            }
+            if (max_b >= 9 || max_d >= 9) {
+                /* Intensity centroid orientation inside radius 5 */
+                float m10 = 0.0f, m01 = 0.0f;
+                for (int dy = -5; dy <= 5; ++dy) {
+                    for (int dx = -5; dx <= 5; ++dx) {
+                        if (dx * dx + dy * dy <= 25) {
+                            float pv = d[(y + dy) * sy + (x + dx) * sx];
+                            m10 += (float)dx * pv;
+                            m01 += (float)dy * pv;
+                        }
+                    }
+                }
+                RCRE_ORBKeypoint kp;
+                memset(&kp, 0, sizeof(kp));
+                kp.x = (float)x;
+                kp.y = (float)y;
+                kp.angle = atan2f(m01, m10);
+                kp.score = (uint32_t)(score_sum * 100.0f);
+                cands[count++] = kp;
+            }
+        }
+    }
+
+    if (count > 1) {
+        qsort(cands, (size_t)count, sizeof(RCRE_ORBKeypoint), feat_cmp_orb_desc);
+    }
+    if (max_keypoints > 0 && count > max_keypoints) count = max_keypoints;
+    *out_kps = cands;
+    *out_count = count;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_orb_extract(const RCRE_Tensor* gray_f32, RCRE_ORBKeypoint* kps, int count) {
+    if (!gray_f32 || !gray_f32->data || !kps || count < 0 ||
+        gray_f32->dtype != RCRE_DTYPE_F32 || gray_f32->ndim < 2) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (count == 0) return RCRE_OK;
+    int H = (int)gray_f32->shape[0];
+    int W = (int)gray_f32->shape[1];
+    const float* d = (const float*)gray_f32->data;
+    int sy = (int)gray_f32->strides[0];
+    int sx = (int)gray_f32->strides[1];
+
+    /* Deterministic 256 rotated-BRIEF test pairs inside [-11, 11] patch */
+    uint32_t seed = 0x517CC1B7U;
+    int8_t pat[256][4];
+    for (int i = 0; i < 256; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            seed = seed * 1664525U + 1013904223U;
+            pat[i][j] = (int8_t)(((int)(seed >> 24) % 23) - 11);
+        }
+    }
+
+    for (int k = 0; k < count; ++k) {
+        float ca = cosf(kps[k].angle);
+        float sa = sinf(kps[k].angle);
+        float cx = kps[k].x, cy = kps[k].y;
+        memset(kps[k].bits, 0, sizeof(kps[k].bits));
+
+        for (int b = 0; b < 256; ++b) {
+            int x1 = feat_clamp_int((int)lrintf(cx + pat[b][0] * ca - pat[b][1] * sa), 0, W - 1);
+            int y1 = feat_clamp_int((int)lrintf(cy + pat[b][0] * sa + pat[b][1] * ca), 0, H - 1);
+            int x2 = feat_clamp_int((int)lrintf(cx + pat[b][2] * ca - pat[b][3] * sa), 0, W - 1);
+            int y2 = feat_clamp_int((int)lrintf(cy + pat[b][2] * sa + pat[b][3] * ca), 0, H - 1);
+            if (d[y1 * sy + x1 * sx] < d[y2 * sy + x2 * sx]) {
+                kps[k].bits[b >> 5] |= (1U << (b & 31));
+            }
+        }
+    }
+    return RCRE_OK;
+}
+
+static inline int feat_popcnt32(uint32_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcount(x);
+#else
+    int c = 0;
+    while (x) { x &= x - 1U; c++; }
+    return c;
+#endif
+}
+
+RCRE_NODISCARD int rcre_cv_orb_match(const RCRE_ORBKeypoint* a, int na,
+                                     const RCRE_ORBKeypoint* b, int nb,
+                                     int max_hamming, RCRE_CV_Match** out_matches,
+                                     int* out_count, RCRE_Arena* arena) {
+    if (!a || !b || !out_matches || !out_count || !arena || na <= 0 || nb <= 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    RCRE_CV_Match* m = (RCRE_CV_Match*)rcre_arena_alloc(arena, (size_t)na * sizeof(RCRE_CV_Match), 16);
+    if (!m) return RCRE_ERR_OUT_OF_MEMORY;
+
+    int mc = 0;
+    for (int i = 0; i < na; ++i) {
+        int best_dist = 257;
+        int best_j = -1;
+        for (int j = 0; j < nb; ++j) {
+            int dist = 0;
+            for (int w = 0; w < 8; ++w) dist += feat_popcnt32(a[i].bits[w] ^ b[j].bits[w]);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_j = j;
+            }
+        }
+        if (best_j >= 0 && best_dist <= max_hamming) {
+            m[mc++] = (RCRE_CV_Match){
+                .p        = { a[i].x, a[i].y },
+                .q        = { b[best_j].x, b[best_j].y },
+                .idx_a    = i,
+                .idx_b    = best_j,
+                .distance = (float)best_dist
+            };
+        }
+    }
+    *out_matches = m;
+    *out_count = mc;
+    return RCRE_OK;
+}
+
 /* --- Source: homography.c --- */
 /**
  * @file homography.c
@@ -9579,6 +17058,1664 @@ RCRE_NODISCARD int rcre_nn_softmax(const RCRE_Tensor* input, RCRE_Tensor* output
     return RCRE_OK;
 }
 
+/* --- Source: codec.c --- */
+/**
+ * @file codec.c
+ * @brief Zero-Dependency Raster Image Codecs: PPM, BMP, PNG (zlib/DEFLATE), Baseline JPEG (ISO C23)
+ */
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static uint32_t codec_crc32(const uint8_t* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; ++b) {
+            uint32_t mask = (uint32_t)(-(int32_t)(crc & 1U));
+            crc = (crc >> 1U) ^ (0xEDB88320U & mask);
+        }
+    }
+    return ~crc;
+}
+
+static uint32_t codec_adler32(const uint8_t* data, size_t len) {
+    uint32_t s1 = 1, s2 = 0;
+    for (size_t i = 0; i < len; ++i) {
+        s1 = (s1 + data[i]) % 65521U;
+        s2 = (s2 + s1) % 65521U;
+    }
+    return (s2 << 16) | s1;
+}
+
+static inline uint32_t codec_be32(const uint8_t* p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static inline void codec_wbe32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)((v >> 24) & 0xFFU);
+    p[1] = (uint8_t)((v >> 16) & 0xFFU);
+    p[2] = (uint8_t)((v >> 8) & 0xFFU);
+    p[3] = (uint8_t)(v & 0xFFU);
+}
+
+static inline uint16_t codec_le16(const uint8_t* p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static inline uint32_t codec_le32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* ========================================================================= */
+/* 1. PPM P6 & BMP 24-bit BI_RGB                                             */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_codec_load_ppm(const char* filepath, RCRE_Arena* arena, RCRE_Tensor* out_img) {
+    if (!filepath || !arena || !out_img) return RCRE_ERR_INVALID_ARG;
+    RCRE_MappedFile map;
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map);
+    if (rc != RCRE_OK) return rc;
+
+    const uint8_t* p = map.data;
+    size_t len = map.size;
+    size_t pos = 0;
+    if (len < 10 || p[0] != 'P' || p[1] != '6') { rcre_io_mmap_close(&map); return RCRE_ERR_IO; }
+    pos = 2;
+
+    uint32_t vals[3] = {0, 0, 0};
+    for (int k = 0; k < 3; ++k) {
+        while (pos < len) {
+            if (p[pos] == '#') { while (pos < len && p[pos] != '\n') pos++; continue; }
+            if (p[pos] == ' ' || p[pos] == '\n' || p[pos] == '\r' || p[pos] == '\t') { pos++; continue; }
+            break;
+        }
+        if (pos >= len || p[pos] < '0' || p[pos] > '9') { rcre_io_mmap_close(&map); return RCRE_ERR_IO; }
+        uint64_t acc = 0;
+        while (pos < len && p[pos] >= '0' && p[pos] <= '9') {
+            acc = acc * 10ULL + (uint64_t)(p[pos++] - '0');
+            if (acc > 65535ULL) { rcre_io_mmap_close(&map); return RCRE_ERR_IO; }
+        }
+        vals[k] = (uint32_t)acc;
+    }
+    if (pos >= len || vals[0] == 0 || vals[1] == 0 || vals[2] != 255U) { rcre_io_mmap_close(&map); return RCRE_ERR_IO; }
+    pos++; /* single whitespace byte before pixel stream */
+    size_t need = (size_t)vals[0] * (size_t)vals[1] * 3U;
+    if (len - pos < need) { rcre_io_mmap_close(&map); return RCRE_ERR_IO; }
+
+    size_t sh[3] = { vals[1], vals[0], 3 };
+    RCRE_Tensor t = rcre_tensor_create(sh, 3, RCRE_DTYPE_U8, RCRE_LAYOUT_HWC, arena);
+    if (!t.data) { rcre_io_mmap_close(&map); return RCRE_ERR_OUT_OF_MEMORY; }
+    memcpy(t.data, p + pos, need);
+    rcre_io_mmap_close(&map);
+    *out_img = t;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_codec_save_ppm(const RCRE_Tensor* img, const char* filepath) {
+    if (!img || !img->data || !filepath || img->ndim != 3 || img->shape[2] != 3 || img->dtype != RCRE_DTYPE_U8) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    char hdr[64];
+    int hlen = snprintf(hdr, sizeof(hdr), "P6\n%zu %zu\n255\n", img->shape[1], img->shape[0]);
+    if (hlen <= 0) return RCRE_ERR_IO;
+    size_t pix = img->shape[0] * img->shape[1] * 3U;
+    uint8_t* buf = (uint8_t*)malloc((size_t)hlen + pix);
+    if (!buf) return RCRE_ERR_OUT_OF_MEMORY;
+    memcpy(buf, hdr, (size_t)hlen);
+    memcpy(buf + hlen, img->data, pix);
+    int rc = rcre_io_write_atomic(filepath, buf, (size_t)hlen + pix);
+    free(buf);
+    return rc;
+}
+
+RCRE_NODISCARD int rcre_codec_load_bmp(const char* filepath, RCRE_Arena* arena, RCRE_Tensor* out_img) {
+    if (!filepath || !arena || !out_img) return RCRE_ERR_INVALID_ARG;
+    RCRE_MappedFile map;
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map);
+    if (rc != RCRE_OK) return rc;
+
+    const uint8_t* p = map.data;
+    if (map.size < 54 || p[0] != 'B' || p[1] != 'M') { rcre_io_mmap_close(&map); return RCRE_ERR_IO; }
+    uint32_t pix_off = codec_le32(p + 10);
+    int32_t w = (int32_t)codec_le32(p + 18);
+    int32_t h_raw = (int32_t)codec_le32(p + 22);
+    uint16_t bpp = codec_le16(p + 28);
+    uint32_t comp = codec_le32(p + 30);
+    if (w <= 0 || h_raw == 0 || bpp != 24 || comp != 0) { rcre_io_mmap_close(&map); return RCRE_ERR_UNSUPPORTED_OP; }
+
+    bool top_down = (h_raw < 0);
+    size_t width = (size_t)w;
+    size_t height = (size_t)(top_down ? -h_raw : h_raw);
+    size_t row_stride = ((width * 3U) + 3U) & ~(size_t)3U;
+    if (pix_off > map.size || row_stride * height > map.size - pix_off) {
+        rcre_io_mmap_close(&map); return RCRE_ERR_IO;
+    }
+
+    size_t sh[3] = { height, width, 3 };
+    RCRE_Tensor t = rcre_tensor_create(sh, 3, RCRE_DTYPE_U8, RCRE_LAYOUT_HWC, arena);
+    if (!t.data) { rcre_io_mmap_close(&map); return RCRE_ERR_OUT_OF_MEMORY; }
+    uint8_t* dst = (uint8_t*)t.data;
+    const uint8_t* src_base = p + pix_off;
+
+    for (size_t y = 0; y < height; ++y) {
+        size_t sy = top_down ? y : (height - 1U - y);
+        const uint8_t* sr = src_base + sy * row_stride;
+        uint8_t* dr = dst + y * width * 3U;
+        for (size_t x = 0; x < width; ++x) {
+            dr[x * 3U + 0] = sr[x * 3U + 2];
+            dr[x * 3U + 1] = sr[x * 3U + 1];
+            dr[x * 3U + 2] = sr[x * 3U + 0];
+        }
+    }
+    rcre_io_mmap_close(&map);
+    *out_img = t;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_codec_save_bmp(const RCRE_Tensor* img, const char* filepath) {
+    if (!img || !img->data || !filepath || img->ndim != 3 || img->shape[2] != 3 || img->dtype != RCRE_DTYPE_U8) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    size_t h = img->shape[0], w = img->shape[1];
+    size_t row_stride = ((w * 3U) + 3U) & ~(size_t)3U;
+    size_t total = 54U + row_stride * h;
+    uint8_t* buf = (uint8_t*)calloc(1, total);
+    if (!buf) return RCRE_ERR_OUT_OF_MEMORY;
+
+    buf[0] = 'B'; buf[1] = 'M';
+    buf[2] = (uint8_t)(total & 0xFFU); buf[3] = (uint8_t)((total >> 8) & 0xFFU);
+    buf[4] = (uint8_t)((total >> 16) & 0xFFU); buf[5] = (uint8_t)((total >> 24) & 0xFFU);
+    buf[10] = 54;
+    buf[14] = 40;
+    buf[18] = (uint8_t)(w & 0xFFU); buf[19] = (uint8_t)((w >> 8) & 0xFFU);
+    buf[22] = (uint8_t)(h & 0xFFU); buf[23] = (uint8_t)((h >> 8) & 0xFFU);
+    buf[26] = 1; buf[28] = 24;
+
+    const uint8_t* src = (const uint8_t*)img->data;
+    for (size_t y = 0; y < h; ++y) {
+        const uint8_t* sr = src + (h - 1U - y) * w * 3U;
+        uint8_t* dr = buf + 54U + y * row_stride;
+        for (size_t x = 0; x < w; ++x) {
+            dr[x * 3U + 0] = sr[x * 3U + 2];
+            dr[x * 3U + 1] = sr[x * 3U + 1];
+            dr[x * 3U + 2] = sr[x * 3U + 0];
+        }
+    }
+    int rc = rcre_io_write_atomic(filepath, buf, total);
+    free(buf);
+    return rc;
+}
+
+/* ========================================================================= */
+/* 2. RFC 1950 / 1951 DEFLATE Inflate & Deflate + PNG Encoder/Decoder        */
+/* ========================================================================= */
+
+typedef struct {
+    const uint8_t* p;
+    size_t         len;
+    size_t         byte_pos;
+    uint32_t       bit_buf;
+    int            bit_cnt;
+} RCRE_ZBitReader;
+
+static uint32_t codec_z_read_bits(RCRE_ZBitReader* r, int n) {
+    while (r->bit_cnt < n) {
+        if (r->byte_pos >= r->len) return 0;
+        r->bit_buf |= ((uint32_t)r->p[r->byte_pos++]) << r->bit_cnt;
+        r->bit_cnt += 8;
+    }
+    uint32_t v = r->bit_buf & ((1U << n) - 1U);
+    r->bit_buf >>= n;
+    r->bit_cnt -= n;
+    return v;
+}
+
+typedef struct {
+    uint16_t counts[16];
+    uint16_t symbols[288];
+    int      max_bits;
+} RCRE_ZHuff;
+
+static void codec_zhuff_build(RCRE_ZHuff* h, const uint8_t* lens, int n) {
+    memset(h, 0, sizeof(*h));
+    uint16_t offs[16] = {0};
+    for (int i = 0; i < n; ++i) {
+        if (lens[i] > 0 && lens[i] < 16) {
+            h->counts[lens[i]]++;
+            if (lens[i] > h->max_bits) h->max_bits = lens[i];
+        }
+    }
+    uint16_t sum = 0;
+    for (int b = 1; b <= 15; ++b) {
+        offs[b] = sum;
+        sum = (uint16_t)(sum + h->counts[b]);
+    }
+    for (int i = 0; i < n; ++i) {
+        if (lens[i] > 0 && lens[i] < 16) {
+            h->symbols[offs[lens[i]]++] = (uint16_t)i;
+        }
+    }
+}
+
+static int codec_zhuff_decode(RCRE_ZBitReader* r, const RCRE_ZHuff* h) {
+    int code = 0, first = 0, index = 0;
+    for (int len = 1; len <= h->max_bits; ++len) {
+        code |= (int)codec_z_read_bits(r, 1);
+        int count = h->counts[len];
+        if (code - count < first) return h->symbols[index + (code - first)];
+        index += count;
+        first += count;
+        first <<= 1;
+        code <<= 1;
+    }
+    return -1;
+}
+
+static int codec_zlib_inflate(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_cap, size_t* out_len) {
+    if (src_len < 6 || (src[0] & 0x0FU) != 8U || (((uint32_t)src[0] << 8) | src[1]) % 31U != 0U) {
+        return RCRE_ERR_IO;
+    }
+    RCRE_ZBitReader br = { src + 2, src_len - 2, 0, 0, 0 };
+    size_t out_pos = 0;
+
+    static const uint16_t len_base[29] = {
+        3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,
+        35,43,51,59,67,83,99,115,131,163,195,227,258
+    };
+    static const uint8_t len_extra[29] = {
+        0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0
+    };
+    static const uint16_t dist_base[30] = {
+        1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,
+        1025,1537,2049,3073,4097,6145,8193,12289,16385,24577
+    };
+    static const uint8_t dist_extra[30] = {
+        0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13
+    };
+    static const uint8_t cl_order[19] = {
+        16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15
+    };
+
+    int bfinal = 0;
+    do {
+        bfinal = (int)codec_z_read_bits(&br, 1);
+        int btype = (int)codec_z_read_bits(&br, 2);
+
+        if (btype == 0) {
+            br.bit_buf = 0; br.bit_cnt = 0;
+            if (br.byte_pos + 4 > br.len) return RCRE_ERR_IO;
+            uint16_t len = codec_le16(br.p + br.byte_pos);
+            uint16_t nlen = codec_le16(br.p + br.byte_pos + 2);
+            br.byte_pos += 4;
+            if ((uint16_t)(len ^ 0xFFFFU) != nlen || br.byte_pos + len > br.len || out_pos + len > dst_cap) {
+                return RCRE_ERR_IO;
+            }
+            memcpy(dst + out_pos, br.p + br.byte_pos, len);
+            br.byte_pos += len;
+            out_pos += len;
+        } else if (btype == 1 || btype == 2) {
+            RCRE_ZHuff lit_h, dist_h;
+            if (btype == 1) {
+                uint8_t ll[288], dl[32];
+                for (int i = 0; i <= 143; ++i) ll[i] = 8;
+                for (int i = 144; i <= 255; ++i) ll[i] = 9;
+                for (int i = 256; i <= 279; ++i) ll[i] = 7;
+                for (int i = 280; i <= 287; ++i) ll[i] = 8;
+                for (int i = 0; i < 32; ++i) dl[i] = 5;
+                codec_zhuff_build(&lit_h, ll, 288);
+                codec_zhuff_build(&dist_h, dl, 32);
+            } else {
+                int hlit  = (int)codec_z_read_bits(&br, 5) + 257;
+                int hdist = (int)codec_z_read_bits(&br, 5) + 1;
+                int hclen = (int)codec_z_read_bits(&br, 4) + 4;
+                uint8_t cl_lens[19] = {0};
+                for (int i = 0; i < hclen; ++i) cl_lens[cl_order[i]] = (uint8_t)codec_z_read_bits(&br, 3);
+                RCRE_ZHuff cl_h;
+                codec_zhuff_build(&cl_h, cl_lens, 19);
+
+                uint8_t all_lens[320] = {0};
+                int idx = 0;
+                while (idx < hlit + hdist) {
+                    int sym = codec_zhuff_decode(&br, &cl_h);
+                    if (sym < 0) return RCRE_ERR_IO;
+                    if (sym < 16) {
+                        all_lens[idx++] = (uint8_t)sym;
+                    } else {
+                        int rep = 0;
+                        uint8_t val = 0;
+                        if (sym == 16) {
+                            if (idx == 0) return RCRE_ERR_IO;
+                            val = all_lens[idx - 1];
+                            rep = 3 + (int)codec_z_read_bits(&br, 2);
+                        } else if (sym == 17) {
+                            rep = 3 + (int)codec_z_read_bits(&br, 3);
+                        } else {
+                            rep = 11 + (int)codec_z_read_bits(&br, 7);
+                        }
+                        if (idx + rep > hlit + hdist) return RCRE_ERR_IO;
+                        while (rep--) all_lens[idx++] = val;
+                    }
+                }
+                codec_zhuff_build(&lit_h, all_lens, hlit);
+                codec_zhuff_build(&dist_h, all_lens + hlit, hdist);
+            }
+
+            for (;;) {
+                int sym = codec_zhuff_decode(&br, &lit_h);
+                if (sym < 0) return RCRE_ERR_IO;
+                if (sym < 256) {
+                    if (out_pos >= dst_cap) return RCRE_ERR_IO;
+                    dst[out_pos++] = (uint8_t)sym;
+                } else if (sym == 256) {
+                    break;
+                } else {
+                    int li = sym - 257;
+                    if (li >= 29) return RCRE_ERR_IO;
+                    size_t match_len = len_base[li] + codec_z_read_bits(&br, len_extra[li]);
+                    int di = codec_zhuff_decode(&br, &dist_h);
+                    if (di < 0 || di >= 30) return RCRE_ERR_IO;
+                    size_t dist = dist_base[di] + codec_z_read_bits(&br, dist_extra[di]);
+                    if (dist == 0 || dist > out_pos || out_pos + match_len > dst_cap) return RCRE_ERR_IO;
+                    for (size_t k = 0; k < match_len; ++k) {
+                        dst[out_pos] = dst[out_pos - dist];
+                        out_pos++;
+                    }
+                }
+            }
+        } else {
+            return RCRE_ERR_IO;
+        }
+    } while (!bfinal);
+
+    *out_len = out_pos;
+    return RCRE_OK;
+}
+
+static uint8_t codec_paeth(uint8_t a, uint8_t b, uint8_t c) {
+    int p = (int)a + (int)b - (int)c;
+    int pa = abs(p - (int)a), pb = abs(p - (int)b), pc = abs(p - (int)c);
+    if (pa <= pb && pa <= pc) return a;
+    if (pb <= pc) return b;
+    return c;
+}
+
+RCRE_NODISCARD int rcre_codec_load_png_from_buffer(const void* buf, size_t size, RCRE_Arena* arena, RCRE_Tensor* out_img) {
+    if (!buf || size < 33 || !arena || !out_img) return RCRE_ERR_INVALID_ARG;
+    const uint8_t* p = (const uint8_t*)buf;
+    static const uint8_t sig[8] = {137,80,78,71,13,10,26,10};
+    if (memcmp(p, sig, 8) != 0) return RCRE_ERR_IO;
+
+    size_t pos = 8;
+    uint32_t w = 0, h = 0;
+    uint8_t bit_depth = 0, color_type = 0;
+    uint8_t* idat = nullptr;
+    size_t idat_len = 0, idat_cap = 0;
+    bool got_ihdr = false, got_iend = false;
+
+    while (pos + 12 <= size) {
+        uint32_t clen = codec_be32(p + pos);
+        const uint8_t* ctype = p + pos + 4;
+        if (pos + 12U + clen > size) { free(idat); return RCRE_ERR_IO; }
+        const uint8_t* cdata = p + pos + 8;
+
+        if (memcmp(ctype, "IHDR", 4) == 0 && clen == 13) {
+            w = codec_be32(cdata);
+            h = codec_be32(cdata + 4);
+            bit_depth  = cdata[8];
+            color_type = cdata[9];
+            got_ihdr = true;
+        } else if (memcmp(ctype, "IDAT", 4) == 0) {
+            if (idat_len + clen > idat_cap) {
+                size_t nc = (idat_cap ? idat_cap * 2U : 4096U) + clen;
+                uint8_t* nb = (uint8_t*)realloc(idat, nc);
+                if (!nb) { free(idat); return RCRE_ERR_OUT_OF_MEMORY; }
+                idat = nb;
+                idat_cap = nc;
+            }
+            if (clen > 0) memcpy(idat + idat_len, cdata, clen);
+            idat_len += clen;
+        } else if (memcmp(ctype, "IEND", 4) == 0) {
+            got_iend = true;
+            break;
+        }
+        pos += 12U + clen;
+    }
+
+    if (!got_ihdr || !got_iend || !idat || w == 0 || h == 0 || bit_depth != 8) {
+        free(idat);
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+
+    size_t ch = 0;
+    if (color_type == 0) ch = 1;
+    else if (color_type == 2) ch = 3;
+    else if (color_type == 6) ch = 4;
+    else { free(idat); return RCRE_ERR_UNSUPPORTED_OP; }
+
+    size_t row_bytes = (size_t)w * ch;
+    size_t raw_cap = (size_t)h * (row_bytes + 1U);
+    uint8_t* raw = (uint8_t*)malloc(raw_cap);
+    if (!raw) { free(idat); return RCRE_ERR_OUT_OF_MEMORY; }
+
+    size_t raw_len = 0;
+    int zrc = codec_zlib_inflate(idat, idat_len, raw, raw_cap, &raw_len);
+    free(idat);
+    if (zrc != RCRE_OK || raw_len != raw_cap) {
+        free(raw);
+        return RCRE_ERR_IO;
+    }
+
+    size_t sh[3] = { h, w, ch };
+    RCRE_Tensor t = rcre_tensor_create(sh, 3, RCRE_DTYPE_U8, RCRE_LAYOUT_HWC, arena);
+    if (!t.data) { free(raw); return RCRE_ERR_OUT_OF_MEMORY; }
+    uint8_t* dst = (uint8_t*)t.data;
+
+    for (size_t y = 0; y < h; ++y) {
+        const uint8_t* srow = raw + y * (row_bytes + 1U);
+        uint8_t ftype = srow[0];
+        const uint8_t* xrow = srow + 1;
+        uint8_t* drow = dst + y * row_bytes;
+        const uint8_t* prow = (y > 0) ? (dst + (y - 1U) * row_bytes) : nullptr;
+
+        for (size_t i = 0; i < row_bytes; ++i) {
+            uint8_t a = (i >= ch) ? drow[i - ch] : 0;
+            uint8_t b = prow ? prow[i] : 0;
+            uint8_t c = (prow && i >= ch) ? prow[i - ch] : 0;
+            uint8_t val = xrow[i];
+            switch (ftype) {
+                case 0: drow[i] = val; break;
+                case 1: drow[i] = (uint8_t)(val + a); break;
+                case 2: drow[i] = (uint8_t)(val + b); break;
+                case 3: drow[i] = (uint8_t)(val + (((int)a + (int)b) >> 1)); break;
+                case 4: drow[i] = (uint8_t)(val + codec_paeth(a, b, c)); break;
+                default: free(raw); return RCRE_ERR_IO;
+            }
+        }
+    }
+
+    free(raw);
+    *out_img = t;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_codec_load_png(const char* filepath, RCRE_Arena* arena, RCRE_Tensor* out_img) {
+    if (!filepath || !arena || !out_img) return RCRE_ERR_INVALID_ARG;
+    RCRE_MappedFile map;
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map);
+    if (rc != RCRE_OK) return rc;
+    rc = rcre_codec_load_png_from_buffer(map.data, map.size, arena, out_img);
+    rcre_io_mmap_close(&map);
+    return rc;
+}
+
+RCRE_NODISCARD int rcre_codec_save_png(const RCRE_Tensor* img, const char* filepath) {
+    if (!img || !img->data || !filepath || img->ndim != 3 || img->dtype != RCRE_DTYPE_U8) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    size_t h = img->shape[0], w = img->shape[1], ch = img->shape[2];
+    uint8_t ctype = (ch == 1) ? 0 : ((ch == 3) ? 2 : ((ch == 4) ? 6 : 255));
+    if (ctype == 255 || w == 0 || h == 0) return RCRE_ERR_INVALID_ARG;
+
+    size_t row_bytes = w * ch;
+    size_t raw_len = h * (row_bytes + 1U);
+    uint8_t* raw = (uint8_t*)malloc(raw_len);
+    if (!raw) return RCRE_ERR_OUT_OF_MEMORY;
+    const uint8_t* src = (const uint8_t*)img->data;
+    for (size_t y = 0; y < h; ++y) {
+        raw[y * (row_bytes + 1U)] = 0; /* Filter type 0 (None) */
+        memcpy(raw + y * (row_bytes + 1U) + 1U, src + y * row_bytes, row_bytes);
+    }
+
+    /* Valid RFC 1950 zlib wrapper using uncompressed DEFLATE blocks (65535B max per block) */
+    size_t n_blocks = (raw_len + 65534U) / 65535U;
+    if (n_blocks == 0) n_blocks = 1;
+    size_t zlib_len = 2U + n_blocks * 5U + raw_len + 4U;
+    size_t total_len = 8U + 25U + (12U + zlib_len) + 12U;
+    uint8_t* png = (uint8_t*)malloc(total_len);
+    if (!png) { free(raw); return RCRE_ERR_OUT_OF_MEMORY; }
+
+    size_t p = 0;
+    static const uint8_t sig[8] = {137,80,78,71,13,10,26,10};
+    memcpy(png + p, sig, 8); p += 8;
+
+    /* IHDR */
+    codec_wbe32(png + p, 13); p += 4;
+    size_t ihdr_crc_start = p;
+    memcpy(png + p, "IHDR", 4); p += 4;
+    codec_wbe32(png + p, (uint32_t)w); p += 4;
+    codec_wbe32(png + p, (uint32_t)h); p += 4;
+    png[p++] = 8; png[p++] = ctype; png[p++] = 0; png[p++] = 0; png[p++] = 0;
+    codec_wbe32(png + p, codec_crc32(png + ihdr_crc_start, 17)); p += 4;
+
+    /* IDAT */
+    codec_wbe32(png + p, (uint32_t)zlib_len); p += 4;
+    size_t idat_crc_start = p;
+    memcpy(png + p, "IDAT", 4); p += 4;
+    png[p++] = 0x78; png[p++] = 0x01; /* zlib CMF=8, FLG=1 */
+    size_t rem = raw_len, rpos = 0;
+    while (rem > 0 || rpos == 0) {
+        size_t chunk = (rem > 65535U) ? 65535U : rem;
+        uint8_t last = (rem == chunk) ? 1U : 0U;
+        png[p++] = last;
+        png[p++] = (uint8_t)(chunk & 0xFFU);
+        png[p++] = (uint8_t)((chunk >> 8) & 0xFFU);
+        uint16_t nlen = (uint16_t)(~((uint16_t)chunk));
+        png[p++] = (uint8_t)(nlen & 0xFFU);
+        png[p++] = (uint8_t)((nlen >> 8) & 0xFFU);
+        if (chunk > 0) memcpy(png + p, raw + rpos, chunk);
+        p += chunk;
+        rpos += chunk;
+        rem -= chunk;
+        if (rem == 0) break;
+    }
+    codec_wbe32(png + p, codec_adler32(raw, raw_len)); p += 4;
+    codec_wbe32(png + p, codec_crc32(png + idat_crc_start, 4U + zlib_len)); p += 4;
+
+    /* IEND */
+    codec_wbe32(png + p, 0); p += 4;
+    memcpy(png + p, "IEND", 4); p += 4;
+    codec_wbe32(png + p, codec_crc32(png + p - 4, 4)); p += 4;
+
+    int rc = rcre_io_write_atomic(filepath, png, p);
+    free(png);
+    free(raw);
+    return rc;
+}
+
+/* ========================================================================= */
+/* 3. Baseline JPEG (8x8 DCT/IDCT + Huffman + YCbCr<->RGB)                   */
+/* ========================================================================= */
+
+static const uint8_t codec_zigzag[64] = {
+     0,  1,  8, 16,  9,  2,  3, 10,
+    17, 24, 32, 25, 18, 11,  4,  5,
+    12, 19, 26, 33, 40, 48, 41, 34,
+    27, 20, 13,  6,  7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36,
+    29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46,
+    53, 60, 61, 54, 47, 55, 62, 63
+};
+
+static const uint8_t codec_std_luma_qt[64] = {
+    16,11,10,16,24,40,51,61, 12,12,14,19,26,58,60,55,
+    14,13,16,24,40,57,69,56, 14,17,22,29,51,87,80,62,
+    18,22,37,56,68,109,103,77, 24,35,55,64,81,104,113,92,
+    49,64,78,87,103,121,120,101, 72,92,95,98,112,100,103,99
+};
+
+static const uint8_t codec_dc_bits[17] = {0,0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0};
+static const uint8_t codec_dc_vals[12] = {0,1,2,3,4,5,6,7,8,9,10,11};
+
+static const uint8_t codec_ac_bits[17] = {0,0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,125};
+static const uint8_t codec_ac_vals[162] = {
+    0x01,0x02,0x03,0x00,0x04,0x11,0x05,0x12,0x21,0x31,0x41,0x06,0x13,0x51,0x61,0x07,
+    0x22,0x71,0x14,0x32,0x81,0x91,0xa1,0x08,0x23,0x42,0xb1,0xc1,0x15,0x52,0xd1,0xf0,
+    0x24,0x33,0x62,0x72,0x82,0x09,0x0a,0x16,0x17,0x18,0x19,0x1a,0x25,0x26,0x27,0x28,
+    0x29,0x2a,0x34,0x35,0x36,0x37,0x38,0x39,0x3a,0x43,0x44,0x45,0x46,0x47,0x48,0x49,
+    0x4a,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5a,0x63,0x64,0x65,0x66,0x67,0x68,0x69,
+    0x6a,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7a,0x83,0x84,0x85,0x86,0x87,0x88,0x89,
+    0x8a,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9a,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,
+    0xa8,0xa9,0xaa,0xb2,0xb3,0xb4,0xb5,0xb6,0xb7,0xb8,0xb9,0xba,0xc2,0xc3,0xc4,0xc5,
+    0xc6,0xc7,0xc8,0xc9,0xca,0xd2,0xd3,0xd4,0xd5,0xd6,0xd7,0xd8,0xd9,0xda,0xe1,0xe2,
+    0xe3,0xe4,0xe5,0xe6,0xe7,0xe8,0xe9,0xea,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,
+    0xf9,0xfa
+};
+
+typedef struct {
+    uint8_t  bits[17];
+    uint8_t  vals[256];
+    uint16_t maxcode[18];
+    int32_t  valptr[17];
+    int32_t  mincode[17];
+    /* Encoder lookup */
+    uint16_t enc_code[256];
+    uint8_t  enc_size[256];
+} RCRE_JHuff;
+
+static void codec_jhuff_build(RCRE_JHuff* h) {
+    int k = 0;
+    uint16_t code = 0;
+    for (int l = 1; l <= 16; ++l) {
+        if (h->bits[l] == 0) {
+            h->maxcode[l] = 0;
+            h->mincode[l] = 0x7FFFFFFF;
+            h->valptr[l]  = 0;
+        } else {
+            h->valptr[l] = k;
+            h->mincode[l] = code;
+            for (int i = 0; i < h->bits[l]; ++i) {
+                uint8_t sym = h->vals[k + i];
+                h->enc_code[sym] = (uint16_t)(code + i);
+                h->enc_size[sym] = (uint8_t)l;
+            }
+            code = (uint16_t)(code + h->bits[l]);
+            h->maxcode[l] = (uint16_t)(code - 1U);
+            k += h->bits[l];
+        }
+        code <<= 1;
+    }
+}
+
+typedef struct {
+    const uint8_t* p;
+    size_t         len;
+    size_t         pos;
+    uint32_t       bit_buf;
+    int            bit_cnt;
+} RCRE_JBitReader;
+
+static int codec_j_next_bit(RCRE_JBitReader* r) {
+    if (r->bit_cnt == 0) {
+        if (r->pos >= r->len) return 0;
+        uint8_t b = r->p[r->pos++];
+        if (b == 0xFF && r->pos < r->len && r->p[r->pos] == 0x00) r->pos++;
+        r->bit_buf = b;
+        r->bit_cnt = 8;
+    }
+    r->bit_cnt--;
+    return (int)((r->bit_buf >> r->bit_cnt) & 1U);
+}
+
+static int codec_j_read_bits(RCRE_JBitReader* r, int n) {
+    int v = 0;
+    for (int i = 0; i < n; ++i) v = (v << 1) | codec_j_next_bit(r);
+    return v;
+}
+
+static int codec_j_extend(int v, int t) {
+    if (t == 0) return 0;
+    int vt = 1 << (t - 1);
+    return (v < vt) ? (v + (-(1 << t)) + 1) : v;
+}
+
+static int codec_j_huff_decode(RCRE_JBitReader* r, const RCRE_JHuff* h) {
+    int code = 0;
+    for (int l = 1; l <= 16; ++l) {
+        code = (code << 1) | codec_j_next_bit(r);
+        if (h->bits[l] > 0 && code <= (int)h->maxcode[l]) {
+            int idx = h->valptr[l] + (code - h->mincode[l]);
+            return h->vals[idx];
+        }
+    }
+    return 0;
+}
+
+static void codec_idct8x8(const float block[64], float out[64]) {
+    float tmp[64];
+    const float pi8 = 3.14159265358979323846f / 16.0f;
+    for (int r = 0; r < 8; ++r) {
+        for (int x = 0; x < 8; ++x) {
+            float s = 0.0f;
+            for (int u = 0; u < 8; ++u) {
+                float cu = (u == 0) ? 0.707106781f : 1.0f;
+                s += cu * block[r * 8 + u] * cosf((float)(2 * x + 1) * (float)u * pi8);
+            }
+            tmp[r * 8 + x] = 0.5f * s;
+        }
+    }
+    for (int x = 0; x < 8; ++x) {
+        for (int y = 0; y < 8; ++y) {
+            float s = 0.0f;
+            for (int v = 0; v < 8; ++v) {
+                float cv = (v == 0) ? 0.707106781f : 1.0f;
+                s += cv * tmp[v * 8 + x] * cosf((float)(2 * y + 1) * (float)v * pi8);
+            }
+            out[y * 8 + x] = 0.5f * s + 128.0f;
+        }
+    }
+}
+
+static void codec_fdct8x8(const float in[64], float out[64]) {
+    const float pi8 = 3.14159265358979323846f / 16.0f;
+    for (int v = 0; v < 8; ++v) {
+        float cv = (v == 0) ? 0.707106781f : 1.0f;
+        for (int u = 0; u < 8; ++u) {
+            float cu = (u == 0) ? 0.707106781f : 1.0f;
+            float s = 0.0f;
+            for (int y = 0; y < 8; ++y) {
+                for (int x = 0; x < 8; ++x) {
+                    s += (in[y * 8 + x] - 128.0f) *
+                         cosf((float)(2 * x + 1) * (float)u * pi8) *
+                         cosf((float)(2 * y + 1) * (float)v * pi8);
+                }
+            }
+            out[v * 8 + u] = 0.25f * cu * cv * s;
+        }
+    }
+}
+
+RCRE_NODISCARD int rcre_codec_load_jpeg_from_buffer(const void* buf, size_t size, RCRE_Arena* arena, RCRE_Tensor* out_img) {
+    if (!buf || size < 16 || !arena || !out_img) return RCRE_ERR_INVALID_ARG;
+    const uint8_t* p = (const uint8_t*)buf;
+    if (p[0] != 0xFF || p[1] != 0xD8) return RCRE_ERR_IO;
+
+    uint16_t qt[4][64] = {0};
+    RCRE_JHuff dc_h[4], ac_h[4];
+    memset(dc_h, 0, sizeof(dc_h));
+    memset(ac_h, 0, sizeof(ac_h));
+
+    uint32_t w = 0, h = 0, n_comp = 0;
+    uint8_t comp_id[4] = {0}, comp_hsamp[4] = {1,1,1,1}, comp_vsamp[4] = {1,1,1,1}, comp_qt[4] = {0};
+    uint8_t scan_dc[4] = {0}, scan_ac[4] = {0};
+
+    size_t pos = 2;
+    size_t sos_data_start = 0;
+    while (pos + 4 <= size) {
+        if (p[pos] != 0xFF) { pos++; continue; }
+        while (pos < size && p[pos] == 0xFF) pos++;
+        if (pos >= size) break;
+        uint8_t marker = p[pos++];
+        if (marker == 0xD9) break;
+        if (marker == 0x00 || (marker >= 0xD0 && marker <= 0xD7)) continue;
+        if (pos + 2 > size) return RCRE_ERR_IO;
+        uint16_t seg_len = (uint16_t)(((uint16_t)p[pos] << 8) | p[pos + 1]);
+        if (seg_len < 2 || pos + seg_len > size) return RCRE_ERR_IO;
+        const uint8_t* s = p + pos + 2;
+        size_t slen = seg_len - 2U;
+
+        if (marker == 0xDB) { /* DQT */
+            size_t k = 0;
+            while (k < slen) {
+                uint8_t info = s[k++];
+                uint8_t pq = info >> 4, tq = info & 0x0FU;
+                if (tq >= 4 || pq > 1) return RCRE_ERR_UNSUPPORTED_OP;
+                size_t nb = pq ? 128U : 64U;
+                if (k + nb > slen) return RCRE_ERR_IO;
+                for (int i = 0; i < 64; ++i) {
+                    qt[tq][codec_zigzag[i]] = pq ? (uint16_t)((s[k + i * 2] << 8) | s[k + i * 2 + 1]) : s[k + i];
+                }
+                k += nb;
+            }
+        } else if (marker == 0xC0) { /* SOF0 Baseline */
+            if (slen < 6) return RCRE_ERR_IO;
+            h = (uint32_t)((s[1] << 8) | s[2]);
+            w = (uint32_t)((s[3] << 8) | s[4]);
+            n_comp = s[5];
+            if (w == 0 || h == 0 || (n_comp != 1 && n_comp != 3) || slen < 6U + 3U * n_comp) return RCRE_ERR_UNSUPPORTED_OP;
+            for (uint32_t i = 0; i < n_comp; ++i) {
+                comp_id[i]    = s[6 + i * 3];
+                comp_hsamp[i] = s[6 + i * 3 + 1] >> 4;
+                comp_vsamp[i] = s[6 + i * 3 + 1] & 0x0FU;
+                comp_qt[i]    = s[6 + i * 3 + 2];
+            }
+        } else if (marker == 0xC4) { /* DHT */
+            size_t k = 0;
+            while (k + 17 <= slen) {
+                uint8_t info = s[k++];
+                uint8_t tc = info >> 4, th = info & 0x0FU;
+                if (th >= 4 || tc > 1) return RCRE_ERR_UNSUPPORTED_OP;
+                RCRE_JHuff* target = tc ? &ac_h[th] : &dc_h[th];
+                int sum = 0;
+                for (int l = 1; l <= 16; ++l) { target->bits[l] = s[k++]; sum += target->bits[l]; }
+                if (k + (size_t)sum > slen || sum > 256) return RCRE_ERR_IO;
+                for (int i = 0; i < sum; ++i) target->vals[i] = s[k++];
+                codec_jhuff_build(target);
+            }
+        } else if (marker == 0xDA) { /* SOS */
+            if (slen < 1U + 2U * n_comp) return RCRE_ERR_IO;
+            for (uint32_t i = 0; i < s[0] && i < 4; ++i) {
+                uint8_t cid = s[1 + i * 2];
+                for (uint32_t c = 0; c < n_comp; ++c) {
+                    if (comp_id[c] == cid) {
+                        scan_dc[c] = s[1 + i * 2 + 1] >> 4;
+                        scan_ac[c] = s[1 + i * 2 + 1] & 0x0FU;
+                    }
+                }
+            }
+            sos_data_start = pos + seg_len;
+            break;
+        }
+        pos += seg_len;
+    }
+
+    if (w == 0 || h == 0 || sos_data_start == 0) return RCRE_ERR_IO;
+
+    size_t max_h = 1, max_v = 1;
+    for (uint32_t c = 0; c < n_comp; ++c) {
+        if (comp_hsamp[c] > max_h) max_h = comp_hsamp[c];
+        if (comp_vsamp[c] > max_v) max_v = comp_vsamp[c];
+    }
+    size_t mcu_w = max_h * 8U, mcu_h = max_v * 8U;
+    size_t n_mcu_x = (w + mcu_w - 1U) / mcu_w;
+    size_t n_mcu_y = (h + mcu_h - 1U) / mcu_h;
+
+    size_t sh[3] = { h, w, 3 };
+    RCRE_Tensor t = rcre_tensor_create(sh, 3, RCRE_DTYPE_U8, RCRE_LAYOUT_HWC, arena);
+    if (!t.data) return RCRE_ERR_OUT_OF_MEMORY;
+    uint8_t* dst = (uint8_t*)t.data;
+
+    RCRE_JBitReader br = { p, size, sos_data_start, 0, 0 };
+    int dc_pred[4] = {0};
+
+    float* cbuf[3] = {
+        (float*)malloc(mcu_w * mcu_h * sizeof(float)),
+        (float*)malloc(mcu_w * mcu_h * sizeof(float)),
+        (float*)malloc(mcu_w * mcu_h * sizeof(float))
+    };
+    if (!cbuf[0] || !cbuf[1] || !cbuf[2]) {
+        free(cbuf[0]); free(cbuf[1]); free(cbuf[2]);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    for (size_t my = 0; my < n_mcu_y; ++my) {
+        for (size_t mx = 0; mx < n_mcu_x; ++mx) {
+            for (uint32_t c = 0; c < n_comp; ++c) {
+                for (uint8_t vs = 0; vs < comp_vsamp[c]; ++vs) {
+                    for (uint8_t hs = 0; hs < comp_hsamp[c]; ++hs) {
+                        float coef[64] = {0};
+                        int cat = codec_j_huff_decode(&br, &dc_h[scan_dc[c] & 3U]);
+                        int diff = codec_j_extend(codec_j_read_bits(&br, cat & 15), cat & 15);
+                        dc_pred[c] += diff;
+                        coef[0] = (float)dc_pred[c] * (float)qt[comp_qt[c] & 3U][0];
+
+                        int k = 1;
+                        while (k < 64) {
+                            int rs = codec_j_huff_decode(&br, &ac_h[scan_ac[c] & 3U]);
+                            int r = (rs >> 4) & 0x0F;
+                            int ssz = rs & 0x0F;
+                            if (ssz == 0) {
+                                if (r == 15) k += 16;
+                                else break;
+                            } else {
+                                k += r;
+                                if (k >= 64) break;
+                                int val = codec_j_extend(codec_j_read_bits(&br, ssz), ssz);
+                                int zz = codec_zigzag[k];
+                                coef[zz] = (float)val * (float)qt[comp_qt[c] & 3U][zz];
+                                k++;
+                            }
+                        }
+
+                        float pix[64];
+                        codec_idct8x8(coef, pix);
+                        size_t scale_x = max_h / (comp_hsamp[c] ? comp_hsamp[c] : 1);
+                        size_t scale_y = max_v / (comp_vsamp[c] ? comp_vsamp[c] : 1);
+                        for (size_t py = 0; py < 8U * scale_y; ++py) {
+                            for (size_t px = 0; px < 8U * scale_x; ++px) {
+                                cbuf[c][(vs * 8U * scale_y + py) * mcu_w + (hs * 8U * scale_x + px)] =
+                                    pix[(py / scale_y) * 8U + (px / scale_x)];
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (size_t py = 0; py < mcu_h; ++py) {
+                size_t iy = my * mcu_h + py;
+                if (iy >= h) continue;
+                for (size_t px = 0; px < mcu_w; ++px) {
+                    size_t ix = mx * mcu_w + px;
+                    if (ix >= w) continue;
+                    float yv = cbuf[0][py * mcu_w + px];
+                    float cb = (n_comp == 3) ? (cbuf[1][py * mcu_w + px] - 128.0f) : 0.0f;
+                    float cr = (n_comp == 3) ? (cbuf[2][py * mcu_w + px] - 128.0f) : 0.0f;
+                    float r = yv + 1.402f * cr;
+                    float g = yv - 0.344136f * cb - 0.714136f * cr;
+                    float b = yv + 1.772f * cb;
+                    int ri = (int)lrintf(r); ri = ri < 0 ? 0 : (ri > 255 ? 255 : ri);
+                    int gi = (int)lrintf(g); gi = gi < 0 ? 0 : (gi > 255 ? 255 : gi);
+                    int bi = (int)lrintf(b); bi = bi < 0 ? 0 : (bi > 255 ? 255 : bi);
+                    size_t o = (iy * w + ix) * 3U;
+                    dst[o + 0] = (uint8_t)ri;
+                    dst[o + 1] = (uint8_t)gi;
+                    dst[o + 2] = (uint8_t)bi;
+                }
+            }
+        }
+    }
+
+    free(cbuf[0]); free(cbuf[1]); free(cbuf[2]);
+    *out_img = t;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_codec_load_jpeg(const char* filepath, RCRE_Arena* arena, RCRE_Tensor* out_img) {
+    if (!filepath || !arena || !out_img) return RCRE_ERR_INVALID_ARG;
+    RCRE_MappedFile map;
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map);
+    if (rc != RCRE_OK) return rc;
+    rc = rcre_codec_load_jpeg_from_buffer(map.data, map.size, arena, out_img);
+    rcre_io_mmap_close(&map);
+    return rc;
+}
+
+typedef struct {
+    uint8_t* buf;
+    size_t   pos;
+    size_t   cap;
+    uint32_t bit_buf;
+    int      bit_cnt;
+} RCRE_JBitWriter;
+
+static void codec_jw_byte(RCRE_JBitWriter* w, uint8_t b, bool stuff) {
+    if (w->pos + 2 < w->cap) {
+        w->buf[w->pos++] = b;
+        if (stuff && b == 0xFF) w->buf[w->pos++] = 0x00;
+    }
+}
+
+static void codec_jw_bits(RCRE_JBitWriter* w, uint32_t code, int n) {
+    for (int i = n - 1; i >= 0; --i) {
+        w->bit_buf = (w->bit_buf << 1U) | ((code >> i) & 1U);
+        w->bit_cnt++;
+        if (w->bit_cnt == 8) {
+            codec_jw_byte(w, (uint8_t)(w->bit_buf & 0xFFU), true);
+            w->bit_buf = 0;
+            w->bit_cnt = 0;
+        }
+    }
+}
+
+static int codec_j_bit_cat(int v) {
+    int av = (v < 0) ? -v : v;
+    int bits = 0;
+    while (av > 0) { av >>= 1; bits++; }
+    return bits;
+}
+
+static void codec_jw_flush(RCRE_JBitWriter* w) {
+    if (w->bit_cnt > 0) {
+        uint8_t b = (uint8_t)(((w->bit_buf << (8 - w->bit_cnt)) | ((1U << (8 - w->bit_cnt)) - 1U)) & 0xFFU);
+        codec_jw_byte(w, b, true);
+        w->bit_buf = 0;
+        w->bit_cnt = 0;
+    }
+}
+
+RCRE_NODISCARD int rcre_codec_save_jpeg(const RCRE_Tensor* img, const char* filepath, int quality) {
+    if (!img || !img->data || !filepath || img->ndim != 3 || img->shape[2] != 3 || img->dtype != RCRE_DTYPE_U8) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (quality < 1) quality = 1;
+    if (quality > 100) quality = 100;
+    int scale = (quality < 50) ? (5000 / quality) : (200 - quality * 2);
+
+    uint8_t qt[64];
+    for (int i = 0; i < 64; ++i) {
+        int v = ((int)codec_std_luma_qt[i] * scale + 50) / 100;
+        qt[i] = (uint8_t)(v < 1 ? 1 : (v > 255 ? 255 : v));
+    }
+
+    RCRE_JHuff dc_h = {0}, ac_h = {0};
+    memcpy(dc_h.bits, codec_dc_bits, 17); memcpy(dc_h.vals, codec_dc_vals, 12);
+    memcpy(ac_h.bits, codec_ac_bits, 17); memcpy(ac_h.vals, codec_ac_vals, 162);
+    codec_jhuff_build(&dc_h);
+    codec_jhuff_build(&ac_h);
+
+    size_t h = img->shape[0], w = img->shape[1];
+    size_t cap = w * h * 4U + 4096U;
+    RCRE_JBitWriter bw = { (uint8_t*)malloc(cap), 0, cap, 0, 0 };
+    if (!bw.buf) return RCRE_ERR_OUT_OF_MEMORY;
+
+    /* SOI */
+    codec_jw_byte(&bw, 0xFF, false); codec_jw_byte(&bw, 0xD8, false);
+    /* DQT (table 0) */
+    codec_jw_byte(&bw, 0xFF, false); codec_jw_byte(&bw, 0xDB, false);
+    codec_jw_byte(&bw, 0x00, false); codec_jw_byte(&bw, 67, false);
+    codec_jw_byte(&bw, 0x00, false);
+    for (int i = 0; i < 64; ++i) codec_jw_byte(&bw, qt[codec_zigzag[i]], false);
+
+    /* SOF0 (4:4:4 3-component baseline) */
+    codec_jw_byte(&bw, 0xFF, false); codec_jw_byte(&bw, 0xC0, false);
+    codec_jw_byte(&bw, 0x00, false); codec_jw_byte(&bw, 17, false);
+    codec_jw_byte(&bw, 8, false);
+    codec_jw_byte(&bw, (uint8_t)(h >> 8), false); codec_jw_byte(&bw, (uint8_t)(h & 0xFFU), false);
+    codec_jw_byte(&bw, (uint8_t)(w >> 8), false); codec_jw_byte(&bw, (uint8_t)(w & 0xFFU), false);
+    codec_jw_byte(&bw, 3, false);
+    for (int c = 1; c <= 3; ++c) {
+        codec_jw_byte(&bw, (uint8_t)c, false);
+        codec_jw_byte(&bw, 0x11, false);
+        codec_jw_byte(&bw, 0, false);
+    }
+
+    /* DHT DC0 & AC0 */
+    codec_jw_byte(&bw, 0xFF, false); codec_jw_byte(&bw, 0xC4, false);
+    codec_jw_byte(&bw, 0x00, false); codec_jw_byte(&bw, 19 + 12, false);
+    codec_jw_byte(&bw, 0x00, false);
+    for (int i = 1; i <= 16; ++i) codec_jw_byte(&bw, codec_dc_bits[i], false);
+    for (int i = 0; i < 12; ++i) codec_jw_byte(&bw, codec_dc_vals[i], false);
+
+    codec_jw_byte(&bw, 0xFF, false); codec_jw_byte(&bw, 0xC4, false);
+    codec_jw_byte(&bw, 0x00, false); codec_jw_byte(&bw, (uint8_t)(19 + 162), false);
+    codec_jw_byte(&bw, 0x10, false);
+    for (int i = 1; i <= 16; ++i) codec_jw_byte(&bw, codec_ac_bits[i], false);
+    for (int i = 0; i < 162; ++i) codec_jw_byte(&bw, codec_ac_vals[i], false);
+
+    /* SOS */
+    codec_jw_byte(&bw, 0xFF, false); codec_jw_byte(&bw, 0xDA, false);
+    codec_jw_byte(&bw, 0x00, false); codec_jw_byte(&bw, 12, false);
+    codec_jw_byte(&bw, 3, false);
+    for (int c = 1; c <= 3; ++c) {
+        codec_jw_byte(&bw, (uint8_t)c, false);
+        codec_jw_byte(&bw, 0x00, false);
+    }
+    codec_jw_byte(&bw, 0, false); codec_jw_byte(&bw, 63, false); codec_jw_byte(&bw, 0, false);
+
+    const uint8_t* src = (const uint8_t*)img->data;
+    int dc_prev[3] = {0};
+    for (size_t my = 0; my < h; my += 8) {
+        for (size_t mx = 0; mx < w; mx += 8) {
+            for (int c = 0; c < 3; ++c) {
+                float blk[64], dct[64];
+                for (size_t py = 0; py < 8; ++py) {
+                    size_t iy = (my + py < h) ? (my + py) : (h - 1U);
+                    for (size_t px = 0; px < 8; ++px) {
+                        size_t ix = (mx + px < w) ? (mx + px) : (w - 1U);
+                        const uint8_t* rgb = src + (iy * w + ix) * 3U;
+                        float R = rgb[0], G = rgb[1], B = rgb[2];
+                        if (c == 0) blk[py * 8 + px] = 0.299f * R + 0.587f * G + 0.114f * B;
+                        else if (c == 1) blk[py * 8 + px] = -0.168736f * R - 0.331264f * G + 0.5f * B + 128.0f;
+                        else blk[py * 8 + px] = 0.5f * R - 0.418688f * G - 0.081312f * B + 128.0f;
+                    }
+                }
+                codec_fdct8x8(blk, dct);
+                int qz[64];
+                for (int i = 0; i < 64; ++i) {
+                    int zz = codec_zigzag[i];
+                    qz[i] = (int)lrintf(dct[zz] / (float)qt[zz]);
+                }
+                int diff = qz[0] - dc_prev[c];
+                dc_prev[c] = qz[0];
+                int cat = codec_j_bit_cat(diff);
+                if (cat > 11) cat = 11;
+                codec_jw_bits(&bw, dc_h.enc_code[cat], dc_h.enc_size[cat]);
+                if (cat > 0) {
+                    int bits = (diff < 0) ? (diff - 1 + (1 << cat)) : diff;
+                    codec_jw_bits(&bw, (uint32_t)bits, cat);
+                }
+                int last_nz = 63;
+                while (last_nz > 0 && qz[last_nz] == 0) last_nz--;
+                int run = 0;
+                for (int k = 1; k <= last_nz; ++k) {
+                    if (qz[k] == 0) {
+                        run++;
+                        if (run == 16) {
+                            codec_jw_bits(&bw, ac_h.enc_code[0xF0], ac_h.enc_size[0xF0]);
+                            run = 0;
+                        }
+                    } else {
+                        int ac_cat = codec_j_bit_cat(qz[k]);
+                        if (ac_cat > 10) ac_cat = 10;
+                        uint8_t sym = (uint8_t)((run << 4) | ac_cat);
+                        codec_jw_bits(&bw, ac_h.enc_code[sym], ac_h.enc_size[sym]);
+                        int ab = (qz[k] < 0) ? (qz[k] - 1 + (1 << ac_cat)) : qz[k];
+                        codec_jw_bits(&bw, (uint32_t)ab, ac_cat);
+                        run = 0;
+                    }
+                }
+                if (last_nz < 63) codec_jw_bits(&bw, ac_h.enc_code[0x00], ac_h.enc_size[0x00]);
+            }
+        }
+    }
+    codec_jw_flush(&bw);
+    codec_jw_byte(&bw, 0xFF, false); codec_jw_byte(&bw, 0xD9, false);
+
+    int rc = rcre_io_write_atomic(filepath, bw.buf, bw.pos);
+    free(bw.buf);
+    return rc;
+}
+
+/* --- Source: onnx_subset.c --- */
+/**
+ * @file onnx_subset.c
+ * @brief Minimal Zero-Dependency ONNX Protobuf Parser & Graph Inference Engine (ISO C23)
+ */
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+    const uint8_t* p;
+    size_t         len;
+    size_t         pos;
+} RCRE_PBCursor;
+
+static bool onnx_read_varint(RCRE_PBCursor* c, uint64_t* out) {
+    uint64_t v = 0;
+    int shift = 0;
+    while (c->pos < c->len && shift < 64) {
+        uint8_t b = c->p[c->pos++];
+        v |= ((uint64_t)(b & 0x7FU) << shift);
+        if ((b & 0x80U) == 0) {
+            *out = v;
+            return true;
+        }
+        shift += 7;
+    }
+    return false;
+}
+
+static bool onnx_skip_field(RCRE_PBCursor* c, uint32_t wire_type) {
+    uint64_t v = 0;
+    switch (wire_type) {
+        case 0: return onnx_read_varint(c, &v);
+        case 1: if (c->len - c->pos < 8) return false; c->pos += 8; return true;
+        case 2:
+            if (!onnx_read_varint(c, &v) || v > (uint64_t)(c->len - c->pos)) return false;
+            c->pos += (size_t)v;
+            return true;
+        case 5: if (c->len - c->pos < 4) return false; c->pos += 4; return true;
+        default: return false;
+    }
+}
+
+static RCRE_ONNXOpType onnx_parse_op(const char* s, size_t len) {
+    if (len == 4 && memcmp(s, "Relu", 4) == 0) return RCRE_ONNX_OP_RELU;
+    if (len == 4 && memcmp(s, "Gemm", 4) == 0) return RCRE_ONNX_OP_GEMM;
+    if (len == 6 && memcmp(s, "MatMul", 6) == 0) return RCRE_ONNX_OP_MATMUL;
+    if (len == 3 && memcmp(s, "Add", 3) == 0) return RCRE_ONNX_OP_ADD;
+    if (len == 7 && memcmp(s, "Softmax", 7) == 0) return RCRE_ONNX_OP_SOFTMAX;
+    if (len == 4 && memcmp(s, "Conv", 4) == 0) return RCRE_ONNX_OP_CONV;
+    if (len == 7 && memcmp(s, "MaxPool", 7) == 0) return RCRE_ONNX_OP_MAXPOOL;
+    if (len == 17 && memcmp(s, "GlobalAveragePool", 17) == 0) return RCRE_ONNX_OP_GLOBAL_AVG_POOL;
+    return RCRE_ONNX_OP_UNKNOWN;
+}
+
+static void onnx_copy_str(char* dst, size_t cap, const uint8_t* s, size_t len) {
+    size_t n = (len < cap - 1U) ? len : (cap - 1U);
+    if (n > 0) memcpy(dst, s, n);
+    dst[n] = '\0';
+}
+
+static bool onnx_parse_tensor_proto(const uint8_t* buf, size_t len, RCRE_ONNXTensor* out) {
+    memset(out, 0, sizeof(*out));
+    RCRE_PBCursor c = { buf, len, 0 };
+    const uint8_t* raw_data = nullptr;
+    size_t raw_len = 0;
+    size_t float_cap = 0, float_n = 0;
+    float* float_arr = nullptr;
+
+    while (c.pos < c.len) {
+        uint64_t tag = 0;
+        if (!onnx_read_varint(&c, &tag)) { free(float_arr); return false; }
+        uint32_t field = (uint32_t)(tag >> 3);
+        uint32_t wire  = (uint32_t)(tag & 7U);
+
+        if (field == 1 && wire == 0) { /* dims repeated int64 */
+            uint64_t d = 0;
+            if (!onnx_read_varint(&c, &d)) { free(float_arr); return false; }
+            if (out->ndim < 4) out->dims[out->ndim++] = (size_t)d;
+        } else if (field == 1 && wire == 2) { /* packed dims */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) { free(float_arr); return false; }
+            RCRE_PBCursor sub = { c.p + c.pos, (size_t)blen, 0 };
+            c.pos += (size_t)blen;
+            while (sub.pos < sub.len) {
+                uint64_t d = 0;
+                if (!onnx_read_varint(&sub, &d)) break;
+                if (out->ndim < 4) out->dims[out->ndim++] = (size_t)d;
+            }
+        } else if (field == 4 && wire == 5) { /* float_data single */
+            if (c.len - c.pos < 4) { free(float_arr); return false; }
+            float v = 0.0f;
+            memcpy(&v, c.p + c.pos, 4);
+            c.pos += 4;
+            if (float_n >= float_cap) {
+                float_cap = float_cap ? float_cap * 2U : 16U;
+                float* nb = (float*)realloc(float_arr, float_cap * sizeof(float));
+                if (!nb) { free(float_arr); return false; }
+                float_arr = nb;
+            }
+            float_arr[float_n++] = v;
+        } else if (field == 4 && wire == 2) { /* packed float_data */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) { free(float_arr); return false; }
+            size_t cnt = (size_t)blen / 4U;
+            float* nb = (float*)realloc(float_arr, (float_n + cnt) * sizeof(float));
+            if (!nb) { free(float_arr); return false; }
+            float_arr = nb;
+            memcpy(float_arr + float_n, c.p + c.pos, cnt * 4U);
+            float_n += cnt;
+            c.pos += (size_t)blen;
+        } else if (field == 8 && wire == 2) { /* name */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) { free(float_arr); return false; }
+            free(out->name);
+            out->name = (char*)malloc((size_t)blen + 1U);
+            if (!out->name) { free(float_arr); return false; }
+            onnx_copy_str(out->name, (size_t)blen + 1U, c.p + c.pos, (size_t)blen);
+            c.pos += (size_t)blen;
+        } else if (field == 9 && wire == 2) { /* raw_data float bytes */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) { free(float_arr); return false; }
+            raw_data = c.p + c.pos;
+            raw_len  = (size_t)blen;
+            c.pos   += (size_t)blen;
+        } else {
+            if (!onnx_skip_field(&c, wire)) { free(float_arr); return false; }
+        }
+    }
+
+    size_t numel = (out->ndim > 0) ? 1 : 0;
+    for (uint8_t d = 0; d < out->ndim; ++d) numel *= out->dims[d];
+    out->numel = numel;
+
+    if (raw_data && raw_len >= numel * 4U && numel > 0) {
+        free(float_arr);
+        out->data = (float*)malloc(numel * sizeof(float));
+        if (!out->data) return false;
+        memcpy(out->data, raw_data, numel * 4U);
+    } else if (float_arr && float_n > 0) {
+        out->data = float_arr;
+        if (out->numel == 0) {
+            out->numel = float_n;
+            out->ndim = 1;
+            out->dims[0] = float_n;
+        }
+    } else {
+        free(float_arr);
+    }
+    return true;
+}
+
+static bool onnx_parse_node_proto(const uint8_t* buf, size_t len, RCRE_ONNXNode* out) {
+    memset(out, 0, sizeof(*out));
+    out->stride = 1;
+    out->kernel = 1;
+    out->trans_b = 1; /* common ONNX Gemm default when set */
+    RCRE_PBCursor c = { buf, len, 0 };
+
+    while (c.pos < c.len) {
+        uint64_t tag = 0;
+        if (!onnx_read_varint(&c, &tag)) return false;
+        uint32_t field = (uint32_t)(tag >> 3);
+        uint32_t wire  = (uint32_t)(tag & 7U);
+
+        if (field == 1 && wire == 2) { /* input repeated string */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) return false;
+            if (out->n_inputs < 4) onnx_copy_str(out->inputs[out->n_inputs++], 64, c.p + c.pos, (size_t)blen);
+            c.pos += (size_t)blen;
+        } else if (field == 2 && wire == 2) { /* output repeated string */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) return false;
+            if (out->output[0] == '\0') onnx_copy_str(out->output, 64, c.p + c.pos, (size_t)blen);
+            c.pos += (size_t)blen;
+        } else if (field == 4 && wire == 2) { /* op_type */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) return false;
+            out->op = onnx_parse_op((const char*)(c.p + c.pos), (size_t)blen);
+            c.pos += (size_t)blen;
+        } else if (field == 5 && wire == 2) { /* AttributeProto */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) return false;
+            RCRE_PBCursor ac = { c.p + c.pos, (size_t)blen, 0 };
+            c.pos += (size_t)blen;
+            char aname[32] = {0};
+            int64_t ival = 0;
+            int64_t first_int = 0;
+            while (ac.pos < ac.len) {
+                uint64_t atag = 0;
+                if (!onnx_read_varint(&ac, &atag)) break;
+                uint32_t af = (uint32_t)(atag >> 3), aw = (uint32_t)(atag & 7U);
+                if (af == 1 && aw == 2) {
+                    uint64_t sl = 0;
+                    if (onnx_read_varint(&ac, &sl) && sl <= ac.len - ac.pos) {
+                        onnx_copy_str(aname, sizeof(aname), ac.p + ac.pos, (size_t)sl);
+                        ac.pos += (size_t)sl;
+                    }
+                } else if (af == 3 && aw == 0) {
+                    uint64_t u = 0; (void)onnx_read_varint(&ac, &u); ival = (int64_t)u;
+                } else if (af == 7 && aw == 0) {
+                    uint64_t u = 0; (void)onnx_read_varint(&ac, &u); if (first_int == 0) first_int = (int64_t)u;
+                } else {
+                    if (!onnx_skip_field(&ac, aw)) break;
+                }
+            }
+            if (strcmp(aname, "transB") == 0) out->trans_b = (int)ival;
+            else if (strcmp(aname, "strides") == 0 && first_int > 0) out->stride = (int)first_int;
+            else if (strcmp(aname, "pads") == 0) out->pad = (int)first_int;
+            else if (strcmp(aname, "kernel_shape") == 0 && first_int > 0) out->kernel = (int)first_int;
+        } else {
+            if (!onnx_skip_field(&c, wire)) return false;
+        }
+    }
+    return true;
+}
+
+static bool onnx_parse_graph_proto(const uint8_t* buf, size_t len, RCRE_ONNXModel* m) {
+    RCRE_PBCursor c = { buf, len, 0 };
+    while (c.pos < c.len) {
+        uint64_t tag = 0;
+        if (!onnx_read_varint(&c, &tag)) return false;
+        uint32_t field = (uint32_t)(tag >> 3), wire = (uint32_t)(tag & 7U);
+        if (field == 1 && wire == 2) { /* node */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) return false;
+            if (m->n_nodes < RCRE_ONNX_MAX_NODES) {
+                if (!onnx_parse_node_proto(c.p + c.pos, (size_t)blen, &m->nodes[m->n_nodes++])) return false;
+            }
+            c.pos += (size_t)blen;
+        } else if (field == 5 && wire == 2) { /* initializer TensorProto */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) return false;
+            if (m->n_init < RCRE_ONNX_MAX_TENSORS) {
+                if (!onnx_parse_tensor_proto(c.p + c.pos, (size_t)blen, &m->initializers[m->n_init++])) return false;
+            }
+            c.pos += (size_t)blen;
+        } else if (field == 11 && wire == 2) { /* input ValueInfoProto */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) return false;
+            RCRE_PBCursor vc = { c.p + c.pos, (size_t)blen, 0 };
+            uint64_t vtag = 0;
+            if (onnx_read_varint(&vc, &vtag) && (vtag >> 3) == 1 && (vtag & 7U) == 2) {
+                uint64_t sl = 0;
+                if (onnx_read_varint(&vc, &sl) && sl <= vc.len - vc.pos && m->input_name[0] == '\0') {
+                    onnx_copy_str(m->input_name, sizeof(m->input_name), vc.p + vc.pos, (size_t)sl);
+                }
+            }
+            c.pos += (size_t)blen;
+        } else if (field == 12 && wire == 2) { /* output ValueInfoProto */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos) return false;
+            RCRE_PBCursor vc = { c.p + c.pos, (size_t)blen, 0 };
+            uint64_t vtag = 0;
+            if (onnx_read_varint(&vc, &vtag) && (vtag >> 3) == 1 && (vtag & 7U) == 2) {
+                uint64_t sl = 0;
+                if (onnx_read_varint(&vc, &sl) && sl <= vc.len - vc.pos && m->output_name[0] == '\0') {
+                    onnx_copy_str(m->output_name, sizeof(m->output_name), vc.p + vc.pos, (size_t)sl);
+                }
+            }
+            c.pos += (size_t)blen;
+        } else {
+            if (!onnx_skip_field(&c, wire)) return false;
+        }
+    }
+    return true;
+}
+
+RCRE_NODISCARD int rcre_onnx_load_buffer(const void* buf, size_t size, RCRE_ONNXModel* out_model) {
+    if (!buf || size == 0 || !out_model) return RCRE_ERR_INVALID_ARG;
+    memset(out_model, 0, sizeof(*out_model));
+    RCRE_PBCursor c = { (const uint8_t*)buf, size, 0 };
+    bool parsed_graph = false;
+
+    while (c.pos < c.len) {
+        uint64_t tag = 0;
+        if (!onnx_read_varint(&c, &tag)) { rcre_onnx_free(out_model); return RCRE_ERR_IO; }
+        uint32_t field = (uint32_t)(tag >> 3), wire = (uint32_t)(tag & 7U);
+        if (field == 7 && wire == 2) { /* graph */
+            uint64_t blen = 0;
+            if (!onnx_read_varint(&c, &blen) || blen > c.len - c.pos ||
+                !onnx_parse_graph_proto(c.p + c.pos, (size_t)blen, out_model)) {
+                rcre_onnx_free(out_model);
+                return RCRE_ERR_IO;
+            }
+            parsed_graph = true;
+            c.pos += (size_t)blen;
+        } else {
+            if (!onnx_skip_field(&c, wire)) { rcre_onnx_free(out_model); return RCRE_ERR_IO; }
+        }
+    }
+    if (!parsed_graph || out_model->n_nodes == 0) {
+        rcre_onnx_free(out_model);
+        return RCRE_ERR_IO;
+    }
+    if (out_model->output_name[0] == '\0') {
+        snprintf(out_model->output_name, 64, "%s", out_model->nodes[out_model->n_nodes - 1U].output);
+    }
+    return RCRE_OK;
+}
+
+void rcre_onnx_free(RCRE_ONNXModel* model) {
+    if (!model) return;
+    for (size_t i = 0; i < model->n_init; ++i) {
+        free(model->initializers[i].name);
+        free(model->initializers[i].data);
+    }
+    memset(model, 0, sizeof(*model));
+}
+
+typedef struct {
+    const char* name;
+    RCRE_Tensor tensor;
+} RCRE_ONNXSlot;
+
+static const RCRE_Tensor* onnx_find_slot(const RCRE_ONNXSlot* slots, size_t n, const char* name) {
+    for (size_t i = 0; i < n; ++i) {
+        if (slots[i].name && strcmp(slots[i].name, name) == 0) return &slots[i].tensor;
+    }
+    return nullptr;
+}
+
+RCRE_NODISCARD int rcre_onnx_run(const RCRE_ONNXModel* model, const RCRE_Tensor* input,
+                                 RCRE_Arena* arena, RCRE_Tensor* output) {
+    if (!model || !input || !input->data || !arena || !output || input->dtype != RCRE_DTYPE_F32) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_ONNXSlot slots[RCRE_ONNX_MAX_TENSORS + RCRE_ONNX_MAX_NODES + 2];
+    size_t n_slots = 0;
+
+    const char* in_name = model->input_name[0] ? model->input_name : model->nodes[0].inputs[0];
+    slots[n_slots++] = (RCRE_ONNXSlot){ .name = in_name, .tensor = *input };
+
+    for (size_t i = 0; i < model->n_init; ++i) {
+        const RCRE_ONNXTensor* it = &model->initializers[i];
+        if (!it->name || !it->data || it->ndim == 0) continue;
+        slots[n_slots++] = (RCRE_ONNXSlot){
+            .name   = it->name,
+            .tensor = rcre_tensor_from_buffer(it->data, it->dims, it->ndim, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR)
+        };
+    }
+
+    for (size_t n = 0; n < model->n_nodes; ++n) {
+        const RCRE_ONNXNode* nd = &model->nodes[n];
+        const RCRE_Tensor* A = onnx_find_slot(slots, n_slots, nd->inputs[0]);
+        if (!A) return RCRE_ERR_IO;
+        RCRE_Tensor res = {0};
+
+        if (nd->op == RCRE_ONNX_OP_RELU) {
+            res = rcre_tensor_create(A->shape, A->ndim, RCRE_DTYPE_F32, A->layout, arena);
+            if (!res.data) return RCRE_ERR_OUT_OF_MEMORY;
+            const float* src = (const float*)A->data;
+            float* dst = (float*)res.data;
+            size_t num = rcre_tensor_numel(A);
+            for (size_t i = 0; i < num; ++i) dst[i] = (src[i] > 0.0f) ? src[i] : 0.0f;
+        } else if (nd->op == RCRE_ONNX_OP_SOFTMAX) {
+            res = rcre_tensor_create(A->shape, A->ndim, RCRE_DTYPE_F32, A->layout, arena);
+            if (!res.data) return RCRE_ERR_OUT_OF_MEMORY;
+            size_t cols = A->shape[A->ndim - 1U];
+            size_t rows = rcre_tensor_numel(A) / cols;
+            const float* src = (const float*)A->data;
+            float* dst = (float*)res.data;
+            for (size_t r = 0; r < rows; ++r) {
+                float mx = src[r * cols];
+                for (size_t c = 1; c < cols; ++c) if (src[r * cols + c] > mx) mx = src[r * cols + c];
+                float s = 0.0f;
+                for (size_t c = 0; c < cols; ++c) {
+                    dst[r * cols + c] = expf(src[r * cols + c] - mx);
+                    s += dst[r * cols + c];
+                }
+                for (size_t c = 0; c < cols; ++c) dst[r * cols + c] /= s;
+            }
+        } else if (nd->op == RCRE_ONNX_OP_ADD) {
+            const RCRE_Tensor* B = (nd->n_inputs >= 2) ? onnx_find_slot(slots, n_slots, nd->inputs[1]) : nullptr;
+            if (!B) return RCRE_ERR_IO;
+            if (rcre_tensor_add_broadcast(A, B, arena, &res) != RCRE_OK) return RCRE_ERR_SHAPE_MISMATCH;
+        } else if (nd->op == RCRE_ONNX_OP_MATMUL || nd->op == RCRE_ONNX_OP_GEMM) {
+            const RCRE_Tensor* B = (nd->n_inputs >= 2) ? onnx_find_slot(slots, n_slots, nd->inputs[1]) : nullptr;
+            const RCRE_Tensor* C = (nd->op == RCRE_ONNX_OP_GEMM && nd->n_inputs >= 3)
+                                       ? onnx_find_slot(slots, n_slots, nd->inputs[2])
+                                       : nullptr;
+            if (!B || A->ndim != 2 || B->ndim != 2) return RCRE_ERR_SHAPE_MISMATCH;
+            size_t M = A->shape[0], K = A->shape[1];
+            size_t N = (nd->op == RCRE_ONNX_OP_GEMM && nd->trans_b) ? B->shape[0] : B->shape[1];
+            size_t B_k = (nd->op == RCRE_ONNX_OP_GEMM && nd->trans_b) ? B->shape[1] : B->shape[0];
+            if (K != B_k) return RCRE_ERR_SHAPE_MISMATCH;
+            size_t sh[2] = { M, N };
+            res = rcre_tensor_create(sh, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+            if (!res.data) return RCRE_ERR_OUT_OF_MEMORY;
+            const float* ad = (const float*)A->data;
+            const float* bd = (const float*)B->data;
+            float* od = (float*)res.data;
+            if (nd->op == RCRE_ONNX_OP_GEMM && nd->trans_b) {
+                for (size_t i = 0; i < M; ++i) {
+                    for (size_t j = 0; j < N; ++j) {
+                        od[i * N + j] = rcre_hal.dot_f32(ad + i * K, bd + j * K, K);
+                    }
+                }
+            } else {
+                rcre_hal.gemm_f32(M, N, K, 1.0f, ad, K, bd, N, 0.0f, od, N);
+            }
+            if (C && C->data) {
+                const float* cd = (const float*)C->data;
+                size_t c_num = rcre_tensor_numel(C);
+                for (size_t i = 0; i < M; ++i) {
+                    for (size_t j = 0; j < N; ++j) {
+                        od[i * N + j] += cd[(c_num == N) ? j : ((i * N + j) % c_num)];
+                    }
+                }
+            }
+        } else if (nd->op == RCRE_ONNX_OP_CONV) {
+            const RCRE_Tensor* W = (nd->n_inputs >= 2) ? onnx_find_slot(slots, n_slots, nd->inputs[1]) : nullptr;
+            const RCRE_Tensor* Bias = (nd->n_inputs >= 3) ? onnx_find_slot(slots, n_slots, nd->inputs[2]) : nullptr;
+            if (!W || A->ndim != 3 || W->ndim != 4) return RCRE_ERR_SHAPE_MISMATCH;
+            RCRE_Conv2DParams p = { (size_t)nd->stride, (size_t)nd->stride, (size_t)nd->pad, (size_t)nd->pad };
+            if (rcre_nn_conv2d(A, W, Bias, &p, &res, arena) != RCRE_OK) return RCRE_ERR_IO;
+        } else if (nd->op == RCRE_ONNX_OP_GLOBAL_AVG_POOL) {
+            if (A->ndim != 3 && A->ndim != 4) return RCRE_ERR_SHAPE_MISMATCH;
+            size_t C_ch = (A->ndim == 4) ? A->shape[1] : A->shape[0];
+            size_t H = (A->ndim == 4) ? A->shape[2] : A->shape[1];
+            size_t W = (A->ndim == 4) ? A->shape[3] : A->shape[2];
+            size_t sh[2] = { 1, C_ch };
+            res = rcre_tensor_create(sh, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+            if (!res.data) return RCRE_ERR_OUT_OF_MEMORY;
+            const float* src = (const float*)A->data;
+            float* dst = (float*)res.data;
+            for (size_t c = 0; c < C_ch; ++c) {
+                float s = 0.0f;
+                for (size_t i = 0; i < H * W; ++i) s += src[c * (H * W) + i];
+                dst[c] = s / (float)(H * W);
+            }
+        } else {
+            return RCRE_ERR_UNSUPPORTED_OP;
+        }
+
+        slots[n_slots++] = (RCRE_ONNXSlot){ .name = nd->output, .tensor = res };
+    }
+
+    const RCRE_Tensor* out_slot = onnx_find_slot(slots, n_slots, model->output_name);
+    if (!out_slot) return RCRE_ERR_IO;
+    *output = *out_slot;
+    return RCRE_OK;
+}
+
+typedef struct {
+    uint8_t* buf;
+    size_t   pos;
+    size_t   cap;
+} RCRE_PBEnc;
+
+static void onnx_enc_varint(RCRE_PBEnc* e, uint64_t v) {
+    do {
+        uint8_t b = (uint8_t)(v & 0x7FU);
+        v >>= 7U;
+        if (v != 0) b |= 0x80U;
+        if (e->pos < e->cap) e->buf[e->pos] = b;
+        e->pos++;
+    } while (v != 0);
+}
+
+static void onnx_enc_bytes(RCRE_PBEnc* e, uint32_t field, const void* data, size_t len) {
+    onnx_enc_varint(e, ((uint64_t)field << 3U) | 2U);
+    onnx_enc_varint(e, (uint64_t)len);
+    if (e->pos + len <= e->cap && len > 0) memcpy(e->buf + e->pos, data, len);
+    e->pos += len;
+}
+
+static void onnx_enc_tensor(uint8_t* tmp, size_t* out_len, const char* name,
+                            const float* w, size_t d0, size_t d1, uint8_t ndim) {
+    RCRE_PBEnc e = { tmp, 0, 8192 };
+    onnx_enc_varint(&e, (1ULL << 3) | 0ULL); onnx_enc_varint(&e, (uint64_t)d0);
+    if (ndim == 2) {
+        onnx_enc_varint(&e, (1ULL << 3) | 0ULL); onnx_enc_varint(&e, (uint64_t)d1);
+    }
+    onnx_enc_bytes(&e, 8, name, strlen(name));
+    size_t n = (ndim == 2) ? (d0 * d1) : d0;
+    onnx_enc_bytes(&e, 9, w, n * sizeof(float));
+    *out_len = e.pos;
+}
+
+RCRE_NODISCARD size_t rcre_onnx_build_mlp_protobuf(
+    uint8_t* dst,
+    size_t max_bytes,
+    const float* w1, const float* b1, size_t in_dim, size_t hid_dim,
+    const float* w2, const float* b2, size_t out_dim
+) {
+    uint8_t gbuf[16384];
+    RCRE_PBEnc g = { gbuf, 0, sizeof(gbuf) };
+
+    uint8_t sub[8192];
+    size_t slen = 0;
+
+    /* Node 1: Gemm(x, w1, b1) -> h0 (transB=0) */
+    {
+        RCRE_PBEnc n = { sub, 0, sizeof(sub) };
+        onnx_enc_bytes(&n, 1, "x", 1);
+        onnx_enc_bytes(&n, 1, "w1", 2);
+        onnx_enc_bytes(&n, 1, "b1", 2);
+        onnx_enc_bytes(&n, 2, "h0", 2);
+        onnx_enc_bytes(&n, 4, "Gemm", 4);
+        uint8_t attr[32];
+        RCRE_PBEnc a = { attr, 0, sizeof(attr) };
+        onnx_enc_bytes(&a, 1, "transB", 6);
+        onnx_enc_varint(&a, (3ULL << 3) | 0ULL); onnx_enc_varint(&a, 0ULL);
+        onnx_enc_bytes(&n, 5, attr, a.pos);
+        onnx_enc_bytes(&g, 1, sub, n.pos);
+    }
+    /* Node 2: Relu(h0) -> h1 */
+    {
+        RCRE_PBEnc n = { sub, 0, sizeof(sub) };
+        onnx_enc_bytes(&n, 1, "h0", 2);
+        onnx_enc_bytes(&n, 2, "h1", 2);
+        onnx_enc_bytes(&n, 4, "Relu", 4);
+        onnx_enc_bytes(&g, 1, sub, n.pos);
+    }
+    /* Node 3: Gemm(h1, w2, b2) -> y (transB=0) */
+    {
+        RCRE_PBEnc n = { sub, 0, sizeof(sub) };
+        onnx_enc_bytes(&n, 1, "h1", 2);
+        onnx_enc_bytes(&n, 1, "w2", 2);
+        onnx_enc_bytes(&n, 1, "b2", 2);
+        onnx_enc_bytes(&n, 2, "y", 1);
+        onnx_enc_bytes(&n, 4, "Gemm", 4);
+        uint8_t attr[32];
+        RCRE_PBEnc a = { attr, 0, sizeof(attr) };
+        onnx_enc_bytes(&a, 1, "transB", 6);
+        onnx_enc_varint(&a, (3ULL << 3) | 0ULL); onnx_enc_varint(&a, 0ULL);
+        onnx_enc_bytes(&n, 5, attr, a.pos);
+        onnx_enc_bytes(&g, 1, sub, n.pos);
+    }
+
+    onnx_enc_tensor(sub, &slen, "w1", w1, in_dim, hid_dim, 2); onnx_enc_bytes(&g, 5, sub, slen);
+    onnx_enc_tensor(sub, &slen, "b1", b1, hid_dim, 1, 1);     onnx_enc_bytes(&g, 5, sub, slen);
+    onnx_enc_tensor(sub, &slen, "w2", w2, hid_dim, out_dim, 2); onnx_enc_bytes(&g, 5, sub, slen);
+    onnx_enc_tensor(sub, &slen, "b2", b2, out_dim, 1, 1);     onnx_enc_bytes(&g, 5, sub, slen);
+
+    /* input "x", output "y" */
+    {
+        RCRE_PBEnc v = { sub, 0, sizeof(sub) };
+        onnx_enc_bytes(&v, 1, "x", 1);
+        onnx_enc_bytes(&g, 11, sub, v.pos);
+    }
+    {
+        RCRE_PBEnc v = { sub, 0, sizeof(sub) };
+        onnx_enc_bytes(&v, 1, "y", 1);
+        onnx_enc_bytes(&g, 12, sub, v.pos);
+    }
+
+    RCRE_PBEnc m = { dst, 0, max_bytes };
+    onnx_enc_bytes(&m, 7, gbuf, g.pos);
+    return (m.pos <= max_bytes) ? m.pos : 0;
+}
+
 /* --- Source: linear.c --- */
 /**
  * @file linear.c
@@ -9807,6 +18944,45 @@ RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tenso
         p_data[i] = rcre_hal.dot_f32(&X_data[i * D], w_data, D);
     }
 
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_ml_sparse_linear_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
+                                             float l1_reg, float l2_reg, size_t max_iter,
+                                             RCRE_Tensor* weights) {
+    if (!X || !X->data || !y || !y->data || !weights || !weights->data) return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || y->ndim < 1 || weights->ndim < 1) return RCRE_ERR_SHAPE_MISMATCH;
+    size_t N = X->shape[0], D = X->shape[1];
+    if (y->shape[0] != N || weights->shape[0] != D) return RCRE_ERR_SHAPE_MISMATCH;
+    if (max_iter == 0) max_iter = 50;
+
+    const float* Xd = (const float*)X->data;
+    const float* yd = (const float*)y->data;
+    float* wd = (float*)weights->data;
+    memset(wd, 0, D * sizeof(float));
+
+    for (size_t it = 0; it < max_iter; ++it) {
+        for (size_t j = 0; j < D; ++j) {
+            float rho = 0.0f;
+            float zj = 0.0f;
+            for (size_t i = 0; i < N; ++i) {
+                float xij = Xd[i * D + j];
+                if (xij == 0.0f) continue;
+                float pred_wo = 0.0f;
+                for (size_t k = 0; k < D; ++k) {
+                    if (k != j) pred_wo += Xd[i * D + k] * wd[k];
+                }
+                rho += xij * (yd[i] - pred_wo);
+                zj  += xij * xij;
+            }
+            rho /= (float)N;
+            float denom = (zj / (float)N) + l2_reg;
+            if (denom < 1e-12f) denom = 1e-12f;
+            if (rho < -l1_reg) wd[j] = (rho + l1_reg) / denom;
+            else if (rho > l1_reg) wd[j] = (rho - l1_reg) / denom;
+            else wd[j] = 0.0f;
+        }
+    }
     return RCRE_OK;
 }
 
@@ -10379,6 +19555,923 @@ RCRE_NODISCARD int rcre_ml_pca_inverse_transform(const RCRE_Tensor* X_proj, cons
 }
 
 
+/* --- Source: e_means.c --- */
+/**
+ * @file e_means.c
+ * @brief e-means (Bessa et al. 2026) as an RCRE ML operator.
+ *
+ * Implements Algorithm 1 of "e-means: outperforming k-means (in one-tenth
+ * the epochs)" (arXiv 2611.09501), reference implementation:
+ * faiss/contrib/e_means (base.py, e_means.py). Scope of this port
+ * (see docs/exactness.md for the full contract and deviations):
+ *
+ *   - Euclidean, FP32 model state, CPU, single process;
+ *   - the shipped reference's constants are ground truth (the paper's
+ *     Table 2 reports a different fit — the code comments say so);
+ *   - finalization sums in FP64 (reference uses FP32; documented
+ *     improvement — the final answer is the last-epoch mean);
+ *   - RNG: RCRE splitmix64 streams (reference: MT19937) — trajectories
+ *     are therefore not bit-comparable in default mode; strict parity is
+ *     gated at the state-machine level with injected streams.
+ *
+ * Threading: batches are processed in chunks (chunk*k <= 16 MB of Dmat);
+ * a chunk is partitioned into up to 16 contiguous slabs, each owning a
+ * disjoint Dmat/gather row range and one FP32 stats buffer; slabs run on
+ * the RCRE threadpool and their partials merge in slab (row) order. The
+ * partition depends only on (m, k, B) — never on the pool size — so the
+ * result is bit-identical across runs and pool sizes; serial vs parallel
+ * differs only in FP32 addition grouping at slab boundaries (<= 1 ULP).
+ */
+
+
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
+
+/* ========================================================================= */
+/* Shipped reference constants (faiss/contrib/e_means/base.py).              */
+/* Batch laws B = C_B * k^bk * n^bn * T^bt; step law                          */
+/* alpha0 = C_a * k^ak * B^aB * n^an * T^aT clamped to [1e-4, 1].             */
+/* ========================================================================= */
+
+typedef struct EMLaw { double cb, bk, bn, bt; } EMLaw;
+static const EMLaw EM_LAW_THROUGHPUT = { 0.035134,   0.134749, 0.876473, 0.813344 };
+static const EMLaw EM_LAW_QUALITY    = { 0.00439175, 0.134749, 0.876473, 0.813344 };
+static const double EM_STEP_LAW[5] = { 0.8244, -0.4617, 0.9003, -0.4498, -0.1057 };
+
+/* ========================================================================= */
+/* Recipe helpers                                                            */
+/* ========================================================================= */
+
+size_t em_round_pow2(double v) {
+    if (v <= 1.0) return 1;
+    double low  = pow(2.0, floor(log2(v)));
+    double high = 2.0 * low;
+    return (size_t)(v / low < high / v ? low : high);
+}
+
+double em_scheduled_alpha(double alpha0_f64, size_t t, size_t total) {
+    double f = (double)(t < total ? t : total) / (double)(total > 1 ? total : 1);
+    double cosine = 0.5 * (1.0 + cos(M_PI * f));
+    return alpha0_f64 * (EM_ALPHA_MIN_FACTOR + (1.0 - EM_ALPHA_MIN_FACTOR) * cosine);
+}
+
+size_t em_epoch_remainder(float nepochs, size_t n) {
+    /* Python round() on ((T - floor(T)) * n): exact half-to-even on the
+     * double value (the reference's _epoch_rows uses built-in round). */
+    double whole = floor((double)nepochs);
+    double v = ((double)nepochs - whole) * (double)n;
+    double f = floor(v);
+    double diff = v - f;
+    if (diff > 0.5) return (size_t)(f + 1.0);
+    if (diff < 0.5) return (size_t)f;
+    return ((size_t)f % 2 == 0) ? (size_t)f : (size_t)f + 1; /* tie -> even */
+}
+
+RCRE_NODISCARD int em_resolve_recipe(size_t n, size_t k, size_t d,
+                                     const RCRE_EMMeansParams* p,
+                                     RCRE_EMMeansRecipe* out) {
+    if (!out || n == 0 || k == 0) return RCRE_ERR_INVALID_ARG;
+    if (p && p->alpha0 != 0.0f && !isfinite((double)p->alpha0))
+        return RCRE_ERR_INVALID_ARG; /* explicit NaN alpha0 (0 = law) */
+
+    float nepochs = (p && p->nepochs > 0.0f) ? p->nepochs : 5.0f;
+    if (!(nepochs > 0.0f) || nepochs > EM_MAX_T || !isfinite((double)nepochs))
+        return RCRE_ERR_INVALID_ARG;
+
+    int      law     = p ? p->batch_law : RCRE_EM_BATCH_AUTO;
+    bool     b_given = (p != NULL) && p->batch_size > 0;
+    bool     a_given = (p != NULL) && p->alpha0 > 0.0f;
+    uint64_t seed    = (p && p->seed != 0) ? p->seed : 1234ULL;
+
+    /* Revival threshold: -1 = auto (0.1, off for d <= 2); else fixed. */
+    float tau = (p == NULL) ? -1.0f : p->unused_threshold;
+    if (tau < 0.0f) tau = (d <= EM_NO_REVIVAL_MAX_D) ? 0.0f : EM_UNUSED_TAU;
+    if (tau < 0.0f || !isfinite((double)tau)) return RCRE_ERR_INVALID_ARG;
+
+    /* Batch: manual or law. The law's "auto" resolves by dimension. */
+    int resolved_law;
+    size_t B = 0;
+    if (b_given) {
+        resolved_law = -1; /* manual */
+        B = p->batch_size;
+    } else {
+        if (law == RCRE_EM_BATCH_AUTO)
+            law = (d <= EM_AUTO_QUALITY_MAX_D) ? RCRE_EM_BATCH_QUALITY
+                                               : RCRE_EM_BATCH_THROUGHPUT;
+        if (law != RCRE_EM_BATCH_THROUGHPUT && law != RCRE_EM_BATCH_QUALITY)
+            return RCRE_ERR_INVALID_ARG;
+        resolved_law = law;
+        const EMLaw* L = (law == RCRE_EM_BATCH_QUALITY) ? &EM_LAW_QUALITY
+                                                        : &EM_LAW_THROUGHPUT;
+        double raw_b = L->cb * pow((double)k, L->bk) * pow((double)n, L->bn)
+                     * pow((double)nepochs, L->bt);
+        B = em_round_pow2(raw_b);
+        if (law == RCRE_EM_BATCH_THROUGHPUT) {
+            size_t cap = em_round_pow2((double)n / 2.0);
+            if (B > cap) B = cap;
+        } else {
+            size_t cap = n / 2;
+            if (B > cap) B = cap;
+        }
+    }
+    if (B > n) B = n;
+    if (B < 1) B = 1;
+
+    /* Step: manual or step law at the resolved batch. */
+    double a0;
+    if (!a_given) {
+        a0 = EM_STEP_LAW[0] * pow((double)k, EM_STEP_LAW[1])
+           * pow((double)B, EM_STEP_LAW[2])
+           * pow((double)n, EM_STEP_LAW[3])
+           * pow((double)nepochs, EM_STEP_LAW[4]);
+        if (a0 < 1e-4) a0 = 1e-4;
+        if (a0 > 1.0) a0 = 1.0;
+    } else {
+        a0 = (double)p->alpha0;
+        if (a0 <= 0.0 || !isfinite(a0)) return RCRE_ERR_INVALID_ARG;
+    }
+
+    /* Epoch rows: whole passes, rounded fractional prefix, full closing
+     * pass. T < 1 yields a single partial pass. */
+    size_t whole = (size_t)floor((double)nepochs);
+    size_t rem   = em_epoch_remainder(nepochs, n);
+    size_t ne = 0;
+    if (whole == 0) {
+        out->epoch_rows[0] = rem;
+        ne = 1;
+    } else {
+        for (size_t i = 0; i + 1 < whole; i++) out->epoch_rows[ne++] = n;
+        if (rem > 0) out->epoch_rows[ne++] = rem;
+        out->epoch_rows[ne++] = n;
+    }
+    if (ne > EM_MAX_EPOCHS) return RCRE_ERR_INVALID_ARG;
+
+    size_t steps_per_pass = (n + B - 1) / B;
+    size_t total_steps = 0;
+    for (size_t i = 0; i < ne; i++)
+        total_steps += (out->epoch_rows[i] + B - 1) / B;
+
+    out->batch_size       = B;
+    out->alpha0           = (float)a0;
+    out->alpha0_full      = a0;
+    out->nepochs          = nepochs;
+    out->n_epochs         = ne;
+    out->steps_per_pass   = steps_per_pass;
+    out->total_steps      = total_steps;
+    out->unused_threshold = tau;
+    out->split_epsilon    = EM_SPLIT_EPSILON;
+    out->init_usage       = ldexp(1.0f, -EM_INIT_USAGE_EXP);
+    out->batch_law        = resolved_law;
+    out->seed             = seed;
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* Model internals                                                           */
+/* ========================================================================= */
+
+void em_state_recompute_cc(EMState* st) {
+    /* Exact sequential FP32 dot (index order, mul+add, no FMA — the build
+     * uses -ffp-contract=off). Bit-identical to the oracle's cc_of; do NOT
+     * route through rcre_hal.dot_f32 (NEON/FMA differ at the ULP level). */
+    for (size_t j = 0; j < st->k; j++) {
+        const float* cj = st->c + j * st->d;
+        float acc = 0.0f;
+        for (size_t dd = 0; dd < st->d; dd++) acc += cj[dd] * cj[dd];
+        st->cc[j] = acc;
+    }
+}
+
+void em_state_shuffle_epoch(EMState* st) {
+    if (!st->do_shuffle) return;
+    /* Reference's _epoch_seed: (seed * 1000003 + epoch) mod 2^32. The
+     * stream is splitmix64 here (not MT19937) — different order, same
+     * uniformity; documented (docs/exactness.md). */
+    st->rng_shuf = (st->recipe.seed * 1000003ULL + (uint64_t)st->epoch_idx)
+                   % 4294967296ULL;
+    uint32_t* o = st->order;
+    for (size_t i = st->n - 1; i > 0; i--) {
+        uint64_t r = rcre_splitmix64(&st->rng_shuf);
+        size_t j = (size_t)(r % (i + 1));
+        uint32_t tmp = o[i]; o[i] = o[j]; o[j] = tmp;
+    }
+}
+
+/* ========================================================================= */
+/* Dead-cluster revival (Appendix H.1)                                       */
+/* ========================================================================= */
+
+/* One Gumbel uniform for cluster j: injected stream (strict parity) or the
+ * run's own splitmix64 stream. Consumed for ALL k per check — the
+ * reference draws a k-vector per check, so the stream position must match
+ * even for non-donor entries. */
+static double em_gumbel_u(EMState* st, size_t j) {
+    (void)j;
+    if (st->inject_U != NULL) {
+        if (st->inject_U_pos >= st->inject_U_len) return 0.5;
+        return st->inject_U[st->inject_U_pos++];
+    }
+    uint64_t r = rcre_splitmix64(&st->rng_revive);
+    return (double)(r >> 11) * (1.0 / 9007199254740992.0); /* [0,1) */
+}
+
+/* Max-heap of (key, cluster) for the donor selection: build in O(k),
+ * pop nsplit tops. Tie rule: larger key first, then smaller cluster index
+ * (the reference argsorts F64 keys; exact ties have measure zero and the
+ * parity tests assert a key margin). */
+
+static void em_heap_swap(EMHeapNode* h, size_t a, size_t b) {
+    EMHeapNode t = h[a]; h[a] = h[b]; h[b] = t;
+}
+static int em_heap_gt(const EMHeapNode* a, const EMHeapNode* b) {
+    if (a->key != b->key) return a->key > b->key;
+    return a->j < b->j;
+}
+static void em_heap_sift_down(EMHeapNode* h, size_t i, size_t sz) {
+    for (;;) {
+        size_t l = 2 * i + 1, r = l + 1, m = i;
+        if (l < sz && em_heap_gt(&h[l], &h[m])) m = l;
+        if (r < sz && em_heap_gt(&h[r], &h[m])) m = r;
+        if (m == i) return;
+        em_heap_swap(h, i, m);
+        i = m;
+    }
+}
+
+static void em_revive(EMState* st) {
+    if (st->recipe.unused_threshold <= 0.0f) return;
+
+    size_t* targets = st->revive_targets;
+    size_t* donors  = st->revive_donors;
+    double* U       = st->revive_U;
+    EMHeapNode* heap = st->revive_heap;
+    if (!targets || !donors || !U || !heap) return;
+
+    /* Consume this check's U vector for ALL k FIRST — the reference draws
+     * the full k-vector per check regardless of whether any split happens,
+     * so the stream position must stay aligned with the oracle. */
+    for (size_t j = 0; j < st->k; j++) U[j] = em_gumbel_u(st, j);
+
+    /* threshold: sequential FP32 sum (index order), then F32 mul/div —
+     * the reference's _numpy_unused_threshold in scalar FP32. */
+    float total = 0.0f;
+    for (size_t j = 0; j < st->k; j++) total += st->N[j];
+    float thr = (total * st->recipe.unused_threshold) / (float)st->k;
+
+    size_t ntargets = 0, ndonors = 0;
+    for (size_t j = 0; j < st->k; j++) {
+        if (st->N[j] < thr) {
+            targets[ntargets++] = j;
+        } else if (st->N[j] > 0.0f) {
+            donors[ndonors++] = j;
+        }
+    }
+    size_t nsplit = ntargets < ndonors ? ntargets : ndonors;
+    if (nsplit == 0) return;
+
+    /* Gumbel keys over the donors (reference: uniform = max(U, tiny);
+     * key = log(N) - log(-log(uniform)); the log(N) term is FP32 in the
+     * reference because usage is an FP32 array). */
+    const double tiny = 2.2250738585072014e-308; /* DBL_MIN */
+    for (size_t i = 0; i < ndonors; i++) {
+        size_t dj = donors[i];
+        double u = U[dj] < tiny ? tiny : U[dj];
+        double ln_n = (double)logf(st->N[dj]); /* FP32 log, then promote */
+        heap[i].key = ln_n - log(-log(u));
+        heap[i].j = dj;
+    }
+    for (size_t i = ndonors / 2; i-- > 0;) em_heap_sift_down(heap, i, ndonors);
+
+    for (size_t i = 0; i < nsplit; i++) {
+        EMHeapNode top = heap[0];
+        heap[0] = heap[ndonors - 1];
+        ndonors--;
+        em_heap_sift_down(heap, 0, ndonors);
+        size_t dj = top.j;
+        size_t tj = targets[i];
+
+        /* Eq. 8: alternating perturbation, delta = 1e-4 (shipped code).
+         * The child (dead slot) reads the ORIGINAL donor row, so it is
+         * written first; the donor then overwrites in place. */
+        const float* cd_src = st->c + dj * st->d;
+        float* cd = (float*)cd_src;
+        float* ct = st->c + tj * st->d;
+        for (size_t dd = 0; dd < st->d; dd++) {
+            float off = EM_SPLIT_EPSILON * (((dd & 1u) == 0u) ? 1.0f : -1.0f);
+            ct[dd] = cd_src[dd] * (1.0f + off);
+        }
+        for (size_t dd = 0; dd < st->d; dd++) {
+            float off = EM_SPLIT_EPSILON * (((dd & 1u) == 0u) ? 1.0f : -1.0f);
+            cd[dd] = cd_src[dd] * (1.0f - off);
+        }
+
+        /* _separate_splits: bit-identical children (zero centroids etc.)
+         * get a nextafter nudge on coordinate 0. */
+        bool collapsed = true;
+        for (size_t dd = 0; dd < st->d; dd++)
+            if (cd[dd] != ct[dd]) { collapsed = false; break; }
+        if (collapsed) {
+            float v = ct[0];
+            float nb = nextafterf(v, INFINITY);
+            if (!isfinite(nb)) nb = nextafterf(v, -INFINITY);
+            ct[0] = nb;
+        }
+
+        /* Donor mass halves; each child gets half. */
+        float half = st->N[dj] / 2.0f;
+        st->N[dj] = half;
+        st->N[tj] = half;
+        st->n_splits++;
+    }
+}
+
+/* ========================================================================= */
+/* EMA update (reference _apply_statistics, ids = NULL path)                 */
+/* ========================================================================= */
+
+RCRE_NODISCARD int em_state_update(EMState* st, const float* sums,
+                                   const float* counts, double objective) {
+    double alpha_d = em_scheduled_alpha(st->alpha0_f64, st->update_idx,
+                                        st->recipe.total_steps);
+    float alpha = (float)alpha_d;
+    float decay = (float)(1.0 - alpha_d);
+    st->objective += objective;
+    if (st->last_epoch) st->obj_last += objective;
+
+    /* Last-epoch finalization accumulation (FP64 — documented improvement
+     * over the reference's FP32 pass sums). */
+    if (st->last_epoch) {
+        for (size_t j = 0; j < st->k; j++)
+            st->pass_counts[j] += (double)counts[j];
+        for (size_t j = 0; j < st->k; j++) {
+            const float* srow = sums + j * st->d;
+            double* prow = st->pass_sums + j * st->d;
+            for (size_t dd = 0; dd < st->d; dd++)
+                prow[dd] += (double)srow[dd];
+        }
+    }
+
+    /* EMA in the reference's FP32 operation order. */
+    bool replace = (alpha_d == 1.0); /* reference: alpha == 1 corner */
+    if (!replace)
+        for (size_t j = 0; j < st->k; j++)
+            st->N[j] = st->N[j] * decay;
+
+    for (size_t j = 0; j < st->k; j++) {
+        float n_j = counts[j];
+        if (n_j <= 0.0f) continue;
+        float t = alpha * n_j;
+        /* Reference: retained = 0 when replacing (alpha == 1), so
+         * mass = n_j exactly there, not N_j + n_j. */
+        float mass = (replace ? 0.0f : st->N[j]) + t;
+        float weight = t / mass;
+        float* cj = st->c + j * st->d;
+        const float* sj = sums + j * st->d;
+        for (size_t dd = 0; dd < st->d; dd++) {
+            float mean = sj[dd] / n_j;
+            float pos = cj[dd] + weight * (mean - cj[dd]);
+            if (weight == 1.0f) pos = mean; /* exact-override (alpha == 1) */
+            cj[dd] = pos;
+        }
+        st->N[j] = mass;
+    }
+
+    /* Revival check cadence: after the 5th, 10th, ... update. */
+    if ((st->update_idx + 1) % EM_CHECK_EVERY == 0) em_revive(st);
+
+    em_state_recompute_cc(st);
+    st->update_idx++;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int em_state_finalize(EMState* st) {
+    for (size_t j = 0; j < st->k; j++) {
+        if (st->pass_counts[j] <= 0.0) continue; /* keep position */
+        float cnt = (float)st->pass_counts[j];
+        const double* ps = st->pass_sums + j * st->d;
+        float* cj = st->c + j * st->d;
+        for (size_t dd = 0; dd < st->d; dd++)
+            cj[dd] = (float)ps[dd] / cnt;
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* State init                                                                */
+/* ========================================================================= */
+
+static int em_uint32_cmp(const void* a, const void* b) {
+    uint32_t x = *(const uint32_t*)a, y = *(const uint32_t*)b;
+    return (x > y) - (x < y);
+}
+
+RCRE_NODISCARD int em_state_init(EMState* st, const RCRE_Tensor* X, size_t k,
+                                 const RCRE_EMMeansParams* p,
+                                 RCRE_Arena* arena, RCRE_ThreadPool* pool) {
+    memset(st, 0, sizeof(*st));
+    if (!X || !X->data || !arena) return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || X->dtype != RCRE_DTYPE_F32) return RCRE_ERR_INVALID_ARG;
+    size_t n_total = X->shape[0], d = X->shape[1];
+    if (n_total == 0 || d == 0 || k == 0 || k > n_total || n_total >= EM_MAX_N)
+        return RCRE_ERR_INVALID_ARG;
+    st->X = (const float*)X->data;
+    st->d = d;
+    st->k = k;
+    st->n_total = n_total;
+    st->arena = arena;
+    st->pool = pool;
+    st->nbuf = pool ? EM_MAX_STAT_BUFFERS : 1;
+    /* Exact assignment kernel for small k*d (bit-identical to the oracle,
+     * row-independent); gemm kernel above the threshold. */
+    st->use_exact_dots = (k * d) <= EM_EXACT_DOTS_MAX;
+
+    /* Recipe on the (possibly capped) active size. */
+    size_t cap = p ? p->max_points_per_centroid : 0;
+    size_t n = n_total;
+    if (cap > 0 && n_total > cap * k) n = cap * k;
+    if (em_resolve_recipe(n, k, d, p, &st->recipe) != RCRE_OK)
+        return RCRE_ERR_INVALID_ARG;
+    st->alpha0_f64 = st->recipe.alpha0_full;
+    st->n = n;
+    st->do_shuffle = (p == NULL) || p->shuffle;
+
+    /* Active row set: the full set, or a random sorted subset when the
+     * max_points_per_centroid cap binds (reference parity: choice without
+     * replacement + sort). */
+    st->order = (uint32_t*)rcre_arena_alloc(arena, n_total * sizeof(uint32_t), 16);
+    if (!st->order) return RCRE_ERR_OUT_OF_MEMORY;
+    for (size_t i = 0; i < n_total; i++) st->order[i] = (uint32_t)i;
+    if (n < n_total) {
+        uint64_t rs = (p && p->seed) ? p->seed : 1234ULL;
+        for (size_t i = 0; i < n; i++) {
+            uint64_t r = rcre_splitmix64(&rs);
+            size_t j = i + (size_t)(r % (n_total - i));
+            uint32_t tmp = st->order[i]; st->order[i] = st->order[j];
+            st->order[j] = tmp;
+        }
+        qsort(st->order, n, sizeof(uint32_t), em_uint32_cmp);
+    }
+
+    /* Scratch (arena, aligned). */
+    st->c    = (float*)rcre_arena_alloc(arena, k * d * sizeof(float), 64);
+    st->N    = (float*)rcre_arena_alloc(arena, k * sizeof(float), 64);
+    st->cc   = (float*)rcre_arena_alloc(arena, k * sizeof(float), 64);
+    st->batch_s = (float*)rcre_arena_alloc(arena, k * d * sizeof(float), 64);
+    st->batch_n = (float*)rcre_arena_alloc(arena, k * sizeof(float), 64);
+    st->labels  = (int32_t*)rcre_arena_alloc(arena, n_total * sizeof(int32_t), 64);
+    st->pass_sums   = (double*)rcre_arena_alloc(arena, k * d * sizeof(double), 64);
+    st->pass_counts = (double*)rcre_arena_alloc(arena, k * sizeof(double), 64);
+    if (!st->c || !st->N || !st->cc || !st->batch_s || !st->batch_n ||
+        !st->labels || !st->pass_sums || !st->pass_counts)
+        return RCRE_ERR_OUT_OF_MEMORY;
+    memset(st->labels, 0xFF, n_total * sizeof(int32_t)); /* -1 default */
+
+    /* Assignment geometry. Exact kernel: no Dmat, the whole batch is one
+     * chunk (row-independent dots). GEMM kernel: chunk*k under the Dmat
+     * budget. */
+    if (st->use_exact_dots) {
+        st->chunk = st->recipe.batch_size;
+        st->Dmat = NULL;
+        st->gather = NULL;
+    } else {
+        size_t chunk_cap = EM_DMAT_BUDGET / (4u * (unsigned)k);
+        if (chunk_cap < 1) chunk_cap = 1;
+        st->chunk = st->recipe.batch_size < chunk_cap ? st->recipe.batch_size : chunk_cap;
+        if (st->chunk < 1) st->chunk = 1;
+        st->Dmat   = (float*)rcre_arena_alloc(arena, st->chunk * k * sizeof(float), 64);
+        st->gather = (float*)rcre_arena_alloc(arena, st->chunk * d * sizeof(float), 64);
+        if (!st->Dmat || !st->gather) return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Per-slab stats buffers. */
+    st->wsum = (float**)rcre_arena_alloc(arena, st->nbuf * sizeof(float*), 8);
+    st->wcnt = (uint32_t*)rcre_arena_alloc(arena, st->nbuf * k * sizeof(uint32_t), 64);
+    st->wobj = (double*)rcre_arena_alloc(arena, st->nbuf * sizeof(double), 8);
+    if (!st->wsum || !st->wcnt || !st->wobj) return RCRE_ERR_OUT_OF_MEMORY;
+    for (size_t s = 0; s < st->nbuf; s++) {
+        st->wsum[s] = (float*)rcre_arena_alloc(arena, k * d * sizeof(float), 64);
+        if (!st->wsum[s]) return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Revival scratch (pre-allocated once to avoid monotonic arena growth during fit) */
+    st->revive_targets = (size_t*)rcre_arena_alloc(arena, k * sizeof(size_t), 8);
+    st->revive_donors  = (size_t*)rcre_arena_alloc(arena, k * sizeof(size_t), 8);
+    st->revive_U       = (double*)rcre_arena_alloc(arena, k * sizeof(double), 8);
+    st->revive_heap    = (EMHeapNode*)rcre_arena_alloc(arena, k * sizeof(EMHeapNode), 8);
+    if (!st->revive_targets || !st->revive_donors || !st->revive_U || !st->revive_heap)
+        return RCRE_ERR_OUT_OF_MEMORY;
+
+    /* Model init: provided centroids, all rows (n == k), or k uniform
+     * distinct rows (partial Fisher-Yates on a private copy). */
+    if (p && p->init_centroids) {
+        const RCRE_Tensor* ic = p->init_centroids;
+        if (!ic->data || ic->ndim != 2 || ic->dtype != RCRE_DTYPE_F32 ||
+            ic->shape[0] != k || ic->shape[1] != d)
+            return RCRE_ERR_SHAPE_MISMATCH;
+        memcpy(st->c, ic->data, k * d * sizeof(float));
+    } else if (n == k) {
+        for (size_t i = 0; i < k; i++)
+            memcpy(st->c + i * d, st->X + (size_t)st->order[i] * d, d * sizeof(float));
+    } else {
+        uint32_t* tmp = (uint32_t*)rcre_arena_alloc(arena, n * sizeof(uint32_t), 16);
+        if (!tmp) return RCRE_ERR_OUT_OF_MEMORY;
+        memcpy(tmp, st->order, n * sizeof(uint32_t));
+        st->rng_init = st->recipe.seed;
+        for (size_t i = 0; i < k; i++) {
+            uint64_t r = rcre_splitmix64(&st->rng_init);
+            size_t j = i + (size_t)(r % (n - i));
+            uint32_t t = tmp[i]; tmp[i] = tmp[j]; tmp[j] = t;
+        }
+        for (size_t i = 0; i < k; i++)
+            memcpy(st->c + i * d, st->X + (size_t)tmp[i] * d, d * sizeof(float));
+    }
+    for (size_t j = 0; j < k; j++)
+        st->N[j] = ldexp(1.0f, -EM_INIT_USAGE_EXP); /* 2^-16 */
+
+    st->rng_revive = st->recipe.seed;
+    em_state_recompute_cc(st);
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* Assignment + batch statistics                                             */
+/* ========================================================================= */
+
+/* One slab: gather rows, gemm against the current centroid snapshot,
+ * argmin (first index on ties), scatter stats into this slab's buffers.
+ * Slabs of one chunk own disjoint row ranges of gather/Dmat, so they run
+ * concurrently without races. */
+typedef struct EMSlabTask {
+    EMState*  st;
+    const uint32_t* rows; /* chunk-local row ids (into st->X) */
+    size_t cm;            /* chunk rows in this batch */
+    size_t block;         /* rows per slab */
+} EMSlabTask;
+
+static void em_slab_task(void* arg, size_t task_id) {
+    EMSlabTask* t = (EMSlabTask*)arg;
+    EMState* st = t->st;
+    size_t r0 = task_id * t->block;
+    size_t r1 = r0 + t->block < t->cm ? r0 + t->block : t->cm;
+    if (r0 >= r1) return;
+    size_t nr = r1 - r0;
+
+    float* ws = st->wsum[task_id];
+    uint32_t* wc = st->wcnt + task_id * st->k;
+    double* wo = &st->wobj[task_id];
+    const float* cc = st->cc;
+
+    if (st->use_exact_dots) {
+        /* EXACT kernel: per-row TRUE squared distance to every centroid,
+         * sequential FP32 in index order (diff*diff, mul+add, no FMA).
+         * Row-independent — slab-safe by construction, bit-identical to
+         * the oracle, and free of the cc - 2*x*c cancellation on
+         * large-offset data. */
+        for (size_t r = 0; r < nr; r++) {
+            const float* x = st->X + (size_t)t->rows[r0 + r] * st->d;
+            int32_t best = 0;
+            float bv = 0.0f;
+            {
+                const float* c0 = st->c;
+                for (size_t dd = 0; dd < st->d; dd++) {
+                    float df = x[dd] - c0[dd];
+                    bv += df * df;
+                }
+            }
+            for (size_t j = 1; j < st->k; j++) {
+                const float* cj = st->c + j * st->d;
+                float acc = 0.0f;
+                for (size_t dd = 0; dd < st->d; dd++) {
+                    float df = x[dd] - cj[dd];
+                    acc += df * df;
+                }
+                if (acc < bv) { bv = acc; best = (int32_t)j; }
+            }
+            uint32_t rid = t->rows[r0 + r];
+            if (st->capturing) st->labels[rid] = best;
+            wc[best]++;
+            float* srow = ws + (size_t)best * st->d;
+            for (size_t dd = 0; dd < st->d; dd++) srow[dd] += x[dd];
+            *wo += (double)bv; /* true distance — no cancellation */
+        }
+        return;
+    }
+
+    /* GEMM kernel (large k*d): Dmat = chunk x C^T via the RCRE HAL, then
+     * first-argmin of (cc - 2*D). The expanded score is monotone in the
+     * true distance, so labels are correct while F32 precision holds;
+     * the objective is ALWAYS the true distance to the winner (one extra
+     * d-dot per row) so MSE stays exact on large-offset data. */
+    float* g = st->gather + r0 * st->d;
+    for (size_t r = 0; r < nr; r++)
+        memcpy(g + r * st->d, st->X + (size_t)t->rows[r0 + r] * st->d,
+               st->d * sizeof(float));
+    float* D = st->Dmat + r0 * st->k;
+    rcre_hal.gemm_f32(nr, st->k, st->d, 1.0f, g, st->d, st->c, st->d,
+                      0.0f, D, st->k);
+    for (size_t r = 0; r < nr; r++) {
+        const float* row = D + r * st->k;
+        int32_t best = 0;
+        float bv = cc[0] - 2.0f * row[0];
+        for (size_t j = 1; j < st->k; j++) {
+            float v = cc[j] - 2.0f * row[j];
+            if (v < bv) { bv = v; best = (int32_t)j; }
+        }
+        uint32_t rid = t->rows[r0 + r];
+        if (st->capturing) st->labels[rid] = best;
+        wc[best]++;
+        const float* x = st->X + (size_t)rid * st->d;
+        float* srow = ws + (size_t)best * st->d;
+        for (size_t dd = 0; dd < st->d; dd++) srow[dd] += x[dd];
+        /* exact objective: true distance to the winning centroid */
+        const float* cw = st->c + (size_t)best * st->d;
+        float dv = 0.0f;
+        for (size_t dd = 0; dd < st->d; dd++) {
+            float df = x[dd] - cw[dd];
+            dv += df * df;
+        }
+        *wo += (double)dv;
+    }
+}
+
+RCRE_NODISCARD int em_state_run_batch(EMState* st, const uint32_t* rows,
+                                      size_t m, bool capture) {
+    memset(st->batch_s, 0, st->k * st->d * sizeof(float));
+    memset(st->batch_n, 0, st->k * sizeof(float));
+    double obj = 0.0;
+    st->capturing = capture;
+
+    size_t off = 0;
+    while (off < m) {
+        size_t cm = m - off;
+        if (cm > st->chunk) cm = st->chunk;
+
+        /* Slab partition (depends only on cm, k, B — never pool size). */
+        size_t nslab = 1;
+        if (st->pool) {
+            nslab = (cm + EM_MIN_SLAB_ROWS - 1) / EM_MIN_SLAB_ROWS;
+            if (nslab > st->nbuf) nslab = st->nbuf;
+            if (cm < EM_MIN_SLAB_ROWS) nslab = 1;
+        }
+        size_t block = (cm + nslab - 1) / nslab;
+
+        for (size_t s = 0; s < nslab; s++) {
+            memset(st->wsum[s], 0, st->k * st->d * sizeof(float));
+            memset(st->wcnt + s * st->k, 0, st->k * sizeof(uint32_t));
+            st->wobj[s] = 0.0;
+        }
+
+        if (st->pool && nslab > 1) {
+            EMSlabTask task = { st, rows + off, cm, block };
+            rcre_threadpool_parallel_for(st->pool, nslab, em_slab_task, &task);
+        } else {
+            for (size_t s = 0; s < nslab; s++) {
+                EMSlabTask task = { st, rows + off, cm, block };
+                em_slab_task(&task, s);
+            }
+        }
+
+        /* Merge slab partials in slab (row) order into the batch stats. */
+        for (size_t s = 0; s < nslab; s++) {
+            const uint32_t* wc = st->wcnt + s * st->k;
+            const float* ws = st->wsum[s];
+            for (size_t j = 0; j < st->k; j++)
+                st->batch_n[j] += (float)wc[j];
+            for (size_t j = 0; j < st->k; j++) {
+                const float* sr = ws + j * st->d;
+                float* br = st->batch_s + j * st->d;
+                for (size_t dd = 0; dd < st->d; dd++)
+                    br[dd] += sr[dd];
+            }
+            obj += st->wobj[s];
+        }
+        off += cm;
+    }
+
+    return em_state_update(st, st->batch_s, st->batch_n, obj);
+}
+
+RCRE_EMMeansParams rcre_ml_emeans_params_default(void) {
+    RCRE_EMMeansParams p;
+    memset(&p, 0, sizeof(p));
+    p.nepochs = 5.0f;
+    p.unused_threshold = -1.0f; /* auto (0.1, off for d <= 2) */
+    p.shuffle = true;
+    p.seed = 1234ULL; /* reference default */
+    p.capture_labels = true;
+    return p;
+}
+
+/* ========================================================================= */
+/* Public API                                                                */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_ml_emeans_recipe(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* p,
+                                         RCRE_EMMeansRecipe* out) {
+    /* Only n and d are consumed: a shape-only tensor (data == NULL) is a
+     * valid input — planning the recipe needs no data. */
+    if (!X || !out || k == 0) return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || X->dtype != RCRE_DTYPE_F32) return RCRE_ERR_INVALID_ARG;
+    size_t n_total = X->shape[0], d = X->shape[1];
+    if (n_total == 0 || d == 0 || k > n_total) return RCRE_ERR_INVALID_ARG;
+    size_t cap = p ? p->max_points_per_centroid : 0;
+    size_t n = (cap > 0 && n_total > cap * k) ? cap * k : n_total;
+    return em_resolve_recipe(n, k, d, p, out);
+}
+
+RCRE_NODISCARD int rcre_ml_emeans_fit(const RCRE_Tensor* X, size_t k, float nepochs,
+                                      RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                      RCRE_Arena* arena) {
+    /* The convenience API takes an explicit T: validate it (the _ex path
+     * treats nepochs <= 0 as "use the default of 5"). */
+    if (!(nepochs > 0.0f) || nepochs > EM_MAX_T || !isfinite((double)nepochs))
+        return RCRE_ERR_INVALID_ARG;
+    RCRE_EMMeansParams p;
+    memset(&p, 0, sizeof(p));
+    p.nepochs = nepochs;
+    p.shuffle = true;
+    p.unused_threshold = -1.0f; /* auto */
+    p.capture_labels = true;
+    return rcre_ml_emeans_fit_ex(X, k, &p, centroids, labels, NULL, NULL,
+                                 arena, NULL);
+}
+
+RCRE_NODISCARD int rcre_ml_emeans_fit_ex(const RCRE_Tensor* X, size_t k,
+                                         const RCRE_EMMeansParams* params,
+                                         RCRE_Tensor* centroids, RCRE_Tensor* labels,
+                                         float* out_inertia, int* out_n_splits,
+                                         RCRE_Arena* arena,
+                                         RCRE_ThreadPool* pool) {
+    if (!X || !X->data || !centroids || !centroids->data || !arena)
+        return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || X->dtype != RCRE_DTYPE_F32 ||
+        centroids->ndim != 2 || centroids->dtype != RCRE_DTYPE_F32 ||
+        centroids->shape[1] != X->shape[1])
+        return RCRE_ERR_SHAPE_MISMATCH;
+    if (labels && labels->data && labels->shape[0] < X->shape[0])
+        return RCRE_ERR_SHAPE_MISMATCH;
+
+    EMState st;
+    int rc = em_state_init(&st, X, k, params, arena, pool);
+    if (rc != RCRE_OK) return rc;
+    if (centroids->shape[0] != k) return RCRE_ERR_SHAPE_MISMATCH;
+
+    bool capture = (params == NULL) || params->capture_labels;
+    const uint32_t* base = st.order;
+
+    for (size_t e = 0; e < st.recipe.n_epochs; e++) {
+        size_t rows = st.recipe.epoch_rows[e];
+        st.epoch_idx = e;
+        st.epoch_cursor = 0;
+        st.last_epoch = (e == st.recipe.n_epochs - 1);
+        if (st.last_epoch) {
+            memset(st.pass_sums, 0, st.k * st.d * sizeof(double));
+            memset(st.pass_counts, 0, st.k * sizeof(double));
+            st.obj_last = 0.0;
+            st.obj_last_rows = rows;
+        }
+        em_state_shuffle_epoch(&st);
+        size_t cursor = 0;
+        while (cursor < rows) {
+            size_t m = st.recipe.batch_size;
+            if (m > rows - cursor) m = rows - cursor;
+            rc = em_state_run_batch(&st, base + cursor, m,
+                                    st.last_epoch && capture);
+            if (rc != RCRE_OK) return rc;
+            cursor += m;
+        }
+    }
+
+    rc = em_state_finalize(&st);
+    if (rc != RCRE_OK) return rc;
+
+    memcpy(centroids->data, st.c, k * st.d * sizeof(float));
+
+    if (labels && labels->data) {
+        size_t n_total = X->shape[0];
+        if (labels->dtype == RCRE_DTYPE_I32) {
+            int32_t* l = (int32_t*)labels->data;
+            for (size_t i = 0; i < n_total; i++) l[i] = st.labels[i];
+        } else if (labels->dtype == RCRE_DTYPE_F32) {
+            float* l = (float*)labels->data;
+            for (size_t i = 0; i < n_total; i++) l[i] = (float)st.labels[i];
+        }
+    }
+
+    if (out_inertia) {
+        *out_inertia = (st.obj_last_rows > 0)
+            ? (float)(st.obj_last / (double)st.obj_last_rows) : 0.0f;
+    }
+    if (out_n_splits) *out_n_splits = st.n_splits;
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* Exact assignment pass (post-training)                                     */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_ml_emeans_assign(const RCRE_Tensor* X,
+                                         const RCRE_Tensor* centroids,
+                                         RCRE_Tensor* labels, float* out_mse,
+                                         RCRE_Arena* arena) {
+    if (!X || !X->data || !centroids || !centroids->data || !labels ||
+        !labels->data || !arena)
+        return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || X->dtype != RCRE_DTYPE_F32 ||
+        centroids->ndim != 2 || centroids->dtype != RCRE_DTYPE_F32 ||
+        labels->ndim != 2 || X->shape[1] != centroids->shape[1])
+        return RCRE_ERR_SHAPE_MISMATCH;
+    size_t n = X->shape[0], d = X->shape[1], k = centroids->shape[0];
+    if (n == 0 || d == 0 || k == 0) return RCRE_ERR_INVALID_ARG;
+
+    const float* Xd = (const float*)X->data;
+    const float* Cd = (const float*)centroids->data;
+
+    float* cc = (float*)rcre_arena_alloc(arena, k * sizeof(float), 64);
+    if (!cc) return RCRE_ERR_OUT_OF_MEMORY;
+    /* Exact sequential FP32 dots (index order, mul+add, no FMA) — same
+     * contract as the training exact kernel. */
+    for (size_t j = 0; j < k; j++) {
+        const float* cj = Cd + j * d;
+        float acc = 0.0f;
+        for (size_t dd = 0; dd < d; dd++) acc += cj[dd] * cj[dd];
+        cc[j] = acc;
+    }
+
+    bool exact = (k * d) <= EM_EXACT_DOTS_MAX;
+    float* D = NULL, *g = NULL;
+    size_t chunk = n;
+    if (!exact) {
+        chunk = EM_DMAT_BUDGET / (4u * (unsigned)k);
+        if (chunk < 1) chunk = 1;
+        if (chunk > n) chunk = n;
+        D = (float*)rcre_arena_alloc(arena, chunk * k * sizeof(float), 64);
+        g = (float*)rcre_arena_alloc(arena, chunk * d * sizeof(float), 64);
+        if (!D || !g) return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    double mse = 0.0;
+    size_t off = 0;
+    while (off < n) {
+        size_t cm = n - off;
+        if (cm > chunk) cm = chunk;
+        if (!exact) {
+            for (size_t r = 0; r < cm; r++)
+                memcpy(g + r * d, Xd + (off + r) * d, d * sizeof(float));
+            rcre_hal.gemm_f32(cm, k, d, 1.0f, g, d, Cd, d, 0.0f, D, k);
+        }
+        for (size_t r = 0; r < cm; r++) {
+            int32_t best = 0;
+            float bv;
+            if (exact) {
+                /* true squared distance, sequential FP32 (no cancellation) */
+                const float* x = Xd + (off + r) * d;
+                float acc = 0.0f;
+                for (size_t dd = 0; dd < d; dd++) {
+                    float df = x[dd] - Cd[dd];
+                    acc += df * df;
+                }
+                bv = acc;
+                for (size_t j = 1; j < k; j++) {
+                    const float* cj = Cd + j * d;
+                    float a2 = 0.0f;
+                    for (size_t dd = 0; dd < d; dd++) {
+                        float df = x[dd] - cj[dd];
+                        a2 += df * df;
+                    }
+                    if (a2 < bv) { bv = a2; best = (int32_t)j; }
+                }
+            } else {
+                const float* row = D + r * k;
+                bv = cc[0] - 2.0f * row[0];
+                for (size_t j = 1; j < k; j++) {
+                    float v = cc[j] - 2.0f * row[j];
+                    if (v < bv) { bv = v; best = (int32_t)j; }
+                }
+                /* exact MSE: true distance to the winner */
+                const float* x = Xd + (off + r) * d;
+                const float* cw = Cd + (size_t)best * d;
+                float dv = 0.0f;
+                for (size_t dd = 0; dd < d; dd++) {
+                    float df = x[dd] - cw[dd];
+                    dv += df * df;
+                }
+                bv = dv;
+            }
+            mse += (double)bv;
+            if (labels->dtype == RCRE_DTYPE_I32)
+                ((int32_t*)labels->data)[off + r] = best;
+            else
+                ((float*)labels->data)[off + r] = (float)best;
+        }
+        off += cm;
+    }
+    if (out_mse) *out_mse = (float)(mse / (double)n);
+    return RCRE_OK;
+}
+
 /* --- Source: gbdt_infer.c --- */
 /**
  * @file gbdt_infer.c
@@ -10440,6 +20533,177 @@ RCRE_NODISCARD int rcre_ml_gbdt_predict(const RCRE_GBDTModel* model,
         }
     }
 
+    return RCRE_OK;
+}
+
+/* --- Source: forest.c --- */
+/**
+ * @file forest.c
+ * @brief Random Forest Binary Classifier (Bagging + Random Feature Subset Gini Split, ISO C23)
+ */
+
+#include <math.h>
+#include <string.h>
+
+static uint64_t rf_splitmix64(uint64_t* state) {
+    uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static size_t rf_build_tree(
+    RCRE_RandomForest* rf,
+    size_t max_nodes,
+    const float* X,
+    const float* y,
+    size_t D,
+    size_t* sample_idx,
+    size_t n_samples,
+    size_t depth,
+    size_t max_depth,
+    size_t mtry,
+    uint64_t* rng
+) {
+    size_t node_id = rf->num_nodes++;
+    RCRE_RFNode* nd = &rf->nodes[node_id];
+    memset(nd, 0, sizeof(*nd));
+
+    float pos = 0.0f;
+    for (size_t i = 0; i < n_samples; ++i) pos += (y[sample_idx[i]] > 0.5f) ? 1.0f : 0.0f;
+    float p = (n_samples > 0) ? (pos / (float)n_samples) : 0.5f;
+    nd->leaf_prob = p;
+    nd->feature_idx = -1;
+    nd->left = -1;
+    nd->right = -1;
+
+    if (depth >= max_depth || n_samples < 4 || p <= 0.0f || p >= 1.0f || rf->num_nodes + 2 >= max_nodes) {
+        return node_id;
+    }
+
+    float best_gini = 1e30f;
+    int32_t best_feat = -1;
+    float best_thresh = 0.0f;
+
+    for (size_t f_try = 0; f_try < mtry; ++f_try) {
+        size_t feat = (size_t)(rf_splitmix64(rng) % D);
+        /* Evaluate up to 8 threshold quantile probes from sample subset */
+        for (int probe = 0; probe < 8; ++probe) {
+            size_t ref = sample_idx[(size_t)(rf_splitmix64(rng) % n_samples)];
+            float thr = X[ref * D + feat];
+            size_t nl = 0, nr = 0;
+            float pl = 0.0f, pr = 0.0f;
+            for (size_t i = 0; i < n_samples; ++i) {
+                size_t si = sample_idx[i];
+                float label = (y[si] > 0.5f) ? 1.0f : 0.0f;
+                if (X[si * D + feat] <= thr) { nl++; pl += label; }
+                else { nr++; pr += label; }
+            }
+            if (nl == 0 || nr == 0) continue;
+            float ql = pl / (float)nl;
+            float qr = pr / (float)nr;
+            float gl = 2.0f * ql * (1.0f - ql);
+            float gr = 2.0f * qr * (1.0f - qr);
+            float gini = ((float)nl * gl + (float)nr * gr) / (float)n_samples;
+            if (gini < best_gini) {
+                best_gini = gini;
+                best_feat = (int32_t)feat;
+                best_thresh = thr;
+            }
+        }
+    }
+
+    if (best_feat < 0) return node_id;
+
+    /* Partition sample_idx in-place */
+    size_t l = 0, r = n_samples;
+    while (l < r) {
+        if (X[sample_idx[l] * D + (size_t)best_feat] <= best_thresh) {
+            l++;
+        } else {
+            r--;
+            size_t tmp = sample_idx[l];
+            sample_idx[l] = sample_idx[r];
+            sample_idx[r] = tmp;
+        }
+    }
+    if (l == 0 || l == n_samples) return node_id;
+
+    nd->feature_idx = best_feat;
+    nd->threshold   = best_thresh;
+    size_t left_id  = rf_build_tree(rf, max_nodes, X, y, D, sample_idx, l, depth + 1U, max_depth, mtry, rng);
+    size_t right_id = rf_build_tree(rf, max_nodes, X, y, D, sample_idx + l, n_samples - l, depth + 1U, max_depth, mtry, rng);
+    rf->nodes[node_id].left  = (int32_t)left_id;
+    rf->nodes[node_id].right = (int32_t)right_id;
+    return node_id;
+}
+
+RCRE_NODISCARD int rcre_ml_rf_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
+                                  size_t num_trees, size_t max_depth, uint64_t seed,
+                                  RCRE_Arena* arena, RCRE_RandomForest* out_rf) {
+    if (!X || !X->data || !y || !y->data || !arena || !out_rf || num_trees == 0 || max_depth == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (X->ndim != 2 || y->ndim < 1 || y->shape[0] != X->shape[0]) return RCRE_ERR_SHAPE_MISMATCH;
+
+    size_t N = X->shape[0], D = X->shape[1];
+    size_t mtry = (size_t)ceil(sqrt((double)D));
+    if (mtry == 0) mtry = 1;
+    if (max_depth > 10) max_depth = 10;
+
+    size_t max_per_tree = (1ULL << (max_depth + 1U));
+    size_t total_cap = num_trees * max_per_tree;
+
+    memset(out_rf, 0, sizeof(*out_rf));
+    out_rf->nodes        = (RCRE_RFNode*)rcre_arena_alloc(arena, total_cap * sizeof(RCRE_RFNode), 16);
+    out_rf->tree_roots   = (size_t*)rcre_arena_alloc(arena, num_trees * sizeof(size_t), 16);
+    out_rf->num_trees    = num_trees;
+    out_rf->num_features = D;
+    out_rf->max_depth    = max_depth;
+    if (!out_rf->nodes || !out_rf->tree_roots) return RCRE_ERR_OUT_OF_MEMORY;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(arena);
+    size_t* bag = (size_t*)rcre_arena_alloc(arena, N * sizeof(size_t), 16);
+    if (!bag) { rcre_arena_temp_end(tmp); return RCRE_ERR_OUT_OF_MEMORY; }
+
+    const float* Xd = (const float*)X->data;
+    const float* yd = (const float*)y->data;
+    if (seed == 0) seed = 0x123456789ABCDEF0ULL;
+
+    for (size_t t = 0; t < num_trees; ++t) {
+        for (size_t i = 0; i < N; ++i) bag[i] = (size_t)(rf_splitmix64(&seed) % N);
+        out_rf->tree_roots[t] = rf_build_tree(out_rf, total_cap, Xd, yd, D, bag, N, 0, max_depth, mtry, &seed);
+    }
+
+    rcre_arena_temp_end(tmp);
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_ml_rf_predict(const RCRE_RandomForest* rf, const RCRE_Tensor* X, RCRE_Tensor* out_probs) {
+    if (!rf || !rf->nodes || !X || !X->data || !out_probs || !out_probs->data) return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || X->shape[1] != rf->num_features || out_probs->shape[0] != X->shape[0]) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+    const float* Xd = (const float*)X->data;
+    float* pd = (float*)out_probs->data;
+    size_t N = X->shape[0], D = rf->num_features;
+
+    for (size_t i = 0; i < N; ++i) {
+        const float* row = Xd + i * D;
+        float sum = 0.0f;
+        for (size_t t = 0; t < rf->num_trees; ++t) {
+            int32_t cur = (int32_t)rf->tree_roots[t];
+            while (cur >= 0) {
+                const RCRE_RFNode* nd = &rf->nodes[cur];
+                if (nd->feature_idx < 0) {
+                    sum += nd->leaf_prob;
+                    break;
+                }
+                cur = (row[nd->feature_idx] <= nd->threshold) ? nd->left : nd->right;
+            }
+        }
+        pd[i] = sum / (float)rf->num_trees;
+    }
     return RCRE_OK;
 }
 
@@ -10815,6 +21079,1466 @@ RCRE_NODISCARD int rcre_hnsw_search(const RCRE_HNSWIndex* index, const float* qu
         out_ids[i] = index->nodes[W[i].id].id;
         if (out_distances) {
             out_distances[i] = W[i].dist;
+        }
+    }
+
+    return RCRE_OK;
+}
+
+/* --- Source: stat.c --- */
+/**
+ * @file stat.c
+ * @brief RCRE Exploratory Data Analysis & Scientific Statistics Implementation (ISO C23)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+/* ========================================================================= */
+/* 1. Descriptive Summary Statistics (Welford Single-Pass)                   */
+/* ========================================================================= */
+
+static float quickselect_kth(float* a, size_t n, size_t k) {
+    if (n == 0) return 0.0f;
+    if (n == 1) return a[0];
+    if (k >= n) k = n - 1;
+
+    size_t left = 0;
+    size_t right = n - 1;
+
+    while (left < right) {
+        size_t mid = left + (right - left) / 2;
+        float pivot = a[mid];
+        /* Swap pivot with right */
+        a[mid] = a[right];
+        a[right] = pivot;
+
+        size_t store_idx = left;
+        for (size_t i = left; i < right; ++i) {
+            if (a[i] < pivot) {
+                float tmp = a[store_idx];
+                a[store_idx] = a[i];
+                a[i] = tmp;
+                store_idx++;
+            }
+        }
+        a[right] = a[store_idx];
+        a[store_idx] = pivot;
+
+        if (store_idx == k) {
+            return a[k];
+        } else if (k < store_idx) {
+            right = (store_idx > 0) ? (store_idx - 1) : 0;
+        } else {
+            left = store_idx + 1;
+        }
+    }
+    return a[left];
+}
+
+float rcre_stat_quantile(
+    const float* x,
+    size_t n,
+    float q,
+    RCRE_Arena* scratch
+) {
+    if (!x || n == 0 || q < 0.0f || q > 1.0f || !scratch) {
+        return 0.0f;
+    }
+    if (n == 1) {
+        return x[0];
+    }
+
+    RCRE_ArenaTemp tmp_scope = rcre_arena_temp_begin(scratch);
+    float* a = (float*)rcre_arena_alloc(scratch, n * sizeof(float), 64);
+    if (!a) {
+        rcre_arena_temp_end(tmp_scope);
+        return 0.0f;
+    }
+
+    float idx_f = q * (float)(n - 1);
+    size_t lo = (size_t)idx_f;
+    size_t hi = (lo + 1 < n) ? (lo + 1) : lo;
+    float frac = idx_f - (float)lo;
+
+    memcpy(a, x, n * sizeof(float));
+    float val_lo = quickselect_kth(a, n, lo);
+    float val_hi = val_lo;
+
+    if (hi != lo) {
+        memcpy(a, x, n * sizeof(float));
+        val_hi = quickselect_kth(a, n, hi);
+    }
+
+    rcre_arena_temp_end(tmp_scope);
+    return (1.0f - frac) * val_lo + frac * val_hi;
+}
+
+RCRE_StatSummary rcre_stat_describe(
+    const float* x,
+    size_t n,
+    RCRE_Arena* scratch
+) {
+    RCRE_StatSummary out = {0};
+    if (!x || n == 0 || !scratch) {
+        return out;
+    }
+
+    double mean = 0.0;
+    double m2 = 0.0;
+    double m3 = 0.0;
+    double m4 = 0.0;
+    float min_val = x[0];
+    float max_val = x[0];
+    size_t valid_count = 0;
+    size_t null_count = 0;
+
+    for (size_t i = 0; i < n; ++i) {
+        float val = x[i];
+        if (isnan(val)) {
+            null_count++;
+            continue;
+        }
+        if (valid_count == 0 || val < min_val) min_val = val;
+        if (valid_count == 0 || val > max_val) max_val = val;
+
+        valid_count++;
+        double n1 = (double)valid_count;
+        double delta = (double)val - mean;
+        double delta_n = delta / n1;
+        double delta_n2 = delta_n * delta_n;
+        double term1 = delta * delta_n * (double)(valid_count - 1);
+
+        m4 += term1 * delta_n2 * (n1 * n1 - 3.0 * n1 + 3.0) + 6.0 * delta_n2 * m2 - 4.0 * delta_n * m3;
+        m3 += term1 * delta_n * (n1 - 2.0) - 3.0 * delta_n * m2;
+        m2 += term1;
+        mean += delta_n;
+    }
+
+    out.count = valid_count;
+    out.null_count = null_count;
+    out.mean = (float)mean;
+    out.min = min_val;
+    out.max = max_val;
+
+    if (valid_count > 1) {
+        double variance = m2 / (double)(valid_count - 1);
+        out.variance = (float)variance;
+        out.stddev = (float)sqrt(variance);
+
+        if (m2 > 1e-12) {
+            double s = sqrt(m2 / (double)valid_count);
+            out.skewness = (float)((m3 / (double)valid_count) / (s * s * s));
+            out.kurtosis = (float)(((m4 / (double)valid_count) / (s * s * s * s)) - 3.0);
+        }
+    }
+
+    /* Compute quantiles */
+    if (valid_count > 0) {
+        float q25 = rcre_stat_quantile(x, n, 0.25f, scratch);
+        float median = rcre_stat_quantile(x, n, 0.50f, scratch);
+        float q75 = rcre_stat_quantile(x, n, 0.75f, scratch);
+
+        out.q25 = q25;
+        out.median = median;
+        out.q75 = q75;
+        out.iqr = q75 - q25;
+    }
+
+    return out;
+}
+
+/* ========================================================================= */
+/* 2. Covariance & Correlation Matrices                                      */
+/* ========================================================================= */
+
+RCRE_Tensor rcre_stat_cov_matrix(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out_cov = {0};
+    if (!X || !X->data || X->ndim != 2 || X->dtype != RCRE_DTYPE_F32 || !arena) {
+        return out_cov;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (N < 2 || P == 0) return out_cov;
+
+    size_t cov_shape[2] = { P, P };
+    out_cov = rcre_tensor_create(cov_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!out_cov.data) return out_cov;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(arena);
+    float* mean = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    float* X_c = (float*)rcre_arena_alloc(arena, N * P * sizeof(float), 64);
+    if (!mean || !X_c) {
+        rcre_arena_temp_end(tmp);
+        return out_cov;
+    }
+
+    const float* src = (const float*)X->data;
+
+    /* 1. Compute column means */
+    for (size_t j = 0; j < P; ++j) {
+        double sum = 0.0;
+        for (size_t i = 0; i < N; ++i) {
+            sum += (double)src[i * P + j];
+        }
+        mean[j] = (float)(sum / (double)N);
+    }
+
+    /* 2. Center dataset: X_c = X - mean */
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t j = 0; j < P; ++j) {
+            X_c[i * P + j] = src[i * P + j] - mean[j];
+        }
+    }
+
+    /* 3. Covariance: C = (X_c^T * X_c) / (N - 1) */
+    float inv_n1 = 1.0f / (float)(N - 1);
+    float* dst = (float*)out_cov.data;
+
+    for (size_t j = 0; j < P; ++j) {
+        for (size_t k = j; k < P; ++k) {
+            double dot = 0.0;
+            for (size_t i = 0; i < N; ++i) {
+                dot += (double)X_c[i * P + j] * (double)X_c[i * P + k];
+            }
+            float cov_jk = (float)(dot * (double)inv_n1);
+            dst[j * P + k] = cov_jk;
+            dst[k * P + j] = cov_jk;
+        }
+    }
+
+    rcre_arena_temp_end(tmp);
+    return out_cov;
+}
+
+RCRE_Tensor rcre_stat_corr_matrix(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out_corr = {0};
+    if (!X || !arena) {
+        return out_corr;
+    }
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(arena);
+    RCRE_Tensor cov = rcre_stat_cov_matrix(X, arena);
+    if (!cov.data) {
+        rcre_arena_temp_end(tmp);
+        return out_corr;
+    }
+
+    size_t P = X->shape[1];
+    size_t corr_shape[2] = { P, P };
+    out_corr = rcre_tensor_create(corr_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!out_corr.data) {
+        rcre_arena_temp_end(tmp);
+        return out_corr;
+    }
+
+    const float* cov_data = (const float*)cov.data;
+    float* corr_data = (float*)out_corr.data;
+
+    float* stds = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    if (!stds) {
+        rcre_arena_temp_end(tmp);
+        return out_corr;
+    }
+
+    for (size_t j = 0; j < P; ++j) {
+        float var_j = cov_data[j * P + j];
+        stds[j] = (var_j > 1e-12f) ? sqrtf(var_j) : 1e-6f;
+    }
+
+    for (size_t j = 0; j < P; ++j) {
+        for (size_t k = j; k < P; ++k) {
+            if (j == k) {
+                corr_data[j * P + k] = 1.0f;
+            } else {
+                float r = cov_data[j * P + k] / (stds[j] * stds[k]);
+                if (r > 1.0f) r = 1.0f;
+                if (r < -1.0f) r = -1.0f;
+                corr_data[j * P + k] = r;
+                corr_data[k * P + j] = r;
+            }
+        }
+    }
+
+    rcre_arena_temp_end(tmp);
+    return out_corr;
+}
+
+RCRE_Tensor rcre_stat_spearman_matrix(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out_spearman = {0};
+    if (!X || !X->data || X->ndim != 2 || !arena) {
+        return out_spearman;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (N < 2 || P == 0) return out_spearman;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(arena);
+
+    size_t ranked_shape[2] = { N, P };
+    RCRE_Tensor ranked = rcre_tensor_create(ranked_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!ranked.data) {
+        rcre_arena_temp_end(tmp);
+        return out_spearman;
+    }
+
+    const float* src = (const float*)X->data;
+    float* dst = (float*)ranked.data;
+
+    /* Rank each column */
+    for (size_t j = 0; j < P; ++j) {
+        for (size_t i = 0; i < N; ++i) {
+            float val_i = src[i * P + j];
+            size_t rank = 1;
+            for (size_t k = 0; k < N; ++k) {
+                if (src[k * P + j] < val_i) {
+                    rank++;
+                }
+            }
+            dst[i * P + j] = (float)rank;
+        }
+    }
+
+    out_spearman = rcre_stat_corr_matrix(&ranked, arena);
+    rcre_arena_temp_end(tmp);
+    return out_spearman;
+}
+
+/* ========================================================================= */
+/* 3. Principal Component Analysis (PCA)                                     */
+/* ========================================================================= */
+
+RCRE_PCA rcre_pca_fit(
+    const RCRE_Tensor* X,
+    size_t n_components,
+    RCRE_Arena* arena
+) {
+    RCRE_PCA out_pca = {0};
+    if (!X || !X->data || X->ndim != 2 || n_components == 0 || !arena) {
+        return out_pca;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (n_components > P || N < 2) {
+        return out_pca;
+    }
+
+    size_t comp_shape[2] = { n_components, P };
+    out_pca.components = rcre_tensor_create(comp_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    out_pca.explained_variance = (float*)rcre_arena_alloc(arena, n_components * sizeof(float), 64);
+    out_pca.explained_variance_ratio = (float*)rcre_arena_alloc(arena, n_components * sizeof(float), 64);
+    out_pca.mean = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    out_pca.n_components = n_components;
+    out_pca.n_features = P;
+
+    if (!out_pca.components.data || !out_pca.explained_variance || !out_pca.explained_variance_ratio || !out_pca.mean) {
+        return out_pca;
+    }
+
+    /* 1. Compute means */
+    const float* src = (const float*)X->data;
+    for (size_t j = 0; j < P; ++j) {
+        double sum = 0.0;
+        for (size_t i = 0; i < N; ++i) {
+            sum += (double)src[i * P + j];
+        }
+        out_pca.mean[j] = (float)(sum / (double)N);
+    }
+
+    /* 2. Covariance matrix C */
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(arena);
+    RCRE_Tensor cov = rcre_stat_cov_matrix(X, arena);
+    if (!cov.data) {
+        rcre_arena_temp_end(tmp);
+        return out_pca;
+    }
+
+    float* C = (float*)rcre_arena_alloc(arena, P * P * sizeof(float), 64);
+    if (!C) {
+        rcre_arena_temp_end(tmp);
+        return out_pca;
+    }
+    memcpy(C, cov.data, P * P * sizeof(float));
+
+    /* Compute total variance (trace of covariance) */
+    double total_variance = 0.0;
+    for (size_t j = 0; j < P; ++j) {
+        total_variance += (double)C[j * P + j];
+    }
+    if (total_variance <= 1e-12) total_variance = 1.0;
+
+    /* 3. Power Iteration with Hotelling Deflation for top K components */
+    float* v = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    float* v_next = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    if (!v || !v_next) {
+        rcre_arena_temp_end(tmp);
+        return out_pca;
+    }
+
+    float* comp_data = (float*)out_pca.components.data;
+
+    for (size_t k = 0; k < n_components; ++k) {
+        /* Initialize deterministic random vector */
+        uint64_t seed = (uint64_t)(k * 1337 + 7);
+        for (size_t j = 0; j < P; ++j) {
+            seed = seed * 6364136223846793005ULL + 1ULL;
+            v[j] = (float)((double)(seed >> 33) / 2147483648.0) - 0.5f;
+        }
+
+        /* Power iterations */
+        for (int iter = 0; iter < 100; ++iter) {
+            double norm = 0.0;
+            for (size_t j = 0; j < P; ++j) {
+                double dot = 0.0;
+                for (size_t m = 0; m < P; ++m) {
+                    dot += (double)C[j * P + m] * (double)v[m];
+                }
+                v_next[j] = (float)dot;
+                norm += dot * dot;
+            }
+            norm = sqrt(norm);
+            if (norm <= 1e-12) break;
+            for (size_t j = 0; j < P; ++j) {
+                v[j] = (float)(v_next[j] / norm);
+            }
+        }
+
+        /* Compute eigenvalue lambda_k = v^T * C * v */
+        double lambda = 0.0;
+        for (size_t j = 0; j < P; ++j) {
+            double dot = 0.0;
+            for (size_t m = 0; m < P; ++m) {
+                dot += (double)C[j * P + m] * (double)v[m];
+            }
+            lambda += (double)v[j] * dot;
+        }
+
+        out_pca.explained_variance[k] = (float)lambda;
+        out_pca.explained_variance_ratio[k] = (float)(lambda / total_variance);
+
+        /* Canonicalize eigenvector sign (svd_flip: largest-magnitude element positive) */
+        size_t max_j = 0;
+        for (size_t j = 1; j < P; ++j) {
+            if (fabsf(v[j]) > fabsf(v[max_j])) max_j = j;
+        }
+        if (v[max_j] < 0.0f) {
+            for (size_t j = 0; j < P; ++j) v[j] = -v[j];
+        }
+
+        /* Save component vector */
+        memcpy(comp_data + k * P, v, P * sizeof(float));
+
+        /* Deflate: C = C - lambda * v * v^T */
+        for (size_t j = 0; j < P; ++j) {
+            for (size_t m = 0; m < P; ++m) {
+                C[j * P + m] -= (float)(lambda * (double)v[j] * (double)v[m]);
+            }
+        }
+    }
+
+    rcre_arena_temp_end(tmp);
+    return out_pca;
+}
+
+RCRE_Tensor rcre_pca_transform(
+    const RCRE_PCA* pca,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out_projected = {0};
+    if (!pca || !X || !X->data || X->ndim != 2 || !arena) {
+        return out_projected;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    size_t K = pca->n_components;
+    if (P != pca->n_features) return out_projected;
+
+    size_t out_shape[2] = { N, K };
+    out_projected = rcre_tensor_create(out_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!out_projected.data) return out_projected;
+
+    const float* src = (const float*)X->data;
+    const float* comp = (const float*)pca->components.data;
+    float* dst = (float*)out_projected.data;
+
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t k = 0; k < K; ++k) {
+            double dot = 0.0;
+            for (size_t j = 0; j < P; ++j) {
+                double centered = (double)src[i * P + j] - (double)pca->mean[j];
+                dot += centered * (double)comp[k * P + j];
+            }
+            dst[i * K + k] = (float)dot;
+        }
+    }
+
+    return out_projected;
+}
+
+/* --- Source: prep.c --- */
+/**
+ * @file prep.c
+ * @brief RCRE Preprocessing & Feature Engineering Implementation (ISO C23)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+/* ========================================================================= */
+/* 1. StandardScaler                                                         */
+/* ========================================================================= */
+
+RCRE_PrepStandardScaler rcre_prep_standard_scaler_fit(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_PrepStandardScaler res = {0};
+    if (!X || !X->data || X->ndim != 2 || X->dtype != RCRE_DTYPE_F32 || !arena) {
+        return res;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (N < 2 || P == 0) return res;
+
+    res.mean = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    res.scale = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    res.n_features = P;
+    if (!res.mean || !res.scale) return res;
+
+    const float* src = (const float*)X->data;
+
+    for (size_t j = 0; j < P; ++j) {
+        double sum = 0.0;
+        for (size_t i = 0; i < N; ++i) {
+            sum += (double)src[i * P + j];
+        }
+        double mean = sum / (double)N;
+        res.mean[j] = (float)mean;
+
+        double sum_sq = 0.0;
+        for (size_t i = 0; i < N; ++i) {
+            double d = (double)src[i * P + j] - mean;
+            sum_sq += d * d;
+        }
+        double var = sum_sq / (double)(N - 1);
+        double std_val = (var > 1e-12) ? sqrt(var) : 1e-6;
+        res.scale[j] = (float)(1.0 / std_val);
+    }
+
+    return res;
+}
+
+RCRE_Tensor rcre_prep_standard_scaler_transform(
+    const RCRE_PrepStandardScaler* scaler,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out = {0};
+    if (!scaler || !X || !X->data || X->ndim != 2 || !arena) {
+        return out;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (P != scaler->n_features) return out;
+
+    size_t out_shape[2] = { N, P };
+    out = rcre_tensor_create(out_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!out.data) return out;
+
+    const float* src = (const float*)X->data;
+    float* dst = (float*)out.data;
+
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t j = 0; j < P; ++j) {
+            dst[i * P + j] = (src[i * P + j] - scaler->mean[j]) * scaler->scale[j];
+        }
+    }
+
+    return out;
+}
+
+/* ========================================================================= */
+/* 2. MinMaxScaler                                                           */
+/* ========================================================================= */
+
+RCRE_PrepMinMaxScaler rcre_prep_minmax_scaler_fit(
+    const RCRE_Tensor* X,
+    float feature_min,
+    float feature_max,
+    RCRE_Arena* arena
+) {
+    RCRE_PrepMinMaxScaler res = {0};
+    if (!X || !X->data || X->ndim != 2 || feature_min >= feature_max || !arena) {
+        return res;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (N == 0 || P == 0) return res;
+
+    res.min = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    res.scale = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    res.feature_min = feature_min;
+    res.feature_max = feature_max;
+    res.n_features = P;
+    if (!res.min || !res.scale) return res;
+
+    const float* src = (const float*)X->data;
+    float range_target = feature_max - feature_min;
+
+    for (size_t j = 0; j < P; ++j) {
+        float f_min = src[0 * P + j];
+        float f_max = src[0 * P + j];
+        for (size_t i = 1; i < N; ++i) {
+            float val = src[i * P + j];
+            if (val < f_min) f_min = val;
+            if (val > f_max) f_max = val;
+        }
+        res.min[j] = f_min;
+        float diff = f_max - f_min;
+        res.scale[j] = (diff > 1e-8f) ? (range_target / diff) : 1.0f;
+    }
+
+    return res;
+}
+
+RCRE_Tensor rcre_prep_minmax_scaler_transform(
+    const RCRE_PrepMinMaxScaler* scaler,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out = {0};
+    if (!scaler || !X || !X->data || X->ndim != 2 || !arena) {
+        return out;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (P != scaler->n_features) return out;
+
+    size_t out_shape[2] = { N, P };
+    out = rcre_tensor_create(out_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!out.data) return out;
+
+    const float* src = (const float*)X->data;
+    float* dst = (float*)out.data;
+
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t j = 0; j < P; ++j) {
+            dst[i * P + j] = (src[i * P + j] - scaler->min[j]) * scaler->scale[j] + scaler->feature_min;
+        }
+    }
+
+    return out;
+}
+
+/* ========================================================================= */
+/* 3. RobustScaler (Median & IQR)                                            */
+/* ========================================================================= */
+
+RCRE_RobustScaler rcre_prep_robust_scaler_fit(
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_RobustScaler res = {0};
+    if (!X || !X->data || X->ndim != 2 || !arena) {
+        return res;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (N < 2 || P == 0) return res;
+
+    res.center = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    res.scale = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    res.n_features = P;
+    if (!res.center || !res.scale) return res;
+
+    RCRE_ArenaTemp scratch = rcre_arena_temp_begin(arena);
+    float* col_buf = (float*)rcre_arena_alloc(arena, N * sizeof(float), 64);
+    const float* src = (const float*)X->data;
+
+    for (size_t j = 0; j < P; ++j) {
+        for (size_t i = 0; i < N; ++i) {
+            col_buf[i] = src[i * P + j];
+        }
+        float q25 = rcre_stat_quantile(col_buf, N, 0.25f, arena);
+        float med = rcre_stat_quantile(col_buf, N, 0.50f, arena);
+        float q75 = rcre_stat_quantile(col_buf, N, 0.75f, arena);
+
+        res.center[j] = med;
+        float iqr = q75 - q25;
+        res.scale[j] = (iqr > 1e-8f) ? (1.0f / iqr) : 1.0f;
+    }
+
+    rcre_arena_temp_end(scratch);
+    return res;
+}
+
+RCRE_Tensor rcre_prep_robust_scaler_transform(
+    const RCRE_RobustScaler* scaler,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out = {0};
+    if (!scaler || !X || !X->data || X->ndim != 2 || !arena) {
+        return out;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (P != scaler->n_features) return out;
+
+    size_t out_shape[2] = { N, P };
+    out = rcre_tensor_create(out_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!out.data) return out;
+
+    const float* src = (const float*)X->data;
+    float* dst = (float*)out.data;
+
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t j = 0; j < P; ++j) {
+            dst[i * P + j] = (src[i * P + j] - scaler->center[j]) * scaler->scale[j];
+        }
+    }
+
+    return out;
+}
+
+/* ========================================================================= */
+/* 4. SimpleImputer (Mean, Median, Constant)                                 */
+/* ========================================================================= */
+
+RCRE_SimpleImputer rcre_prep_simple_imputer_fit(
+    const RCRE_Tensor* X,
+    RCRE_ImputeStrategy strategy,
+    RCRE_Arena* arena
+) {
+    RCRE_SimpleImputer res = {0};
+    if (!X || !X->data || X->ndim != 2 || !arena) {
+        return res;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (N == 0 || P == 0) return res;
+
+    res.strategy = strategy;
+    res.statistics = (float*)rcre_arena_alloc(arena, P * sizeof(float), 64);
+    res.n_features = P;
+    if (!res.statistics) return res;
+
+    const float* src = (const float*)X->data;
+    RCRE_ArenaTemp scratch = rcre_arena_temp_begin(arena);
+    float* valid_vals = (float*)rcre_arena_alloc(arena, N * sizeof(float), 64);
+
+    for (size_t j = 0; j < P; ++j) {
+        size_t n_valid = 0;
+        double sum = 0.0;
+        for (size_t i = 0; i < N; ++i) {
+            float val = src[i * P + j];
+            if (!isnan(val)) {
+                valid_vals[n_valid++] = val;
+                sum += (double)val;
+            }
+        }
+
+        if (n_valid == 0) {
+            res.statistics[j] = 0.0f;
+        } else if (strategy == RCRE_IMPUTE_MEAN) {
+            res.statistics[j] = (float)(sum / (double)n_valid);
+        } else if (strategy == RCRE_IMPUTE_MEDIAN) {
+            res.statistics[j] = rcre_stat_quantile(valid_vals, n_valid, 0.5f, arena);
+        } else {
+            res.statistics[j] = 0.0f;
+        }
+    }
+
+    rcre_arena_temp_end(scratch);
+    return res;
+}
+
+RCRE_Tensor rcre_prep_simple_imputer_transform(
+    const RCRE_SimpleImputer* imputer,
+    const RCRE_Tensor* X,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out = {0};
+    if (!imputer || !X || !X->data || X->ndim != 2 || !arena) {
+        return out;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+    if (P != imputer->n_features) return out;
+
+    size_t out_shape[2] = { N, P };
+    out = rcre_tensor_create(out_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!out.data) return out;
+
+    const float* src = (const float*)X->data;
+    float* dst = (float*)out.data;
+
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t j = 0; j < P; ++j) {
+            float val = src[i * P + j];
+            dst[i * P + j] = isnan(val) ? imputer->statistics[j] : val;
+        }
+    }
+
+    return out;
+}
+
+/* ========================================================================= */
+/* 5. One-Hot Encoding                                                       */
+/* ========================================================================= */
+
+RCRE_Tensor rcre_one_hot_encode(
+    const int32_t* categories,
+    size_t n,
+    size_t num_classes,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out = {0};
+    if (!categories || n == 0 || num_classes == 0 || !arena) {
+        return out;
+    }
+
+    size_t out_shape[2] = { n, num_classes };
+    out = rcre_tensor_create(out_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!out.data) return out;
+
+    float* dst = (float*)out.data;
+    memset(dst, 0, n * num_classes * sizeof(float));
+
+    for (size_t i = 0; i < n; ++i) {
+        int32_t cat = categories[i];
+        if (cat >= 0 && (size_t)cat < num_classes) {
+            dst[i * num_classes + (size_t)cat] = 1.0f;
+        }
+    }
+
+    return out;
+}
+
+/* --- Source: metric.c --- */
+/**
+ * @file metric.c
+ * @brief RCRE Model Evaluation Metrics & Cross-Validation Implementation (ISO C23)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+/* ========================================================================= */
+/* 1. Classification Metrics                                                 */
+/* ========================================================================= */
+
+typedef struct ScoreIndex {
+    float   score;
+    float   label;
+    size_t  orig_idx;
+} ScoreIndex;
+
+static int compare_score_desc(const void* a, const void* b) {
+    float sa = ((const ScoreIndex*)a)->score;
+    float sb = ((const ScoreIndex*)b)->score;
+    if (sa > sb) return -1;
+    if (sa < sb) return 1;
+    return 0;
+}
+
+float rcre_metric_roc_auc(
+    const float* y_true,
+    const float* y_score,
+    size_t n,
+    RCRE_Arena* scratch
+) {
+    if (!y_true || !y_score || n == 0 || !scratch) {
+        return 0.5f;
+    }
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    ScoreIndex* items = (ScoreIndex*)rcre_arena_alloc(scratch, n * sizeof(ScoreIndex), alignof(ScoreIndex));
+    if (!items) {
+        rcre_arena_temp_end(tmp);
+        return 0.5f;
+    }
+
+    size_t n_pos = 0;
+    size_t n_neg = 0;
+    for (size_t i = 0; i < n; ++i) {
+        items[i].score = y_score[i];
+        items[i].label = y_true[i];
+        items[i].orig_idx = i;
+        if (y_true[i] > 0.5f) n_pos++;
+        else n_neg++;
+    }
+
+    if (n_pos == 0 || n_neg == 0) {
+        rcre_arena_temp_end(tmp);
+        return 0.5f;
+    }
+
+    /* Sort descending by score */
+    qsort(items, n, sizeof(ScoreIndex), compare_score_desc);
+
+    /* Trapezoidal AUC integration */
+    double fp = 0.0;
+    double tp = 0.0;
+    double prev_fp = 0.0;
+    double prev_tp = 0.0;
+    double auc = 0.0;
+
+    for (size_t i = 0; i < n; ++i) {
+        if (items[i].label > 0.5f) {
+            tp += 1.0;
+        } else {
+            fp += 1.0;
+        }
+
+        if (i + 1 == n || items[i].score != items[i + 1].score) {
+            /* Add trapezoid area */
+            auc += (fp - prev_fp) * (tp + prev_tp) * 0.5;
+            prev_fp = fp;
+            prev_tp = tp;
+        }
+    }
+
+    float result = (float)(auc / (double)(n_pos * n_neg));
+    rcre_arena_temp_end(tmp);
+    return result;
+}
+
+float rcre_metric_pr_auc(
+    const float* y_true,
+    const float* y_score,
+    size_t n,
+    RCRE_Arena* scratch
+) {
+    if (!y_true || !y_score || n == 0 || !scratch) {
+        return 0.0f;
+    }
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    ScoreIndex* items = (ScoreIndex*)rcre_arena_alloc(scratch, n * sizeof(ScoreIndex), alignof(ScoreIndex));
+    if (!items) {
+        rcre_arena_temp_end(tmp);
+        return 0.0f;
+    }
+
+    size_t n_pos = 0;
+    for (size_t i = 0; i < n; ++i) {
+        items[i].score = y_score[i];
+        items[i].label = y_true[i];
+        items[i].orig_idx = i;
+        if (y_true[i] > 0.5f) n_pos++;
+    }
+
+    if (n_pos == 0) {
+        rcre_arena_temp_end(tmp);
+        return 0.0f;
+    }
+
+    qsort(items, n, sizeof(ScoreIndex), compare_score_desc);
+
+    double tp = 0.0;
+    double fp = 0.0;
+    double prev_recall = 0.0;
+    double pr_auc = 0.0;
+
+    for (size_t i = 0; i < n; ++i) {
+        if (items[i].label > 0.5f) tp += 1.0;
+        else fp += 1.0;
+
+        double recall = tp / (double)n_pos;
+        double precision = tp / (tp + fp);
+
+        if (recall > prev_recall) {
+            pr_auc += precision * (recall - prev_recall);
+            prev_recall = recall;
+        }
+    }
+
+    rcre_arena_temp_end(tmp);
+    return (float)pr_auc;
+}
+
+RCRE_Tensor rcre_metric_confusion_matrix(
+    const int32_t* y_true,
+    const int32_t* y_pred,
+    size_t n,
+    size_t num_classes,
+    RCRE_Arena* arena
+) {
+    RCRE_Tensor out_cm = {0};
+    if (!y_true || !y_pred || n == 0 || num_classes == 0 || !arena) {
+        return out_cm;
+    }
+
+    size_t cm_shape[2] = { num_classes, num_classes };
+    out_cm = rcre_tensor_create(cm_shape, 2, RCRE_DTYPE_I32, RCRE_LAYOUT_TABULAR, arena);
+    if (!out_cm.data) return out_cm;
+
+    int32_t* cm = (int32_t*)out_cm.data;
+    memset(cm, 0, num_classes * num_classes * sizeof(int32_t));
+
+    for (size_t i = 0; i < n; ++i) {
+        int32_t t = y_true[i];
+        int32_t p = y_pred[i];
+        if (t >= 0 && (size_t)t < num_classes && p >= 0 && (size_t)p < num_classes) {
+            cm[(size_t)t * num_classes + (size_t)p]++;
+        }
+    }
+
+    return out_cm;
+}
+
+RCRE_ClassificationReport rcre_metric_classification_summary(
+    const int32_t* y_true,
+    const int32_t* y_pred,
+    size_t n,
+    float threshold
+) {
+    (void)threshold;
+    RCRE_ClassificationReport rep = {0};
+    if (!y_true || !y_pred || n == 0) return rep;
+
+    for (size_t i = 0; i < n; ++i) {
+        int32_t t = y_true[i];
+        int32_t p = y_pred[i];
+        if (t == 1 && p == 1) rep.tp++;
+        else if (t == 0 && p == 1) rep.fp++;
+        else if (t == 0 && p == 0) rep.tn++;
+        else if (t == 1 && p == 0) rep.fn++;
+    }
+
+    size_t total = rep.tp + rep.fp + rep.tn + rep.fn;
+    rep.accuracy = (total > 0) ? (float)(rep.tp + rep.tn) / (float)total : 0.0f;
+    rep.precision = (rep.tp + rep.fp > 0) ? (float)rep.tp / (float)(rep.tp + rep.fp) : 0.0f;
+    rep.recall = (rep.tp + rep.fn > 0) ? (float)rep.tp / (float)(rep.tp + rep.fn) : 0.0f;
+    rep.specificity = (rep.tn + rep.fp > 0) ? (float)rep.tn / (float)(rep.tn + rep.fp) : 0.0f;
+
+    float p_plus_r = rep.precision + rep.recall;
+    rep.f1_score = (p_plus_r > 1e-12f) ? (2.0f * rep.precision * rep.recall / p_plus_r) : 0.0f;
+
+    double num = ((double)rep.tp * (double)rep.tn) - ((double)rep.fp * (double)rep.fn);
+    double den = sqrt((double)(rep.tp + rep.fp) * (double)(rep.tp + rep.fn) * (double)(rep.tn + rep.fp) * (double)(rep.tn + rep.fn));
+    rep.mcc = (den > 1e-12) ? (float)(num / den) : 0.0f;
+
+    return rep;
+}
+
+float rcre_metric_log_loss(
+    const float* y_true,
+    const float* y_prob,
+    size_t n
+) {
+    if (!y_true || !y_prob || n == 0) return 0.0f;
+
+    double total_loss = 0.0;
+    const double eps = 1e-7;
+
+    for (size_t i = 0; i < n; ++i) {
+        double y = (double)y_true[i];
+        double p = (double)y_prob[i];
+        if (p < eps) p = eps;
+        if (p > 1.0 - eps) p = 1.0 - eps;
+        total_loss += -(y * log(p) + (1.0 - y) * log(1.0 - p));
+    }
+
+    return (float)(total_loss / (double)n);
+}
+
+/* ========================================================================= */
+/* 2. Regression Metrics                                                     */
+/* ========================================================================= */
+
+float rcre_metric_mse(
+    const float* y_true,
+    const float* y_pred,
+    size_t n
+) {
+    if (!y_true || !y_pred || n == 0) return 0.0f;
+
+    double sum = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        double diff = (double)y_true[i] - (double)y_pred[i];
+        sum += diff * diff;
+    }
+    return (float)(sum / (double)n);
+}
+
+float rcre_metric_rmse(
+    const float* y_true,
+    const float* y_pred,
+    size_t n
+) {
+    return sqrtf(rcre_metric_mse(y_true, y_pred, n));
+}
+
+float rcre_metric_mae(
+    const float* y_true,
+    const float* y_pred,
+    size_t n
+) {
+    if (!y_true || !y_pred || n == 0) return 0.0f;
+
+    double sum = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        sum += fabs((double)y_true[i] - (double)y_pred[i]);
+    }
+    return (float)(sum / (double)n);
+}
+
+float rcre_metric_r2_score(
+    const float* y_true,
+    const float* y_pred,
+    size_t n
+) {
+    if (!y_true || !y_pred || n < 2) return 0.0f;
+
+    double sum_y = 0.0;
+    for (size_t i = 0; i < n; ++i) sum_y += (double)y_true[i];
+    double mean_y = sum_y / (double)n;
+
+    double ss_res = 0.0;
+    double ss_tot = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        double diff = (double)y_true[i] - (double)y_pred[i];
+        double dev = (double)y_true[i] - mean_y;
+        ss_res += diff * diff;
+        ss_tot += dev * dev;
+    }
+
+    if (ss_tot <= 1e-12) return 0.0f;
+    return (float)(1.0 - (ss_res / ss_tot));
+}
+
+/* ========================================================================= */
+/* 3. Unsupervised Clustering Validation                                     */
+/* ========================================================================= */
+
+float rcre_metric_silhouette_score(
+    const RCRE_Tensor* X,
+    const int32_t* labels,
+    RCRE_Arena* scratch
+) {
+    if (!X || !X->data || X->ndim != 2 || !labels || !scratch) {
+        return 0.0f;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+
+    /* Find number of clusters */
+    int32_t max_l = 0;
+    for (size_t i = 0; i < N; ++i) {
+        if (labels[i] > max_l) max_l = labels[i];
+    }
+    size_t n_clusters = (size_t)(max_l + 1);
+    if (n_clusters < 2 || N < n_clusters) return 0.0f;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    const float* src = (const float*)X->data;
+
+    size_t* cluster_sizes = (size_t*)rcre_arena_alloc(scratch, n_clusters * sizeof(size_t), 16);
+    if (!cluster_sizes) {
+        rcre_arena_temp_end(tmp);
+        return 0.0f;
+    }
+    memset(cluster_sizes, 0, n_clusters * sizeof(size_t));
+    for (size_t i = 0; i < N; ++i) {
+        int32_t l = labels[i];
+        if (l >= 0 && (size_t)l < n_clusters) cluster_sizes[(size_t)l]++;
+    }
+
+    double total_silhouette = 0.0;
+    size_t valid_samples = 0;
+
+    for (size_t i = 0; i < N; ++i) {
+        int32_t own_cluster = labels[i];
+        if (own_cluster < 0 || (size_t)own_cluster >= n_clusters) continue;
+        size_t own_size = cluster_sizes[(size_t)own_cluster];
+        if (own_size <= 1) continue;
+
+        double a_i = 0.0;
+        for (size_t j = 0; j < N; ++j) {
+            if (i == j || labels[j] != own_cluster) continue;
+            double dist_sq = 0.0;
+            for (size_t p = 0; p < P; ++p) {
+                double diff = (double)src[i * P + p] - (double)src[j * P + p];
+                dist_sq += diff * diff;
+            }
+            a_i += sqrt(dist_sq);
+        }
+        a_i /= (double)(own_size - 1);
+
+        double b_i = INFINITY;
+        for (size_t k = 0; k < n_clusters; ++k) {
+            if ((int32_t)k == own_cluster || cluster_sizes[k] == 0) continue;
+            double dist_k = 0.0;
+            for (size_t j = 0; j < N; ++j) {
+                if (labels[j] != (int32_t)k) continue;
+                double dist_sq = 0.0;
+                for (size_t p = 0; p < P; ++p) {
+                    double diff = (double)src[i * P + p] - (double)src[j * P + p];
+                    dist_sq += diff * diff;
+                }
+                dist_k += sqrt(dist_sq);
+            }
+            dist_k /= (double)cluster_sizes[k];
+            if (dist_k < b_i) b_i = dist_k;
+        }
+
+        double max_ab = (a_i > b_i) ? a_i : b_i;
+        if (max_ab > 1e-12) {
+            total_silhouette += (b_i - a_i) / max_ab;
+        }
+        valid_samples++;
+    }
+
+    float res = (valid_samples > 0) ? (float)(total_silhouette / (double)valid_samples) : 0.0f;
+    rcre_arena_temp_end(tmp);
+    return res;
+}
+
+float rcre_metric_davies_bouldin_score(
+    const RCRE_Tensor* X,
+    const int32_t* labels,
+    size_t n_clusters,
+    RCRE_Arena* scratch
+) {
+    if (!X || !X->data || X->ndim != 2 || !labels || n_clusters < 2 || !scratch) {
+        return 0.0f;
+    }
+
+    size_t N = X->shape[0];
+    size_t P = X->shape[1];
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    const float* src = (const float*)X->data;
+
+    float* centroids = (float*)rcre_arena_alloc(scratch, n_clusters * P * sizeof(float), 64);
+    size_t* cluster_sizes = (size_t*)rcre_arena_alloc(scratch, n_clusters * sizeof(size_t), 16);
+    float* s_i = (float*)rcre_arena_alloc(scratch, n_clusters * sizeof(float), 16);
+    if (!centroids || !cluster_sizes || !s_i) {
+        rcre_arena_temp_end(tmp);
+        return 0.0f;
+    }
+    memset(centroids, 0, n_clusters * P * sizeof(float));
+    memset(cluster_sizes, 0, n_clusters * sizeof(size_t));
+    memset(s_i, 0, n_clusters * sizeof(float));
+
+    /* 1. Centroid sums */
+    for (size_t i = 0; i < N; ++i) {
+        int32_t l = labels[i];
+        if (l >= 0 && (size_t)l < n_clusters) {
+            cluster_sizes[(size_t)l]++;
+            for (size_t p = 0; p < P; ++p) {
+                centroids[(size_t)l * P + p] += src[i * P + p];
+            }
+        }
+    }
+
+    for (size_t k = 0; k < n_clusters; ++k) {
+        if (cluster_sizes[k] > 0) {
+            for (size_t p = 0; p < P; ++p) {
+                centroids[k * P + p] /= (float)cluster_sizes[k];
+            }
+        }
+    }
+
+    /* 2. Mean intra-cluster distances s_i */
+    for (size_t i = 0; i < N; ++i) {
+        int32_t l = labels[i];
+        if (l >= 0 && (size_t)l < n_clusters && cluster_sizes[(size_t)l] > 0) {
+            double dist_sq = 0.0;
+            for (size_t p = 0; p < P; ++p) {
+                double diff = (double)src[i * P + p] - (double)centroids[(size_t)l * P + p];
+                dist_sq += diff * diff;
+            }
+            s_i[(size_t)l] += (float)sqrt(dist_sq);
+        }
+    }
+    for (size_t k = 0; k < n_clusters; ++k) {
+        if (cluster_sizes[k] > 0) {
+            s_i[k] /= (float)cluster_sizes[k];
+        }
+    }
+
+    /* 3. Compute maximum R_ij */
+    double db_sum = 0.0;
+    for (size_t i = 0; i < n_clusters; ++i) {
+        double max_r = 0.0;
+        for (size_t j = 0; j < n_clusters; ++j) {
+            if (i == j) continue;
+            double d_ij_sq = 0.0;
+            for (size_t p = 0; p < P; ++p) {
+                double diff = (double)centroids[i * P + p] - (double)centroids[j * P + p];
+                d_ij_sq += diff * diff;
+            }
+            double d_ij = sqrt(d_ij_sq);
+            if (d_ij > 1e-12) {
+                double r_ij = ((double)s_i[i] + (double)s_i[j]) / d_ij;
+                if (r_ij > max_r) max_r = r_ij;
+            }
+        }
+        db_sum += max_r;
+    }
+
+    float res = (float)(db_sum / (double)n_clusters);
+    rcre_arena_temp_end(tmp);
+    return res;
+}
+
+/* ========================================================================= */
+/* 4. Cross-Validation & Resampling Protocol                                 */
+/* ========================================================================= */
+
+int rcre_cv_kfold(
+    size_t n_samples,
+    size_t k,
+    bool shuffle,
+    uint64_t seed,
+    RCRE_Arena* arena,
+    RCRE_FoldSplit* out_splits
+) {
+    if (n_samples < k || k < 2 || !arena || !out_splits) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(arena);
+    size_t* indices = (size_t*)rcre_arena_alloc(arena, n_samples * sizeof(size_t), 16);
+    if (!indices) {
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    for (size_t i = 0; i < n_samples; ++i) indices[i] = i;
+
+    if (shuffle) {
+        for (size_t i = n_samples - 1; i > 0; --i) {
+            seed = seed * 6364136223846793005ULL + 1ULL;
+            size_t j = (size_t)((seed >> 33) % (uint64_t)(i + 1));
+            size_t swap_t = indices[i];
+            indices[i] = indices[j];
+            indices[j] = swap_t;
+        }
+    }
+
+    size_t base_fold_sz = n_samples / k;
+    size_t remainder = n_samples % k;
+
+    size_t start = 0;
+    for (size_t f = 0; f < k; ++f) {
+        size_t test_sz = base_fold_sz + (f < remainder ? 1 : 0);
+        size_t train_sz = n_samples - test_sz;
+
+        out_splits[f].test_count = test_sz;
+        out_splits[f].train_count = train_sz;
+        out_splits[f].test_indices = (size_t*)rcre_arena_alloc(arena, test_sz * sizeof(size_t), 16);
+        out_splits[f].train_indices = (size_t*)rcre_arena_alloc(arena, train_sz * sizeof(size_t), 16);
+
+        if (!out_splits[f].test_indices || !out_splits[f].train_indices) {
+            return RCRE_ERR_OUT_OF_MEMORY;
+        }
+
+        size_t train_pos = 0;
+        size_t test_pos = 0;
+
+        for (size_t i = 0; i < n_samples; ++i) {
+            if (i >= start && i < start + test_sz) {
+                out_splits[f].test_indices[test_pos++] = indices[i];
+            } else {
+                out_splits[f].train_indices[train_pos++] = indices[i];
+            }
+        }
+
+        start += test_sz;
+    }
+
+    return RCRE_OK;
+}
+
+int rcre_cv_stratified_kfold(
+    const int32_t* y_labels,
+    size_t n_samples,
+    size_t k,
+    RCRE_Arena* arena,
+    RCRE_FoldSplit* out_splits
+) {
+    if (!y_labels || n_samples < k || k < 2 || !arena || !out_splits) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    int32_t max_class = 0;
+    for (size_t i = 0; i < n_samples; ++i) {
+        if (y_labels[i] > max_class) max_class = y_labels[i];
+    }
+    size_t num_classes = (size_t)(max_class + 1);
+
+    size_t* class_counts = (size_t*)rcre_arena_alloc(arena, num_classes * sizeof(size_t), 16);
+    if (!class_counts) return RCRE_ERR_OUT_OF_MEMORY;
+    memset(class_counts, 0, num_classes * sizeof(size_t));
+
+    for (size_t i = 0; i < n_samples; ++i) {
+        class_counts[(size_t)y_labels[i]]++;
+    }
+
+    for (size_t f = 0; f < k; ++f) {
+        out_splits[f].test_count = 0;
+        out_splits[f].train_count = 0;
+        out_splits[f].test_indices = (size_t*)rcre_arena_alloc(arena, n_samples * sizeof(size_t), 16);
+        out_splits[f].train_indices = (size_t*)rcre_arena_alloc(arena, n_samples * sizeof(size_t), 16);
+        if (!out_splits[f].test_indices || !out_splits[f].train_indices) return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    for (size_t c = 0; c < num_classes; ++c) {
+        size_t c_n = class_counts[c];
+        if (c_n == 0) continue;
+
+        size_t* c_indices = (size_t*)rcre_arena_alloc(arena, c_n * sizeof(size_t), 16);
+        size_t idx = 0;
+        for (size_t i = 0; i < n_samples; ++i) {
+            if ((size_t)y_labels[i] == c) c_indices[idx++] = i;
+        }
+
+        size_t base_sz = c_n / k;
+        size_t rem = c_n % k;
+        size_t start = 0;
+
+        for (size_t f = 0; f < k; ++f) {
+            size_t test_sz = base_sz + (f < rem ? 1 : 0);
+            for (size_t i = 0; i < c_n; ++i) {
+                if (i >= start && i < start + test_sz) {
+                    out_splits[f].test_indices[out_splits[f].test_count++] = c_indices[i];
+                } else {
+                    out_splits[f].train_indices[out_splits[f].train_count++] = c_indices[i];
+                }
+            }
+            start += test_sz;
         }
     }
 
@@ -11338,7 +23062,7 @@ static bool is_f32(const RCRE_Tensor* t) {
 }
 
 RCRE_Tensor* rcre_tensor_alloc(RCRE_Arena* arena, const size_t* shape, uint8_t ndim) {
-    if (arena == nullptr || ndim == 0 || ndim > 4 || shape == nullptr) return nullptr;
+    if (arena == nullptr || ndim == 0 || ndim > RCRE_MAX_DIMS || shape == nullptr) return nullptr;
 
     RCRE_Tensor* t = (RCRE_Tensor*)rcre_arena_alloc(arena, sizeof(RCRE_Tensor), alignof(RCRE_Tensor));
     if (!t) return nullptr;
@@ -11433,7 +23157,7 @@ RCRE_Tensor* rcre_tensor_view(RCRE_Arena* arena, const RCRE_Tensor* src) {
 }
 
 RCRE_Tensor* rcre_tensor_reshape_view(RCRE_Arena* arena, const RCRE_Tensor* src, const size_t* new_shape, uint8_t new_ndim) {
-    if (!src || new_ndim == 0 || new_ndim > 4 || !rcre_tensor_is_contiguous(src)) return nullptr;
+    if (!src || new_ndim == 0 || new_ndim > RCRE_MAX_DIMS || !rcre_tensor_is_contiguous(src)) return nullptr;
     size_t new_numel = 1;
     for (size_t i = 0; i < new_ndim; ++i) {
         new_numel *= new_shape[i];
@@ -11546,7 +23270,9 @@ static RCRE_TensorNode* tape_push_node(RCRE_TensorTape* tape) {
         tape->nodes = new_nodes;
         tape->capacity = new_cap;
     }
-    return &tape->nodes[tape->count++];
+    RCRE_TensorNode* n = &tape->nodes[tape->count++];
+    memset(n, 0, sizeof(*n));
+    return n;
 }
 
 static void backward_matmul(RCRE_TensorNode* node) {
@@ -11737,6 +23463,208 @@ RCRE_Tensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_Tensor* x) {
     node->inputs[0] = x;
     node->num_inputs = 1;
     node->backward = backward_sigmoid;
+    return out;
+}
+
+static void backward_conv2d(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    RCRE_Tensor* w   = node->inputs[1];
+    size_t stride  = node->aux[0];
+    size_t padding = node->aux[1];
+
+    size_t N = x->shape[0], C_in = x->shape[1], H = x->shape[2], W = x->shape[3];
+    size_t C_out = w->shape[0], kH = w->shape[2], kW = w->shape[3];
+    size_t H_out = out->shape[2], W_out = out->shape[3];
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* wd = rcre_tensor_f32_data(w);
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t co = 0; co < C_out; ++co) {
+            for (size_t ho = 0; ho < H_out; ++ho) {
+                for (size_t wo = 0; wo < W_out; ++wo) {
+                    float g = og[((n * C_out + co) * H_out + ho) * W_out + wo];
+                    if (g == 0.0f) continue;
+                    for (size_t ci = 0; ci < C_in; ++ci) {
+                        for (size_t kh = 0; kh < kH; ++kh) {
+                            ptrdiff_t hi = (ptrdiff_t)(ho * stride + kh) - (ptrdiff_t)padding;
+                            if (hi < 0 || hi >= (ptrdiff_t)H) continue;
+                            for (size_t kw = 0; kw < kW; ++kw) {
+                                ptrdiff_t wi = (ptrdiff_t)(wo * stride + kw) - (ptrdiff_t)padding;
+                                if (wi < 0 || wi >= (ptrdiff_t)W) continue;
+                                size_t x_idx = ((n * C_in + ci) * H + (size_t)hi) * W + (size_t)wi;
+                                size_t w_idx = ((co * C_in + ci) * kH + kh) * kW + kw;
+                                if (x->grad) x->grad[x_idx] += g * wd[w_idx];
+                                if (w->grad) w->grad[w_idx] += g * xd[x_idx];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_conv2d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* weight,
+                                  size_t stride, size_t padding) {
+    if (!tape || !is_f32(x) || !is_f32(weight) || x->ndim != 4 || weight->ndim != 4 ||
+        stride == 0 || x->shape[1] != weight->shape[1]) {
+        return nullptr;
+    }
+    size_t N = x->shape[0], C_in = x->shape[1], H = x->shape[2], W = x->shape[3];
+    size_t C_out = weight->shape[0], kH = weight->shape[2], kW = weight->shape[3];
+    if (H + 2U * padding < kH || W + 2U * padding < kW) return nullptr;
+    size_t H_out = (H + 2U * padding - kH) / stride + 1U;
+    size_t W_out = (W + 2U * padding - kW) / stride + 1U;
+
+    size_t out_shape[4] = { N, C_out, H_out, W_out };
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, out_shape, 4);
+    if (!out) return nullptr;
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* wd = rcre_tensor_f32_data(weight);
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t co = 0; co < C_out; ++co) {
+            for (size_t ho = 0; ho < H_out; ++ho) {
+                for (size_t wo = 0; wo < W_out; ++wo) {
+                    float acc = 0.0f;
+                    for (size_t ci = 0; ci < C_in; ++ci) {
+                        for (size_t kh = 0; kh < kH; ++kh) {
+                            ptrdiff_t hi = (ptrdiff_t)(ho * stride + kh) - (ptrdiff_t)padding;
+                            if (hi < 0 || hi >= (ptrdiff_t)H) continue;
+                            for (size_t kw = 0; kw < kW; ++kw) {
+                                ptrdiff_t wi = (ptrdiff_t)(wo * stride + kw) - (ptrdiff_t)padding;
+                                if (wi < 0 || wi >= (ptrdiff_t)W) continue;
+                                acc += xd[((n * C_in + ci) * H + (size_t)hi) * W + (size_t)wi] *
+                                       wd[((co * C_in + ci) * kH + kh) * kW + kw];
+                            }
+                        }
+                    }
+                    od[((n * C_out + co) * H_out + ho) * W_out + wo] = acc;
+                }
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out        = out;
+    node->inputs[0]  = x;
+    node->inputs[1]  = weight;
+    node->num_inputs = 2;
+    node->aux[0]     = stride;
+    node->aux[1]     = padding;
+    node->backward   = backward_conv2d;
+    return out;
+}
+
+static void backward_attention(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* q   = node->inputs[0];
+    RCRE_Tensor* k   = node->inputs[1];
+    RCRE_Tensor* v   = node->inputs[2];
+
+    size_t T = q->shape[0];
+    size_t D = q->shape[1];
+    float scale = 1.0f / sqrtf((float)D);
+    const float* qd = rcre_tensor_f32_data(q);
+    const float* kd = rcre_tensor_f32_data(k);
+    const float* vd = rcre_tensor_f32_data(v);
+    const float* og = out->grad;
+
+    float* P = (float*)malloc(T * sizeof(float));
+    float* dP = (float*)malloc(T * sizeof(float));
+    if (!P || !dP) { free(P); free(dP); return; }
+
+    for (size_t i = 0; i < T; ++i) {
+        float mx = -1e30f;
+        for (size_t j = 0; j < T; ++j) {
+            float s = 0.0f;
+            for (size_t d = 0; d < D; ++d) s += qd[i * D + d] * kd[j * D + d];
+            P[j] = s * scale;
+            if (P[j] > mx) mx = P[j];
+        }
+        float sum = 0.0f;
+        for (size_t j = 0; j < T; ++j) { P[j] = expf(P[j] - mx); sum += P[j]; }
+        for (size_t j = 0; j < T; ++j) P[j] /= sum;
+
+        /* dV += P^T dO, dP[j] = dot(dO[i], V[j]) */
+        float row_dot = 0.0f;
+        for (size_t j = 0; j < T; ++j) {
+            float dp_ij = 0.0f;
+            for (size_t d = 0; d < D; ++d) {
+                dp_ij += og[i * D + d] * vd[j * D + d];
+                if (v->grad) v->grad[j * D + d] += P[j] * og[i * D + d];
+            }
+            dP[j] = dp_ij;
+            row_dot += P[j] * dp_ij;
+        }
+
+        /* dS[j] = P[j] * (dP[j] - sum_k P[k]*dP[k]) */
+        for (size_t j = 0; j < T; ++j) {
+            float dS = P[j] * (dP[j] - row_dot) * scale;
+            for (size_t d = 0; d < D; ++d) {
+                if (q->grad) q->grad[i * D + d] += dS * kd[j * D + d];
+                if (k->grad) k->grad[j * D + d] += dS * qd[i * D + d];
+            }
+        }
+    }
+
+    free(P);
+    free(dP);
+}
+
+RCRE_Tensor* rcre_autograd_attention(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE_Tensor* k, RCRE_Tensor* v) {
+    if (!tape || !is_f32(q) || !is_f32(k) || !is_f32(v) ||
+        q->ndim != 2 || k->ndim != 2 || v->ndim != 2 ||
+        q->shape[0] != k->shape[0] || q->shape[0] != v->shape[0] ||
+        q->shape[1] != k->shape[1] || q->shape[1] != v->shape[1]) {
+        return nullptr;
+    }
+    size_t T = q->shape[0], D = q->shape[1];
+    RCRE_Tensor* out = rcre_tensor_alloc_2d(tape->arena, T, D);
+    if (!out) return nullptr;
+
+    float* P = (float*)malloc(T * sizeof(float));
+    if (!P) return nullptr;
+
+    const float* qd = rcre_tensor_f32_data(q);
+    const float* kd = rcre_tensor_f32_data(k);
+    const float* vd = rcre_tensor_f32_data(v);
+    float* od = rcre_tensor_f32_data(out);
+    float scale = 1.0f / sqrtf((float)D);
+
+    for (size_t i = 0; i < T; ++i) {
+        float mx = -1e30f;
+        for (size_t j = 0; j < T; ++j) {
+            float s = 0.0f;
+            for (size_t d = 0; d < D; ++d) s += qd[i * D + d] * kd[j * D + d];
+            P[j] = s * scale;
+            if (P[j] > mx) mx = P[j];
+        }
+        float sum = 0.0f;
+        for (size_t j = 0; j < T; ++j) { P[j] = expf(P[j] - mx); sum += P[j]; }
+        for (size_t j = 0; j < T; ++j) P[j] /= sum;
+        for (size_t d = 0; d < D; ++d) {
+            float acc = 0.0f;
+            for (size_t j = 0; j < T; ++j) acc += P[j] * vd[j * D + d];
+            od[i * D + d] = acc;
+        }
+    }
+    free(P);
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out        = out;
+    node->inputs[0]  = q;
+    node->inputs[1]  = k;
+    node->inputs[2]  = v;
+    node->num_inputs = 3;
+    node->backward   = backward_attention;
     return out;
 }
 
@@ -12033,6 +23961,75 @@ RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_Tensor*
     return opt;
 }
 
+RCRE_TensorOptim* rcre_tensor_optim_lion_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float beta1, float beta2, float weight_decay) {
+    if (arena == nullptr || params == nullptr || num_params == 0) return nullptr;
+    if (!(lr > 0.0f) || !(beta1 >= 0.0f && beta1 < 1.0f) || !(beta2 >= 0.0f && beta2 < 1.0f) || !(weight_decay >= 0.0f)) return nullptr;
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!optim_is_f32(params[i])) return nullptr;
+    }
+
+    RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
+    if (!opt) return nullptr;
+    memset(opt, 0, sizeof(*opt));
+    opt->type = RCRE_OPTIM_LION;
+    opt->params = params;
+    opt->num_params = num_params;
+    opt->lr = lr;
+    opt->beta1 = beta1;
+    opt->beta2 = beta2;
+    opt->weight_decay = weight_decay;
+
+    opt->m = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+    if (!opt->m) return nullptr;
+    for (size_t p = 0; p < num_params; ++p) {
+        size_t bytes = params[p]->numel * sizeof(float);
+        opt->m[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
+        if (!opt->m[p]) return nullptr;
+        memset(opt->m[p], 0, bytes);
+    }
+    return opt;
+}
+
+RCRE_TensorOptim* rcre_tensor_optim_adafactor_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float weight_decay) {
+    if (arena == nullptr || params == nullptr || num_params == 0 || !(lr > 0.0f) || !(weight_decay >= 0.0f)) return nullptr;
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!optim_is_f32(params[i])) return nullptr;
+    }
+
+    RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
+    if (!opt) return nullptr;
+    memset(opt, 0, sizeof(*opt));
+    opt->type = RCRE_OPTIM_ADAFACTOR;
+    opt->params = params;
+    opt->num_params = num_params;
+    opt->lr = lr;
+    opt->beta2 = 0.8f;
+    opt->eps = 1e-30f;
+    opt->weight_decay = weight_decay;
+
+    opt->m = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+    opt->v = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+    if (!opt->m || !opt->v) return nullptr;
+    for (size_t p = 0; p < num_params; ++p) {
+        RCRE_Tensor* t = params[p];
+        if (t->ndim >= 2) {
+            size_t rows = t->shape[0];
+            size_t cols = t->numel / rows;
+            opt->m[p] = (float*)rcre_arena_alloc(arena, rows * sizeof(float), 64);
+            opt->v[p] = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
+            if (!opt->m[p] || !opt->v[p]) return nullptr;
+            memset(opt->m[p], 0, rows * sizeof(float));
+            memset(opt->v[p], 0, cols * sizeof(float));
+        } else {
+            opt->m[p] = (float*)rcre_arena_alloc(arena, t->numel * sizeof(float), 64);
+            opt->v[p] = nullptr;
+            if (!opt->m[p]) return nullptr;
+            memset(opt->m[p], 0, t->numel * sizeof(float));
+        }
+    }
+    return opt;
+}
+
 void rcre_tensor_optim_step(RCRE_TensorOptim* opt) {
     if (opt == nullptr) return;
 
@@ -12078,6 +24075,80 @@ void rcre_tensor_optim_step(RCRE_TensorOptim* opt) {
                 float v_hat = v_arr[i] / bias_corr2;
 
                 td[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+            }
+        }
+    } else if (opt->type == RCRE_OPTIM_LION) {
+        float b1 = opt->beta1;
+        float b2 = opt->beta2;
+        float lr = opt->lr;
+        float wd = opt->weight_decay;
+        for (size_t p = 0; p < opt->num_params; ++p) {
+            RCRE_Tensor* t = opt->params[p];
+            if (!t->grad) continue;
+            float* td = rcre_tensor_f32_data(t);
+            float* m_arr = opt->m[p];
+            for (size_t i = 0; i < t->numel; ++i) {
+                float g = t->grad[i];
+                float c = b1 * m_arr[i] + (1.0f - b1) * g;
+                float sgn = (c > 0.0f) ? 1.0f : ((c < 0.0f) ? -1.0f : 0.0f);
+                td[i] -= lr * (sgn + wd * td[i]);
+                m_arr[i] = b2 * m_arr[i] + (1.0f - b2) * g;
+            }
+        }
+    } else if (opt->type == RCRE_OPTIM_ADAFACTOR) {
+        opt->step_count++;
+        float b2 = 1.0f - powf((float)opt->step_count, -0.8f);
+        if (b2 < 0.0f) b2 = 0.0f;
+        float lr = opt->lr;
+        float wd = opt->weight_decay;
+        for (size_t p = 0; p < opt->num_params; ++p) {
+            RCRE_Tensor* t = opt->params[p];
+            if (!t->grad) continue;
+            float* td = rcre_tensor_f32_data(t);
+            if (t->ndim >= 2) {
+                size_t rows = t->shape[0];
+                size_t cols = t->numel / rows;
+                float* r_fac = opt->m[p];
+                float* c_fac = opt->v[p];
+                for (size_t r = 0; r < rows; ++r) {
+                    float rmean = 0.0f;
+                    for (size_t c = 0; c < cols; ++c) {
+                        float g = t->grad[r * cols + c];
+                        rmean += g * g + 1e-30f;
+                    }
+                    rmean /= (float)cols;
+                    r_fac[r] = b2 * r_fac[r] + (1.0f - b2) * rmean;
+                }
+                for (size_t c = 0; c < cols; ++c) {
+                    float cmean = 0.0f;
+                    for (size_t r = 0; r < rows; ++r) {
+                        float g = t->grad[r * cols + c];
+                        cmean += g * g + 1e-30f;
+                    }
+                    cmean /= (float)rows;
+                    c_fac[c] = b2 * c_fac[c] + (1.0f - b2) * cmean;
+                }
+                float mean_r = 0.0f;
+                for (size_t r = 0; r < rows; ++r) mean_r += r_fac[r];
+                mean_r /= (float)rows;
+                if (mean_r < 1e-30f) mean_r = 1e-30f;
+
+                for (size_t r = 0; r < rows; ++r) {
+                    for (size_t c = 0; c < cols; ++c) {
+                        float v_est = (r_fac[r] * c_fac[c]) / mean_r;
+                        size_t idx = r * cols + c;
+                        td[idx] -= lr * wd * td[idx];
+                        td[idx] -= lr * (t->grad[idx] / sqrtf(v_est + 1e-12f));
+                    }
+                }
+            } else {
+                float* v_arr = opt->m[p];
+                for (size_t i = 0; i < t->numel; ++i) {
+                    float g = t->grad[i];
+                    v_arr[i] = b2 * v_arr[i] + (1.0f - b2) * (g * g + 1e-30f);
+                    td[i] -= lr * wd * td[i];
+                    td[i] -= lr * (g / sqrtf(v_arr[i] + 1e-12f));
+                }
             }
         }
     }
@@ -12177,136 +24248,38 @@ static bool data_is_f32(const RCRE_Tensor* t) {
 }
 
 /* ========================================================================= */
-/* Dynamic line reader (lines may exceed any fixed stack buffer)             */
+/* High-Throughput Memory-Mapped & SIMD-Accelerated CSV Loader               */
 /* ========================================================================= */
-
-typedef struct {
-    char*  buf;
-    size_t cap;
-    int    done; /* 1 when a line was fully read */
-} csv_line_t;
-
-static void csv_line_free(csv_line_t* ln) {
-    if (ln->buf) { free(ln->buf); ln->buf = nullptr; ln->cap = 0; }
-}
-
-/* Reads one full line (without the trailing newline). Returns 1 on success,
- * 0 at EOF. Grows the buffer as needed so arbitrarily long rows parse intact. */
-static int csv_line_read(FILE* f, csv_line_t* ln) {
-    size_t len = 0;
-    int c;
-    ln->done = 1;
-
-    if (ln->cap == 0) {
-        ln->cap = 4096;
-        ln->buf = (char*)malloc(ln->cap);
-        if (!ln->buf) return 0;
-    }
-
-    while ((c = fgetc(f)) != EOF) {
-        if (c == '\n') break;
-        if (c == '\r') continue;
-        if (len + 1 >= ln->cap) {
-            size_t new_cap = ln->cap * 2;
-            char* nb = (char*)realloc(ln->buf, new_cap);
-            if (!nb) { ln->buf = nullptr; ln->cap = 0; ln->done = 0; return 0; }
-            ln->buf = nb;
-            ln->cap = new_cap;
-        }
-        ln->buf[len++] = (char)c;
-    }
-    if (c == EOF && len == 0) {
-        ln->done = 0; /* EOF before any content of this line */
-        return 0;
-    }
-    ln->buf[len] = '\0';
-    return 1;
-}
 
 RCRE_Tensor* rcre_data_load_csv(RCRE_Arena* arena, const char* filepath, bool skip_header, size_t max_rows) {
     if (arena == nullptr || filepath == nullptr) return nullptr;
-    FILE* f = fopen(filepath, "r");
-    if (!f) return nullptr;
 
-    csv_line_t line = { nullptr, 0, 0 };
-
-    if (skip_header && !csv_line_read(f, &line)) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-
-    /* Column count comes from the first data row. The rewind position must
-     * be captured BEFORE reading it, so the parse pass sees the same start. */
-    long first_data_pos = ftell(f);
-    int have_first = csv_line_read(f, &line);
-    if (!have_first) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-    int c0 = 0;
-    char* save = nullptr;
-    char* tok = strtok_r(line.buf, ",\t", &save);
-    while (tok != nullptr) { c0++; tok = strtok_r(nullptr, ",\t", &save); }
-    if (c0 == 0) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-    size_t cols = (size_t)c0;
-
-    size_t rows = 1;
-    if (max_rows == 0 || rows < max_rows) {
-        int rc;
-        while ((rc = csv_line_read(f, &line)) != 0) {
-            rows++;
-            if (max_rows > 0 && rows >= max_rows) break;
-        }
-        (void)rc;
-    }
-    if (rows == 0) {
-        csv_line_free(&line);
-        fclose(f);
-        return nullptr;
-    }
-
-    fseek(f, first_data_pos, SEEK_SET);
-
-    RCRE_Tensor* t = rcre_tensor_alloc_2d(arena, rows, cols);
+    RCRE_ArenaTemp checkpoint = rcre_arena_temp_begin(arena);
+    RCRE_Tensor* t = (RCRE_Tensor*)rcre_arena_alloc(arena, sizeof(RCRE_Tensor), alignof(RCRE_Tensor));
     if (!t) {
-        csv_line_free(&line);
-        fclose(f);
+        rcre_arena_temp_end(checkpoint);
         return nullptr;
     }
-    float* td = rcre_tensor_f32_data(t);
 
-    /* Parse pass: every row must carry exactly `cols` fields. Ragged or
-     * truncated rows are a data error -> reject the whole file (fail fast
-     * instead of silently zero-filling missing values). */
-    size_t r = 0;
-    csv_line_read(f, &line);
-    for (;;) {
-        size_t c = 0;
-        save = nullptr;
-        tok = strtok_r(line.buf, ",\t", &save);
-        while (tok != nullptr) {
-            if (c >= cols) break;
-            td[r * cols + c] = (float)atof(tok);
-            c++;
-            tok = strtok_r(nullptr, ",\t", &save);
-        }
-        if (c != cols) {
-            csv_line_free(&line);
-            fclose(f);
-            return nullptr;
-        }
-        if (++r >= rows) break;
-        if (!csv_line_read(f, &line)) break;
+    RCRE_CSVOptions opts = {
+        .delimiter      = 0, /* Auto: ',' or '\t' */
+        .skip_header    = skip_header,
+        .strict_numbers = false,
+        .max_rows       = max_rows,
+        .pool           = nullptr
+    };
+
+    if (rcre_io_load_csv_ex(filepath, &opts, arena, t) != RCRE_OK) {
+        rcre_arena_temp_end(checkpoint);
+        return nullptr;
     }
 
-    csv_line_free(&line);
-    fclose(f);
+    t->grad = (float*)rcre_arena_alloc(arena, t->numel * sizeof(float), 64);
+    if (!t->grad) {
+        rcre_arena_temp_end(checkpoint);
+        return nullptr;
+    }
+    memset(t->grad, 0, t->numel * sizeof(float));
     return t;
 }
 
@@ -12732,6 +24705,196 @@ bool rcre_vis_export_3d_clusters_html(const RCRE_Tensor* points, const size_t* a
 
     fclose(f);
     return true;
+}
+
+/* --- Source: vis_ds.c --- */
+/**
+ * @file vis_ds.c
+ * @brief RCRE Data Science Terminal Visualizer Implementation (ISO C23)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+void rcre_vis_terminal_heatmap(
+    const RCRE_Tensor* corr_matrix,
+    const char* const* col_names,
+    size_t p
+) {
+    if (!corr_matrix || !corr_matrix->data || corr_matrix->ndim != 2 || p == 0) {
+        return;
+    }
+
+    const float* mat = (const float*)corr_matrix->data;
+
+    printf("\n📊 Correlation Matrix Heatmap [%zux%zu]:\n", p, p);
+
+    /* Header */
+    printf("        ");
+    for (size_t j = 0; j < p; ++j) {
+        char name[32];
+        if (col_names && col_names[j]) {
+            snprintf(name, sizeof(name), "%-7s", col_names[j]);
+        } else {
+            snprintf(name, sizeof(name), "x%-6zu", j);
+        }
+        printf("%s ", name);
+    }
+    printf("\n");
+
+    for (size_t i = 0; i < p; ++i) {
+        char row_name[32];
+        if (col_names && col_names[i]) {
+            snprintf(row_name, sizeof(row_name), "%-7s", col_names[i]);
+        } else {
+            snprintf(row_name, sizeof(row_name), "x%-6zu", i);
+        }
+        printf("%s ", row_name);
+
+        for (size_t j = 0; j < p; ++j) {
+            float r = mat[i * p + j];
+
+            /* Choose ANSI 256 background color based on r in [-1, 1] */
+            int color_code = 240; /* Gray for zero */
+            if (r > 0.05f) {
+                int intensity = (int)(r * 5.0f);
+                if (intensity > 5) intensity = 5;
+                /* Blues/Cyans: 24 to 39 */
+                color_code = 24 + intensity * 3;
+            } else if (r < -0.05f) {
+                int intensity = (int)(-r * 5.0f);
+                if (intensity > 5) intensity = 5;
+                /* Reds/Oranges: 160 to 196 */
+                color_code = 160 + intensity * 6;
+            }
+
+            printf("\033[48;5;%dm%6.2f \033[0m", color_code, (double)r);
+        }
+        printf("\n");
+    }
+    printf("\n");
+}
+
+void rcre_vis_corr_heatmap(
+    const RCRE_Tensor* corr_matrix,
+    const char* const* col_names
+) {
+    if (!corr_matrix || corr_matrix->ndim != 2) return;
+    rcre_vis_terminal_heatmap(corr_matrix, col_names, corr_matrix->shape[0]);
+}
+
+void rcre_vis_terminal_hist(
+    const float* x,
+    size_t n,
+    size_t num_bins,
+    const char* title
+) {
+    if (!x || n == 0 || num_bins == 0) return;
+    if (num_bins > 32) num_bins = 32;
+
+    float min_v = x[0], max_v = x[0];
+    for (size_t i = 1; i < n; ++i) {
+        if (x[i] < min_v) min_v = x[i];
+        if (x[i] > max_v) max_v = x[i];
+    }
+
+    float range = max_v - min_v;
+    if (range <= 1e-12f) range = 1.0f;
+
+    size_t counts[32] = {0};
+    for (size_t i = 0; i < n; ++i) {
+        size_t b = (size_t)(((x[i] - min_v) / range) * (float)num_bins);
+        if (b >= num_bins) b = num_bins - 1;
+        counts[b]++;
+    }
+
+    size_t max_count = 1;
+    for (size_t b = 0; b < num_bins; ++b) {
+        if (counts[b] > max_count) max_count = counts[b];
+    }
+
+    printf("\n📈 Distribution Histogram: %s [N=%zu, Range: %.2f .. %.2f]\n",
+           title ? title : "Data", n, (double)min_v, (double)max_v);
+
+    const int max_bar_len = 36;
+    for (size_t b = 0; b < num_bins; ++b) {
+        float bin_lo = min_v + (float)b * (range / (float)num_bins);
+        float bin_hi = bin_lo + (range / (float)num_bins);
+
+        int bar_len = (int)(((double)counts[b] / (double)max_count) * (double)max_bar_len);
+
+        printf("[%6.2f..%6.2f] | ", (double)bin_lo, (double)bin_hi);
+        for (int k = 0; k < bar_len; ++k) {
+            printf("█");
+        }
+        printf(" (%zu)\n", counts[b]);
+    }
+    printf("\n");
+}
+
+void rcre_vis_histogram(
+    const float* x,
+    size_t n,
+    size_t num_bins,
+    const char* title
+) {
+    rcre_vis_terminal_hist(x, n, num_bins, title);
+}
+
+void rcre_vis_terminal_boxplot(
+    const RCRE_StatSummary* stats,
+    const char* label
+) {
+    if (!stats) return;
+
+    printf("\n📦 Boxplot: %s [Min: %.2f | Q25: %.2f | Median: %.2f | Q75: %.2f | Max: %.2f]\n",
+           label ? label : "Feature",
+           (double)stats->min, (double)stats->q25,
+           (double)stats->median, (double)stats->q75,
+           (double)stats->max);
+
+    float total_range = stats->max - stats->min;
+    if (total_range <= 1e-12f) total_range = 1.0f;
+
+    const int width = 50;
+    char line[52];
+    memset(line, ' ', width);
+    line[width] = '\0';
+
+    int pos_min = 0;
+    int pos_q25 = (int)(((stats->q25 - stats->min) / total_range) * (float)(width - 1));
+    int pos_med = (int)(((stats->median - stats->min) / total_range) * (float)(width - 1));
+    int pos_q75 = (int)(((stats->q75 - stats->min) / total_range) * (float)(width - 1));
+    int pos_max = width - 1;
+
+    /* Draw whisker 1 */
+    for (int i = pos_min; i < pos_q25; ++i) line[i] = '-';
+    line[pos_min] = '|';
+
+    /* Draw box */
+    line[pos_q25] = '[';
+    for (int i = pos_q25 + 1; i < pos_q75; ++i) line[i] = '=';
+    line[pos_med] = '|';
+    line[pos_q75] = ']';
+
+    /* Draw whisker 2 */
+    for (int i = pos_q75 + 1; i <= pos_max; ++i) line[i] = '-';
+    line[pos_max] = '|';
+
+    printf("  %s\n\n", line);
+}
+
+void rcre_vis_boxplot(
+    const float* x,
+    size_t n,
+    const char* label,
+    RCRE_Arena* scratch
+) {
+    if (!x || n == 0 || !scratch) return;
+    RCRE_StatSummary stats = rcre_stat_describe(x, n, scratch);
+    rcre_vis_terminal_boxplot(&stats, label);
 }
 
 /* --- Source: nn.c --- */
@@ -13347,6 +25510,93 @@ void rcre_gpt_zero_grads(RCRE_GPTModel *model) {
     }
 }
 
+RCRE_NODISCARD int rcre_gpt_bind_weights_zero_copy(
+    RCRE_GPTModel *model,
+    const float *external_params,
+    size_t num_floats
+) {
+    if (!model || !model->blocks || !external_params || num_floats != model->num_params) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (((uintptr_t)external_params & 63U) != 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    float *base = (float*)(uintptr_t)external_params;
+    int V = model->config.vocab_size;
+    int T = model->config.seq_len;
+    int C = model->config.embed_dim;
+    int L = model->config.num_layers;
+
+    size_t offset = 0;
+    model->wte = base + offset; offset += (size_t)V * C;
+    model->wpe = base + offset; offset += (size_t)T * C;
+
+    for (int l = 0; l < L; l++) {
+        map_block_pointers(&model->blocks[l], base, &model->config, &offset);
+    }
+
+    model->ln_f_w = base + offset; offset += (size_t)C;
+    model->ln_f_b = base + offset; offset += (size_t)C;
+    model->head_w = base + offset; offset += (size_t)C * V;
+
+    if (offset != model->num_params) {
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_gpt_save_safetensors(
+    const RCRE_GPTModel *model,
+    const char *filepath,
+    RCRE_Arena *scratch
+) {
+    if (!model || !model->params || !filepath || !scratch || model->num_params == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t shape[1] = { model->num_params };
+    RCRE_Tensor param_view = rcre_tensor_from_buffer(
+        model->params, shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR
+    );
+    const char *names[1] = { "gpt.params" };
+    return rcre_io_safetensors_save(filepath, names, &param_view, 1, scratch);
+}
+
+RCRE_NODISCARD int rcre_gpt_load_safetensors_zero_copy(
+    RCRE_GPTModel *model,
+    const char *filepath,
+    struct RCRE_SafeTensorsArchive *out_archive
+) {
+    if (!model || !filepath || !out_archive) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    int rc = rcre_io_safetensors_open(filepath, out_archive);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    RCRE_Tensor view = {0};
+    rc = rcre_io_safetensors_get_tensor(out_archive, "gpt.params", nullptr, &view);
+    if (rc != RCRE_OK) {
+        rcre_io_safetensors_close(out_archive);
+        return rc;
+    }
+
+    if (view.dtype != RCRE_DTYPE_F32 || view.numel != model->num_params) {
+        rcre_io_safetensors_close(out_archive);
+        return RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    rc = rcre_gpt_bind_weights_zero_copy(model, (const float*)view.data, view.numel);
+    if (rc != RCRE_OK) {
+        rcre_io_safetensors_close(out_archive);
+        return rc;
+    }
+    return RCRE_OK;
+}
+
 void rcre_gpt_free(RCRE_GPTModel *model) {
     if (!model) return;
     if (model->owns_heap) {
@@ -13551,7 +25801,7 @@ void rcre_gpt_backward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inpu
      * fall back to checked malloc/free. No VLAs: the per-block gradient
      * descriptor array is heap/arena scratch for arbitrary layer counts.
      */
-    GPTScratch scratch;
+    GPTScratch scratch = {0};
     gpt_scratch_begin(&scratch, model->arena);
 
     float *d_logits  = gpt_scratch_alloc(&scratch, sizeof(float) * BT * V);
@@ -13743,7 +25993,7 @@ bool rcre_gpt_forward_token(
      * Local buffers via the scratch pool: arena-resident models bump the
      * model's arena (rolled back per token); heap models malloc with checks.
      */
-    GPTScratch scratch;
+    GPTScratch scratch = {0};
     gpt_scratch_begin(&scratch, model->arena);
     float *x        = gpt_scratch_alloc(&scratch, sizeof(float) * C);
     float *x_norm   = gpt_scratch_alloc(&scratch, sizeof(float) * C);
@@ -14312,35 +26562,19 @@ void rcre_bpe_free(RCRE_BPETokenizer *tok) {
 
 
 RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_CharTokenizer *tok, int batch_size, int seq_len) {
-    if (!tok || tok->vocab_size <= 0 || batch_size <= 0 || seq_len < 2) {
-        return nullptr;
-    }
-    FILE *f = fopen(filepath, "rb");
-    if (!f) {
+    if (!filepath || !tok || tok->vocab_size <= 0 || batch_size <= 0 || seq_len < 2) {
         return nullptr;
     }
 
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (file_size <= 0) {
-        fclose(f);
+    RCRE_MappedFile map;
+    if (rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &map) != RCRE_OK) {
         return nullptr;
     }
 
-    char *raw_text = (char*)malloc((size_t)file_size);
-    if (!raw_text) {
-        fclose(f);
-        return nullptr;
-    }
-
-    size_t read_bytes = fread(raw_text, 1, (size_t)file_size, f);
-    fclose(f);
-
+    size_t read_bytes = map.size;
     RCRE_GPTDataLoader *loader = (RCRE_GPTDataLoader*)malloc(sizeof(RCRE_GPTDataLoader));
     if (!loader) {
-        free(raw_text);
+        rcre_io_mmap_close(&map);
         return nullptr;
     }
 
@@ -14349,13 +26583,13 @@ RCRE_GPTDataLoader* rcre_gpt_dataloader_create(const char *filepath, const RCRE_
     loader->current_idx = 0;
     loader->tokens = (int*)malloc(sizeof(int) * read_bytes);
     if (!loader->tokens) {
-        free(raw_text);
+        rcre_io_mmap_close(&map);
         free(loader);
         return nullptr;
     }
 
-    int valid_tokens = rcre_char_tokenizer_encode(tok, raw_text, read_bytes, loader->tokens, (int)read_bytes);
-    free(raw_text);
+    int valid_tokens = rcre_char_tokenizer_encode(tok, (const char*)map.data, read_bytes, loader->tokens, (int)read_bytes);
+    rcre_io_mmap_close(&map);
 
     loader->num_tokens = (size_t)valid_tokens;
     if (loader->num_tokens <= (size_t)(seq_len + 1)) {
@@ -14793,6 +27027,2054 @@ bool rcre_gpt_load_checkpoint(RCRE_GPTModel *model, const char *filepath) {
     rcre_prof_scope_end(&prof_z);
 #endif
     return ok;
+}
+
+/* --- Source: gguf.c --- */
+/**
+ * @file gguf.c
+ * @brief Zero-Copy GGUF v2/v3 Binary Reader & v3 Writer (ISO C23)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+    const uint8_t* p;
+    size_t         len;
+    size_t         pos;
+} RCRE_GGUFCursor;
+
+static inline bool gguf_read_bytes(RCRE_GGUFCursor* c, size_t n, const uint8_t** out) {
+    if (n > c->len - c->pos) return false;
+    *out = c->p + c->pos;
+    c->pos += n;
+    return true;
+}
+
+static inline bool gguf_read_u8(RCRE_GGUFCursor* c, uint8_t* out) {
+    const uint8_t* p = nullptr;
+    if (!gguf_read_bytes(c, 1, &p)) return false;
+    *out = p[0];
+    return true;
+}
+
+static inline bool gguf_read_u16(RCRE_GGUFCursor* c, uint16_t* out) {
+    const uint8_t* p = nullptr;
+    if (!gguf_read_bytes(c, 2, &p)) return false;
+    *out = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    return true;
+}
+
+static inline bool gguf_read_u32(RCRE_GGUFCursor* c, uint32_t* out) {
+    const uint8_t* p = nullptr;
+    if (!gguf_read_bytes(c, 4, &p)) return false;
+    *out = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return true;
+}
+
+static inline bool gguf_read_u64(RCRE_GGUFCursor* c, uint64_t* out) {
+    const uint8_t* p = nullptr;
+    if (!gguf_read_bytes(c, 8, &p)) return false;
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= ((uint64_t)p[i] << (i * 8));
+    *out = v;
+    return true;
+}
+
+static inline bool gguf_read_str(RCRE_GGUFCursor* c, RCRE_Slice* out) {
+    uint64_t slen = 0;
+    if (!gguf_read_u64(c, &slen) || slen > (uint64_t)(c->len - c->pos)) return false;
+    const uint8_t* ptr = nullptr;
+    if (!gguf_read_bytes(c, (size_t)slen, &ptr)) return false;
+    *out = rcre_slice_from_parts(ptr, (size_t)slen);
+    return true;
+}
+
+static size_t gguf_scalar_type_size(RCRE_GGUFType t) {
+    switch (t) {
+        case RCRE_GGUF_TYPE_UINT8:
+        case RCRE_GGUF_TYPE_INT8:
+        case RCRE_GGUF_TYPE_BOOL:    return 1;
+        case RCRE_GGUF_TYPE_UINT16:
+        case RCRE_GGUF_TYPE_INT16:   return 2;
+        case RCRE_GGUF_TYPE_UINT32:
+        case RCRE_GGUF_TYPE_INT32:
+        case RCRE_GGUF_TYPE_FLOAT32: return 4;
+        case RCRE_GGUF_TYPE_UINT64:
+        case RCRE_GGUF_TYPE_INT64:
+        case RCRE_GGUF_TYPE_FLOAT64: return 8;
+        default: return 0;
+    }
+}
+
+static bool gguf_skip_value(RCRE_GGUFCursor* c, RCRE_GGUFType t, int depth) {
+    if (depth > 8) return false;
+    size_t sz = gguf_scalar_type_size(t);
+    if (sz > 0) {
+        const uint8_t* dummy = nullptr;
+        return gguf_read_bytes(c, sz, &dummy);
+    }
+    if (t == RCRE_GGUF_TYPE_STRING) {
+        RCRE_Slice s;
+        return gguf_read_str(c, &s);
+    }
+    if (t == RCRE_GGUF_TYPE_ARRAY) {
+        uint32_t etype_u = 0;
+        uint64_t alen = 0;
+        if (!gguf_read_u32(c, &etype_u) || !gguf_read_u64(c, &alen)) return false;
+        RCRE_GGUFType et = (RCRE_GGUFType)etype_u;
+        size_t esz = gguf_scalar_type_size(et);
+        if (esz > 0) {
+            if (alen > (uint64_t)((c->len - c->pos) / esz)) return false;
+            c->pos += (size_t)alen * esz;
+            return true;
+        }
+        for (uint64_t i = 0; i < alen; ++i) {
+            if (!gguf_skip_value(c, et, depth + 1)) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool gguf_read_kv_entry(RCRE_GGUFCursor* c, RCRE_GGUFKV* out) {
+    memset(out, 0, sizeof(*out));
+    if (!gguf_read_str(c, &out->key)) return false;
+    uint32_t t_u32 = 0;
+    if (!gguf_read_u32(c, &t_u32)) return false;
+    out->type = (RCRE_GGUFType)t_u32;
+
+    switch (out->type) {
+        case RCRE_GGUF_TYPE_UINT8: {
+            uint8_t v = 0;
+            if (!gguf_read_u8(c, &v)) return false;
+            out->val.u64 = v;
+            return true;
+        }
+        case RCRE_GGUF_TYPE_INT8: {
+            uint8_t v = 0;
+            if (!gguf_read_u8(c, &v)) return false;
+            out->val.i64 = (int8_t)v;
+            return true;
+        }
+        case RCRE_GGUF_TYPE_BOOL: {
+            uint8_t v = 0;
+            if (!gguf_read_u8(c, &v)) return false;
+            out->val.b = (v != 0);
+            return true;
+        }
+        case RCRE_GGUF_TYPE_UINT16: {
+            uint16_t v = 0;
+            if (!gguf_read_u16(c, &v)) return false;
+            out->val.u64 = v;
+            return true;
+        }
+        case RCRE_GGUF_TYPE_INT16: {
+            uint16_t v = 0;
+            if (!gguf_read_u16(c, &v)) return false;
+            out->val.i64 = (int16_t)v;
+            return true;
+        }
+        case RCRE_GGUF_TYPE_UINT32: {
+            uint32_t v = 0;
+            if (!gguf_read_u32(c, &v)) return false;
+            out->val.u64 = v;
+            return true;
+        }
+        case RCRE_GGUF_TYPE_INT32: {
+            uint32_t v = 0;
+            if (!gguf_read_u32(c, &v)) return false;
+            out->val.i64 = (int32_t)v;
+            return true;
+        }
+        case RCRE_GGUF_TYPE_FLOAT32: {
+            uint32_t v = 0;
+            if (!gguf_read_u32(c, &v)) return false;
+            float f = 0.0f;
+            memcpy(&f, &v, 4);
+            out->val.f64 = (double)f;
+            return true;
+        }
+        case RCRE_GGUF_TYPE_UINT64: {
+            if (!gguf_read_u64(c, &out->val.u64)) return false;
+            return true;
+        }
+        case RCRE_GGUF_TYPE_INT64: {
+            uint64_t v = 0;
+            if (!gguf_read_u64(c, &v)) return false;
+            out->val.i64 = (int64_t)v;
+            return true;
+        }
+        case RCRE_GGUF_TYPE_FLOAT64: {
+            uint64_t v = 0;
+            if (!gguf_read_u64(c, &v)) return false;
+            memcpy(&out->val.f64, &v, 8);
+            return true;
+        }
+        case RCRE_GGUF_TYPE_STRING:
+            return gguf_read_str(c, &out->val.str);
+        case RCRE_GGUF_TYPE_ARRAY: {
+            uint32_t et = 0;
+            uint64_t alen = 0;
+            if (!gguf_read_u32(c, &et) || !gguf_read_u64(c, &alen)) return false;
+            out->val.arr.elem_type = (RCRE_GGUFType)et;
+            out->val.arr.len       = alen;
+            out->val.arr.raw_data  = c->p + c->pos;
+            size_t esz = gguf_scalar_type_size(out->val.arr.elem_type);
+            if (esz > 0) {
+                if (alen > (uint64_t)((c->len - c->pos) / esz)) return false;
+                c->pos += (size_t)alen * esz;
+                return true;
+            }
+            for (uint64_t i = 0; i < alen; ++i) {
+                if (!gguf_skip_value(c, out->val.arr.elem_type, 1)) return false;
+            }
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+static size_t gguf_tensor_byte_size(RCRE_GGMLType t, const uint64_t dims[4], uint32_t n_dims) {
+    size_t numel = 1;
+    for (uint32_t i = 0; i < n_dims; ++i) {
+        if (dims[i] == 0 || dims[i] > (uint64_t)SIZE_MAX / numel) return 0;
+        numel *= (size_t)dims[i];
+    }
+    switch (t) {
+        case RCRE_GGML_TYPE_F32:
+        case RCRE_GGML_TYPE_I32:  return numel * 4;
+        case RCRE_GGML_TYPE_F16:
+        case RCRE_GGML_TYPE_BF16:
+        case RCRE_GGML_TYPE_I16:  return numel * 2;
+        case RCRE_GGML_TYPE_I8:   return numel;
+        case RCRE_GGML_TYPE_I64:
+        case RCRE_GGML_TYPE_F64:  return numel * 8;
+        case RCRE_GGML_TYPE_Q8_0: return ((numel + 31U) / 32U) * sizeof(RCRE_BlockQ8_0);
+        case RCRE_GGML_TYPE_Q4_0: return ((numel + 31U) / 32U) * sizeof(RCRE_BlockQ4_0);
+        default: return 0;
+    }
+}
+
+static int gguf_parse_mapped(RCRE_GGUFFile* g) {
+    if (!g || !g->map.data || g->map.size < 24) return RCRE_ERR_IO;
+    RCRE_GGUFCursor c = { .p = g->map.data, .len = g->map.size, .pos = 0 };
+
+    uint32_t magic = 0;
+    if (!gguf_read_u32(&c, &magic) || magic != RCRE_GGUF_MAGIC) return RCRE_ERR_IO;
+    if (!gguf_read_u32(&c, &g->version) || (g->version != 2 && g->version != 3)) return RCRE_ERR_IO;
+    if (!gguf_read_u64(&c, &g->n_tensors) || !gguf_read_u64(&c, &g->n_kv)) return RCRE_ERR_IO;
+    if (g->n_tensors > 16384U || g->n_kv > 65536U) return RCRE_ERR_IO;
+
+    g->alignment = 32U;
+
+    if (g->n_kv > 0) {
+        g->kvs = (RCRE_GGUFKV*)calloc((size_t)g->n_kv, sizeof(RCRE_GGUFKV));
+        if (!g->kvs) return RCRE_ERR_OUT_OF_MEMORY;
+        for (uint64_t i = 0; i < g->n_kv; ++i) {
+            if (!gguf_read_kv_entry(&c, &g->kvs[i])) return RCRE_ERR_IO;
+            if (rcre_slice_eq_cstr(g->kvs[i].key, "general.alignment") &&
+                g->kvs[i].type == RCRE_GGUF_TYPE_UINT32 &&
+                g->kvs[i].val.u64 >= 1 && (g->kvs[i].val.u64 & (g->kvs[i].val.u64 - 1)) == 0) {
+                g->alignment = (uint32_t)g->kvs[i].val.u64;
+            }
+        }
+    }
+
+    if (g->n_tensors > 0) {
+        g->tensors = (RCRE_GGUFTensorInfo*)calloc((size_t)g->n_tensors, sizeof(RCRE_GGUFTensorInfo));
+        if (!g->tensors) return RCRE_ERR_OUT_OF_MEMORY;
+        for (uint64_t i = 0; i < g->n_tensors; ++i) {
+            RCRE_GGUFTensorInfo* ti = &g->tensors[i];
+            if (!gguf_read_str(&c, &ti->name)) return RCRE_ERR_IO;
+            if (!gguf_read_u32(&c, &ti->n_dims) || ti->n_dims == 0 || ti->n_dims > 4) return RCRE_ERR_IO;
+            for (uint32_t d = 0; d < ti->n_dims; ++d) {
+                if (!gguf_read_u64(&c, &ti->dims[d])) return RCRE_ERR_IO;
+            }
+            uint32_t tt = 0;
+            if (!gguf_read_u32(&c, &tt) || !gguf_read_u64(&c, &ti->offset)) return RCRE_ERR_IO;
+            ti->type = (RCRE_GGMLType)tt;
+            ti->nbytes = gguf_tensor_byte_size(ti->type, ti->dims, ti->n_dims);
+            if (ti->nbytes == 0) return RCRE_ERR_UNSUPPORTED_OP;
+        }
+    }
+
+    size_t align = (size_t)g->alignment;
+    g->data_offset = (c.pos + align - 1U) & ~(align - 1U);
+    if (g->data_offset > g->map.size) return RCRE_ERR_IO;
+
+    for (uint64_t i = 0; i < g->n_tensors; ++i) {
+        const RCRE_GGUFTensorInfo* ti = &g->tensors[i];
+        if (ti->offset > (uint64_t)(g->map.size - g->data_offset) ||
+            ti->nbytes > g->map.size - g->data_offset - (size_t)ti->offset) {
+            return RCRE_ERR_IO;
+        }
+    }
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_gguf_open(const char* filepath, RCRE_GGUFFile* out_gguf) {
+    if (!filepath || !out_gguf) return RCRE_ERR_INVALID_ARG;
+    memset(out_gguf, 0, sizeof(*out_gguf));
+    int rc = rcre_io_mmap_open(filepath, RCRE_IO_HINT_SEQUENTIAL, &out_gguf->map);
+    if (rc != RCRE_OK) return rc;
+    rc = gguf_parse_mapped(out_gguf);
+    if (rc != RCRE_OK) rcre_gguf_close(out_gguf);
+    return rc;
+}
+
+RCRE_NODISCARD int rcre_gguf_open_from_buffer(const void* buf, size_t size, RCRE_GGUFFile* out_gguf) {
+    if (!buf || size == 0 || !out_gguf) return RCRE_ERR_INVALID_ARG;
+    memset(out_gguf, 0, sizeof(*out_gguf));
+    int rc = rcre_io_mmap_from_buffer(buf, size, &out_gguf->map);
+    if (rc != RCRE_OK) return rc;
+    rc = gguf_parse_mapped(out_gguf);
+    if (rc != RCRE_OK) rcre_gguf_close(out_gguf);
+    return rc;
+}
+
+void rcre_gguf_close(RCRE_GGUFFile* gguf) {
+    if (!gguf) return;
+    free(gguf->kvs);
+    free(gguf->tensors);
+    rcre_io_mmap_close(&gguf->map);
+    memset(gguf, 0, sizeof(*gguf));
+}
+
+RCRE_NODISCARD const RCRE_GGUFKV* rcre_gguf_find_kv(const RCRE_GGUFFile* gguf, const char* key) {
+    if (!gguf || !key) return nullptr;
+    for (uint64_t i = 0; i < gguf->n_kv; ++i) {
+        if (rcre_slice_eq_cstr(gguf->kvs[i].key, key)) return &gguf->kvs[i];
+    }
+    return nullptr;
+}
+
+RCRE_NODISCARD bool rcre_gguf_get_u32(const RCRE_GGUFFile* gguf, const char* key, uint32_t* out_v) {
+    const RCRE_GGUFKV* kv = rcre_gguf_find_kv(gguf, key);
+    if (!kv || !out_v) return false;
+    if (kv->type == RCRE_GGUF_TYPE_UINT32 || kv->type == RCRE_GGUF_TYPE_UINT64) {
+        *out_v = (uint32_t)kv->val.u64;
+        return true;
+    }
+    if (kv->type == RCRE_GGUF_TYPE_INT32 && kv->val.i64 >= 0) {
+        *out_v = (uint32_t)kv->val.i64;
+        return true;
+    }
+    return false;
+}
+
+RCRE_NODISCARD bool rcre_gguf_get_f32(const RCRE_GGUFFile* gguf, const char* key, float* out_v) {
+    const RCRE_GGUFKV* kv = rcre_gguf_find_kv(gguf, key);
+    if (!kv || !out_v) return false;
+    if (kv->type == RCRE_GGUF_TYPE_FLOAT32 || kv->type == RCRE_GGUF_TYPE_FLOAT64) {
+        *out_v = (float)kv->val.f64;
+        return true;
+    }
+    return false;
+}
+
+RCRE_NODISCARD bool rcre_gguf_get_str(const RCRE_GGUFFile* gguf, const char* key, RCRE_Slice* out_s) {
+    const RCRE_GGUFKV* kv = rcre_gguf_find_kv(gguf, key);
+    if (!kv || !out_s || kv->type != RCRE_GGUF_TYPE_STRING) return false;
+    *out_s = kv->val.str;
+    return true;
+}
+
+RCRE_NODISCARD const RCRE_GGUFTensorInfo* rcre_gguf_find_tensor(const RCRE_GGUFFile* gguf, const char* name) {
+    if (!gguf || !name) return nullptr;
+    for (uint64_t i = 0; i < gguf->n_tensors; ++i) {
+        if (rcre_slice_eq_cstr(gguf->tensors[i].name, name)) return &gguf->tensors[i];
+    }
+    return nullptr;
+}
+
+RCRE_NODISCARD const void* rcre_gguf_tensor_data(const RCRE_GGUFFile* gguf, const RCRE_GGUFTensorInfo* info) {
+    if (!gguf || !info || !gguf->map.data) return nullptr;
+    return gguf->map.data + gguf->data_offset + (size_t)info->offset;
+}
+
+static bool gguf_write_u32(FILE* f, uint32_t v) {
+    uint8_t b[4] = { (uint8_t)(v & 0xFFU), (uint8_t)((v >> 8) & 0xFFU),
+                     (uint8_t)((v >> 16) & 0xFFU), (uint8_t)((v >> 24) & 0xFFU) };
+    return fwrite(b, 1, 4, f) == 4;
+}
+
+static bool gguf_write_u64(FILE* f, uint64_t v) {
+    uint8_t b[8];
+    for (int i = 0; i < 8; ++i) b[i] = (uint8_t)((v >> (i * 8)) & 0xFFULL);
+    return fwrite(b, 1, 8, f) == 8;
+}
+
+static bool gguf_write_str(FILE* f, const char* s) {
+    size_t len = s ? strlen(s) : 0;
+    if (!gguf_write_u64(f, (uint64_t)len)) return false;
+    return (len == 0) || fwrite(s, 1, len, f) == len;
+}
+
+RCRE_NODISCARD int rcre_gguf_save_v3(
+    const char* filepath,
+    const RCRE_GGUFWriteKV* kvs,
+    size_t n_kvs,
+    const RCRE_GGUFWriteTensor* tensors,
+    size_t n_tensors
+) {
+    if (!filepath) return RCRE_ERR_INVALID_ARG;
+    FILE* f = fopen(filepath, "wb");
+    if (!f) return RCRE_ERR_IO;
+
+    bool ok = gguf_write_u32(f, RCRE_GGUF_MAGIC) &&
+              gguf_write_u32(f, 3U) &&
+              gguf_write_u64(f, (uint64_t)n_tensors) &&
+              gguf_write_u64(f, (uint64_t)(n_kvs + 1U));
+
+    ok = ok && gguf_write_str(f, "general.alignment") &&
+         gguf_write_u32(f, (uint32_t)RCRE_GGUF_TYPE_UINT32) &&
+         gguf_write_u32(f, 32U);
+
+    for (size_t i = 0; ok && i < n_kvs; ++i) {
+        ok = gguf_write_str(f, kvs[i].key);
+        if (kvs[i].is_str) {
+            ok = ok && gguf_write_u32(f, (uint32_t)RCRE_GGUF_TYPE_STRING) && gguf_write_str(f, kvs[i].str_val);
+        } else if (kvs[i].is_float) {
+            uint32_t bits = 0;
+            memcpy(&bits, &kvs[i].f32_val, 4);
+            ok = ok && gguf_write_u32(f, (uint32_t)RCRE_GGUF_TYPE_FLOAT32) && gguf_write_u32(f, bits);
+        } else {
+            ok = ok && gguf_write_u32(f, (uint32_t)RCRE_GGUF_TYPE_UINT32) && gguf_write_u32(f, kvs[i].u32_val);
+        }
+    }
+
+    uint64_t cur_off = 0;
+    for (size_t i = 0; ok && i < n_tensors; ++i) {
+        ok = gguf_write_str(f, tensors[i].name) &&
+             gguf_write_u32(f, tensors[i].n_dims);
+        for (uint32_t d = 0; ok && d < tensors[i].n_dims; ++d) {
+            ok = gguf_write_u64(f, tensors[i].dims[d]);
+        }
+        ok = ok && gguf_write_u32(f, (uint32_t)tensors[i].type) && gguf_write_u64(f, cur_off);
+        size_t padded = (tensors[i].nbytes + 31U) & ~(size_t)31U;
+        cur_off += (uint64_t)padded;
+    }
+
+    long hdr_end = ftell(f);
+    if (hdr_end < 0) ok = false;
+    if (ok) {
+        size_t pos = (size_t)hdr_end;
+        size_t aligned = (pos + 31U) & ~(size_t)31U;
+        uint8_t zero[32] = {0};
+        if (aligned > pos && fwrite(zero, 1, aligned - pos, f) != aligned - pos) ok = false;
+        for (size_t i = 0; ok && i < n_tensors; ++i) {
+            if (tensors[i].nbytes > 0 && fwrite(tensors[i].data, 1, tensors[i].nbytes, f) != tensors[i].nbytes) {
+                ok = false;
+                break;
+            }
+            size_t padded = (tensors[i].nbytes + 31U) & ~(size_t)31U;
+            if (padded > tensors[i].nbytes && fwrite(zero, 1, padded - tensors[i].nbytes, f) != padded - tensors[i].nbytes) {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    fclose(f);
+    return ok ? RCRE_OK : RCRE_ERR_IO;
+}
+
+/* --- Source: llm.c --- */
+/**
+ * @file llm.c
+ * @brief Modern LLaMA Inference, Q8_0/Q4_0 Block Quantization, Flash-GQA,
+ *        Byte-Level BPE, Sampler, LoRA Fine-Tuning & Sharded Training (ISO C23)
+ */
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
+static uint64_t llm_splitmix64(uint64_t* state) {
+    uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static float llm_rand_normal(uint64_t* rng, float std) {
+    double u1 = ((double)(llm_splitmix64(rng) >> 11) + 1.0) / 9007199254740993.0;
+    double u2 = ((double)(llm_splitmix64(rng) >> 11)) / 9007199254740992.0;
+    return (float)(sqrt(-2.0 * log(u1)) * cos(6.28318530717958647692 * u2)) * std;
+}
+
+static inline float llm_fp16_to_f32_one(uint16_t h) {
+    float out = 0.0f;
+    rcre_f16_to_f32(&h, &out, 1);
+    return out;
+}
+
+static inline uint16_t llm_f32_to_fp16_one(float f) {
+    uint16_t out = 0;
+    rcre_f32_to_f16(&f, &out, 1);
+    return out;
+}
+
+static inline void llm_maybe_bf16_roundtrip(float* x, size_t n, bool enabled) {
+    if (!enabled || !x || n == 0) return;
+    uint16_t stack_buf[256];
+    if (n <= 256) {
+        rcre_f32_to_bf16(x, stack_buf, n);
+        rcre_bf16_to_f32(stack_buf, x, n);
+    } else {
+        uint16_t* tmp = (uint16_t*)malloc(n * sizeof(uint16_t));
+        if (tmp) {
+            rcre_f32_to_bf16(x, tmp, n);
+            rcre_bf16_to_f32(tmp, x, n);
+            free(tmp);
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 1. Q8_0 & Q4_0 Block Quantization + SIMD Dot Products                     */
+/* ========================================================================= */
+
+void rcre_quantize_q8_0(const float* src, void* dst_blocks, size_t n) {
+    if (!src || !dst_blocks || n == 0) return;
+    RCRE_BlockQ8_0* blocks = (RCRE_BlockQ8_0*)dst_blocks;
+    size_t nb = (n + RCRE_QK8_0 - 1U) / RCRE_QK8_0;
+    for (size_t b = 0; b < nb; ++b) {
+        size_t start = b * RCRE_QK8_0;
+        size_t len = (n - start < RCRE_QK8_0) ? (n - start) : RCRE_QK8_0;
+        float amax = 0.0f;
+        for (size_t j = 0; j < len; ++j) {
+            float a = fabsf(src[start + j]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 127.0f;
+        float id = (d > 0.0f) ? (1.0f / d) : 0.0f;
+        blocks[b].d = llm_f32_to_fp16_one(d);
+        for (size_t j = 0; j < RCRE_QK8_0; ++j) {
+            if (j < len) {
+                int v = (int)lrintf(src[start + j] * id);
+                if (v > 127) v = 127;
+                if (v < -127) v = -127;
+                blocks[b].qs[j] = (int8_t)v;
+            } else {
+                blocks[b].qs[j] = 0;
+            }
+        }
+    }
+}
+
+void rcre_dequantize_q8_0(const void* src_blocks, float* dst, size_t n) {
+    if (!src_blocks || !dst || n == 0) return;
+    const RCRE_BlockQ8_0* blocks = (const RCRE_BlockQ8_0*)src_blocks;
+    size_t nb = (n + RCRE_QK8_0 - 1U) / RCRE_QK8_0;
+    for (size_t b = 0; b < nb; ++b) {
+        size_t start = b * RCRE_QK8_0;
+        size_t len = (n - start < RCRE_QK8_0) ? (n - start) : RCRE_QK8_0;
+        float d = llm_fp16_to_f32_one(blocks[b].d);
+        for (size_t j = 0; j < len; ++j) {
+            dst[start + j] = d * (float)blocks[b].qs[j];
+        }
+    }
+}
+
+void rcre_quantize_q4_0(const float* src, void* dst_blocks, size_t n) {
+    if (!src || !dst_blocks || n == 0) return;
+    RCRE_BlockQ4_0* blocks = (RCRE_BlockQ4_0*)dst_blocks;
+    size_t nb = (n + RCRE_QK4_0 - 1U) / RCRE_QK4_0;
+    for (size_t b = 0; b < nb; ++b) {
+        size_t start = b * RCRE_QK4_0;
+        size_t len = (n - start < RCRE_QK4_0) ? (n - start) : RCRE_QK4_0;
+        float amax = 0.0f;
+        float max_signed = 0.0f;
+        for (size_t j = 0; j < len; ++j) {
+            float v = src[start + j];
+            if (fabsf(v) > amax) {
+                amax = fabsf(v);
+                max_signed = v;
+            }
+        }
+        float d = max_signed / -8.0f;
+        float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
+        blocks[b].d = llm_f32_to_fp16_one(d);
+        for (size_t j = 0; j < RCRE_QK4_0 / 2; ++j) {
+            float x0 = (j < len) ? src[start + j] : 0.0f;
+            float x1 = (j + 16U < len) ? src[start + j + 16U] : 0.0f;
+            int xi0 = (int)truncf(x0 * id + 8.5f);
+            int xi1 = (int)truncf(x1 * id + 8.5f);
+            if (xi0 < 0) xi0 = 0;
+            if (xi0 > 15) xi0 = 15;
+            if (xi1 < 0) xi1 = 0;
+            if (xi1 > 15) xi1 = 15;
+            blocks[b].qs[j] = (uint8_t)((xi0 & 0x0F) | ((xi1 & 0x0F) << 4));
+        }
+    }
+}
+
+void rcre_dequantize_q4_0(const void* src_blocks, float* dst, size_t n) {
+    if (!src_blocks || !dst || n == 0) return;
+    const RCRE_BlockQ4_0* blocks = (const RCRE_BlockQ4_0*)src_blocks;
+    size_t nb = (n + RCRE_QK4_0 - 1U) / RCRE_QK4_0;
+    for (size_t b = 0; b < nb; ++b) {
+        size_t start = b * RCRE_QK4_0;
+        size_t len = (n - start < RCRE_QK4_0) ? (n - start) : RCRE_QK4_0;
+        float d = llm_fp16_to_f32_one(blocks[b].d);
+        for (size_t j = 0; j < RCRE_QK4_0 / 2; ++j) {
+            uint8_t byte = blocks[b].qs[j];
+            int q0 = (int)(byte & 0x0FU) - 8;
+            int q1 = (int)(byte >> 4U) - 8;
+            if (j < len) dst[start + j] = d * (float)q0;
+            if (j + 16U < len) dst[start + j + 16U] = d * (float)q1;
+        }
+    }
+}
+
+RCRE_NODISCARD float rcre_vec_dot_q8_0(const void* q8_blocks, const float* f32_x, size_t n) {
+    if (!q8_blocks || !f32_x || n == 0) return 0.0f;
+    const RCRE_BlockQ8_0* blocks = (const RCRE_BlockQ8_0*)q8_blocks;
+    size_t nb = (n + RCRE_QK8_0 - 1U) / RCRE_QK8_0;
+    float sum = 0.0f;
+    for (size_t b = 0; b < nb; ++b) {
+        size_t start = b * RCRE_QK8_0;
+        size_t len = (n - start < RCRE_QK8_0) ? (n - start) : RCRE_QK8_0;
+        float d = llm_fp16_to_f32_one(blocks[b].d);
+        float block_acc = 0.0f;
+#if defined(__ARM_NEON) || defined(__aarch64__)
+        if (len == RCRE_QK8_0) {
+            float32x4_t accv = vdupq_n_f32(0.0f);
+            for (size_t j = 0; j < RCRE_QK8_0; j += 8) {
+                int8x8_t q8 = vld1_s8(blocks[b].qs + j);
+                int16x8_t q16 = vmovl_s8(q8);
+                int32x4_t q32_lo = vmovl_s16(vget_low_s16(q16));
+                int32x4_t q32_hi = vmovl_s16(vget_high_s16(q16));
+                float32x4_t f_lo = vcvtq_f32_s32(q32_lo);
+                float32x4_t f_hi = vcvtq_f32_s32(q32_hi);
+                accv = vfmaq_f32(accv, f_lo, vld1q_f32(f32_x + start + j));
+                accv = vfmaq_f32(accv, f_hi, vld1q_f32(f32_x + start + j + 4));
+            }
+            block_acc = vaddvq_f32(accv);
+        } else
+#endif
+        {
+            for (size_t j = 0; j < len; ++j) {
+                block_acc += (float)blocks[b].qs[j] * f32_x[start + j];
+            }
+        }
+        sum += d * block_acc;
+    }
+    return sum;
+}
+
+RCRE_NODISCARD float rcre_vec_dot_q4_0(const void* q4_blocks, const float* f32_x, size_t n) {
+    if (!q4_blocks || !f32_x || n == 0) return 0.0f;
+    const RCRE_BlockQ4_0* blocks = (const RCRE_BlockQ4_0*)q4_blocks;
+    size_t nb = (n + RCRE_QK4_0 - 1U) / RCRE_QK4_0;
+    float sum = 0.0f;
+    for (size_t b = 0; b < nb; ++b) {
+        size_t start = b * RCRE_QK4_0;
+        size_t len = (n - start < RCRE_QK4_0) ? (n - start) : RCRE_QK4_0;
+        float d = llm_fp16_to_f32_one(blocks[b].d);
+        float block_acc = 0.0f;
+        for (size_t j = 0; j < RCRE_QK4_0 / 2; ++j) {
+            uint8_t byte = blocks[b].qs[j];
+            int q0 = (int)(byte & 0x0FU) - 8;
+            int q1 = (int)(byte >> 4U) - 8;
+            if (j < len) block_acc += (float)q0 * f32_x[start + j];
+            if (j + 16U < len) block_acc += (float)q1 * f32_x[start + j + 16U];
+        }
+        sum += d * block_acc;
+    }
+    return sum;
+}
+
+typedef struct {
+    RCRE_LLMWeightType wtype;
+    const uint8_t*     w_bytes;
+    const float*       x;
+    float*             y;
+    size_t             rows;
+    size_t             cols;
+    size_t             row_bytes;
+} RCRE_LLMGemvTask;
+
+static void llm_gemv_quant_worker(void* arg, size_t row) {
+    RCRE_LLMGemvTask* t = (RCRE_LLMGemvTask*)arg;
+    const void* row_ptr = t->w_bytes + row * t->row_bytes;
+    if (t->wtype == RCRE_LLM_W_Q8_0) {
+        t->y[row] = rcre_vec_dot_q8_0(row_ptr, t->x, t->cols);
+    } else if (t->wtype == RCRE_LLM_W_Q4_0) {
+        t->y[row] = rcre_vec_dot_q4_0(row_ptr, t->x, t->cols);
+    } else {
+        t->y[row] = rcre_hal.dot_f32((const float*)row_ptr, t->x, t->cols);
+    }
+}
+
+void rcre_llm_gemv_quant(RCRE_LLMWeightType wtype, const void* w_data, const float* x,
+                         float* y, size_t rows, size_t cols, RCRE_ThreadPool* pool) {
+    if (!w_data || !x || !y || rows == 0 || cols == 0) return;
+    if (wtype == RCRE_LLM_W_F32 && (!pool || rows < 64)) {
+        rcre_hal.gemv_f32(rows, cols, 1.0f, (const float*)w_data, cols, x, 0.0f, y);
+        return;
+    }
+    size_t row_bytes = 0;
+    if (wtype == RCRE_LLM_W_Q8_0) {
+        row_bytes = ((cols + 31U) / 32U) * sizeof(RCRE_BlockQ8_0);
+    } else if (wtype == RCRE_LLM_W_Q4_0) {
+        row_bytes = ((cols + 31U) / 32U) * sizeof(RCRE_BlockQ4_0);
+    } else {
+        row_bytes = cols * sizeof(float);
+    }
+
+    RCRE_LLMGemvTask task = {
+        .wtype     = wtype,
+        .w_bytes   = (const uint8_t*)w_data,
+        .x         = x,
+        .y         = y,
+        .rows      = rows,
+        .cols      = cols,
+        .row_bytes = row_bytes
+    };
+    if (pool && rows >= 32) {
+        rcre_threadpool_parallel_for(pool, rows, llm_gemv_quant_worker, &task);
+    } else {
+        for (size_t r = 0; r < rows; ++r) {
+            llm_gemv_quant_worker(&task, r);
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 2. Modern Tensor Math Primitives                                          */
+/* ========================================================================= */
+
+void rcre_llm_rmsnorm(float* out, const float* x, const float* weight, size_t n, float eps) {
+    if (!out || !x || !weight || n == 0) return;
+    float ss = rcre_hal.dot_f32(x, x, n);
+    float inv_rms = 1.0f / sqrtf((ss / (float)n) + eps);
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = weight[i] * (x[i] * inv_rms);
+    }
+}
+
+void rcre_llm_rope(float* q, float* k, size_t n_heads, size_t n_kv_heads,
+                   size_t head_dim, size_t pos, float theta_base) {
+    if (!q || head_dim < 2) return;
+    for (size_t h = 0; h < n_heads; ++h) {
+        float* qh = q + h * head_dim;
+        for (size_t i = 0; i + 1 < head_dim; i += 2) {
+            float freq = 1.0f / powf(theta_base, (float)i / (float)head_dim);
+            float val = (float)pos * freq;
+            float fcr = cosf(val);
+            float fci = sinf(val);
+            float v0 = qh[i];
+            float v1 = qh[i + 1];
+            qh[i]     = v0 * fcr - v1 * fci;
+            qh[i + 1] = v0 * fci + v1 * fcr;
+        }
+    }
+    if (k) {
+        for (size_t h = 0; h < n_kv_heads; ++h) {
+            float* kh = k + h * head_dim;
+            for (size_t i = 0; i + 1 < head_dim; i += 2) {
+                float freq = 1.0f / powf(theta_base, (float)i / (float)head_dim);
+                float val = (float)pos * freq;
+                float fcr = cosf(val);
+                float fci = sinf(val);
+                float v0 = kh[i];
+                float v1 = kh[i + 1];
+                kh[i]     = v0 * fcr - v1 * fci;
+                kh[i + 1] = v0 * fci + v1 * fcr;
+            }
+        }
+    }
+}
+
+void rcre_llm_swiglu(float* out, const float* gate, const float* up, size_t n) {
+    if (!out || !gate || !up) return;
+    for (size_t i = 0; i < n; ++i) {
+        float g = gate[i];
+        float silu = g / (1.0f + expf(-g));
+        out[i] = silu * up[i];
+    }
+}
+
+void rcre_llm_flash_attention_gqa(
+    float* out,
+    const float* q,
+    const float* k_cache,
+    const float* v_cache,
+    size_t n_heads,
+    size_t n_kv_heads,
+    size_t head_dim,
+    size_t seq_len,
+    size_t kv_stride_elems
+) {
+    if (!out || !q || !k_cache || !v_cache || n_heads == 0 || n_kv_heads == 0 || seq_len == 0) return;
+    size_t kv_mul = n_heads / n_kv_heads;
+    if (kv_mul == 0) kv_mul = 1;
+    float inv_sqrt_d = 1.0f / sqrtf((float)head_dim);
+
+    /* Flash-Attention tiled online softmax: 0 score array allocation! */
+    for (size_t h = 0; h < n_heads; ++h) {
+        const float* qh = q + h * head_dim;
+        float* oh = out + h * head_dim;
+        size_t kv_h = h / kv_mul;
+        for (size_t d = 0; d < head_dim; ++d) oh[d] = 0.0f;
+
+        float m_prev = -1e30f;
+        float l_prev = 0.0f;
+
+        for (size_t t = 0; t < seq_len; ++t) {
+            const float* kh = k_cache + t * kv_stride_elems + kv_h * head_dim;
+            const float* vh = v_cache + t * kv_stride_elems + kv_h * head_dim;
+            float score = rcre_hal.dot_f32(qh, kh, head_dim) * inv_sqrt_d;
+
+            float m_new = (score > m_prev) ? score : m_prev;
+            float exp_prev = (l_prev > 0.0f) ? expf(m_prev - m_new) : 0.0f;
+            float exp_cur  = expf(score - m_new);
+            float l_new    = l_prev * exp_prev + exp_cur;
+
+            for (size_t d = 0; d < head_dim; ++d) {
+                oh[d] = oh[d] * exp_prev + exp_cur * vh[d];
+            }
+            m_prev = m_new;
+            l_prev = l_new;
+        }
+        float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
+        for (size_t d = 0; d < head_dim; ++d) {
+            oh[d] *= inv_l;
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 3. Large-Vocabulary Byte-Level BPE Tokenizer                              */
+/* ========================================================================= */
+
+static inline uint64_t llm_fnv1a(const void* data, size_t len) {
+    const uint8_t* p = (const uint8_t*)data;
+    uint64_t h = 14695981039346656037ULL;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static size_t llm_next_pow2(size_t n) {
+    size_t p = 64;
+    while (p < n) p <<= 1U;
+    return p;
+}
+
+static void llm_bpe_insert_piece_hash(RCRE_ByteBPE* tok, uint32_t id) {
+    uint64_t h = llm_fnv1a(tok->pieces[id], tok->piece_lens[id]);
+    size_t mask = tok->piece_hash_cap - 1U;
+    size_t idx = (size_t)h & mask;
+    while (tok->piece_hash_keys[idx] != 0) {
+        uint32_t existing = tok->piece_hash_keys[idx] - 1U;
+        if (tok->piece_lens[existing] == tok->piece_lens[id] &&
+            memcmp(tok->pieces[existing], tok->pieces[id], tok->piece_lens[id]) == 0) {
+            return;
+        }
+        idx = (idx + 1U) & mask;
+    }
+    tok->piece_hash_keys[idx] = id + 1U;
+}
+
+static int32_t llm_bpe_find_piece(const RCRE_ByteBPE* tok, const uint8_t* s, size_t len) {
+    uint64_t h = llm_fnv1a(s, len);
+    size_t mask = tok->piece_hash_cap - 1U;
+    size_t idx = (size_t)h & mask;
+    while (tok->piece_hash_keys[idx] != 0) {
+        uint32_t id = tok->piece_hash_keys[idx] - 1U;
+        if (tok->piece_lens[id] == len && (len == 0 || memcmp(tok->pieces[id], s, len) == 0)) {
+            return (int32_t)id;
+        }
+        idx = (idx + 1U) & mask;
+    }
+    return -1;
+}
+
+static void llm_bpe_insert_pair_hash(RCRE_ByteBPE* tok, uint32_t l, uint32_t r, uint32_t merge_idx) {
+    uint64_t key = ((uint64_t)l << 32) | (uint64_t)r;
+    uint64_t h = llm_fnv1a(&key, sizeof(key));
+    size_t mask = tok->pair_hash_cap - 1U;
+    size_t idx = (size_t)h & mask;
+    while (tok->pair_hash_keys[idx] != UINT64_MAX) {
+        if (tok->pair_hash_keys[idx] == key) return;
+        idx = (idx + 1U) & mask;
+    }
+    tok->pair_hash_keys[idx] = key;
+    tok->pair_hash_vals[idx] = merge_idx;
+}
+
+static int32_t llm_bpe_find_pair_rank(const RCRE_ByteBPE* tok, uint32_t l, uint32_t r) {
+    uint64_t key = ((uint64_t)l << 32) | (uint64_t)r;
+    uint64_t h = llm_fnv1a(&key, sizeof(key));
+    size_t mask = tok->pair_hash_cap - 1U;
+    size_t idx = (size_t)h & mask;
+    while (tok->pair_hash_keys[idx] != UINT64_MAX) {
+        if (tok->pair_hash_keys[idx] == key) return (int32_t)tok->pair_hash_vals[idx];
+        idx = (idx + 1U) & mask;
+    }
+    return -1;
+}
+
+RCRE_NODISCARD RCRE_ByteBPE* rcre_byte_bpe_create(size_t max_vocab) {
+    if (max_vocab < 258U) max_vocab = 258U;
+    RCRE_ByteBPE* tok = (RCRE_ByteBPE*)calloc(1, sizeof(RCRE_ByteBPE));
+    if (!tok) return nullptr;
+
+    tok->vocab_cap      = max_vocab;
+    tok->merges_cap     = max_vocab;
+    tok->piece_hash_cap = llm_next_pow2(max_vocab * 2U);
+    tok->pair_hash_cap  = llm_next_pow2(max_vocab * 2U);
+
+    tok->pieces          = (char**)calloc(max_vocab, sizeof(char*));
+    tok->piece_lens      = (size_t*)calloc(max_vocab, sizeof(size_t));
+    tok->merges          = (RCRE_ByteBPEMerge*)calloc(max_vocab, sizeof(RCRE_ByteBPEMerge));
+    tok->piece_hash_keys = (uint32_t*)calloc(tok->piece_hash_cap, sizeof(uint32_t));
+    tok->pair_hash_keys  = (uint64_t*)malloc(tok->pair_hash_cap * sizeof(uint64_t));
+    tok->pair_hash_vals  = (uint32_t*)calloc(tok->pair_hash_cap, sizeof(uint32_t));
+
+    if (!tok->pieces || !tok->piece_lens || !tok->merges ||
+        !tok->piece_hash_keys || !tok->pair_hash_keys || !tok->pair_hash_vals) {
+        rcre_byte_bpe_free(tok);
+        return nullptr;
+    }
+    for (size_t i = 0; i < tok->pair_hash_cap; ++i) tok->pair_hash_keys[i] = UINT64_MAX;
+
+    /* 256 raw byte tokens + BOS(256) + EOS(257) */
+    for (int b = 0; b < 256; ++b) {
+        uint8_t byte = (uint8_t)b;
+        (void)rcre_byte_bpe_add_token(tok, &byte, 1);
+    }
+    tok->bos_id = (uint32_t)rcre_byte_bpe_add_token(tok, (const uint8_t*)"<bos>", 5);
+    tok->eos_id = (uint32_t)rcre_byte_bpe_add_token(tok, (const uint8_t*)"<eos>", 5);
+    return tok;
+}
+
+void rcre_byte_bpe_free(RCRE_ByteBPE* tok) {
+    if (!tok) return;
+    if (tok->pieces) {
+        for (size_t i = 0; i < tok->vocab_size; ++i) free(tok->pieces[i]);
+        free(tok->pieces);
+    }
+    free(tok->piece_lens);
+    free(tok->merges);
+    free(tok->piece_hash_keys);
+    free(tok->pair_hash_keys);
+    free(tok->pair_hash_vals);
+    free(tok);
+}
+
+RCRE_NODISCARD int rcre_byte_bpe_add_token(RCRE_ByteBPE* tok, const uint8_t* bytes, size_t len) {
+    if (!tok || (!bytes && len > 0) || tok->vocab_size >= tok->vocab_cap) return -1;
+    uint32_t id = (uint32_t)tok->vocab_size;
+    char* copy = (char*)malloc(len + 1U);
+    if (!copy) return -1;
+    if (len > 0) memcpy(copy, bytes, len);
+    copy[len] = '\0';
+    tok->pieces[id] = copy;
+    tok->piece_lens[id] = len;
+    tok->vocab_size++;
+    llm_bpe_insert_piece_hash(tok, id);
+    return (int)id;
+}
+
+RCRE_NODISCARD int rcre_byte_bpe_train_corpus(RCRE_ByteBPE* tok, const uint8_t* corpus,
+                                              size_t corpus_len, size_t target_vocab) {
+    if (!tok || !corpus || corpus_len < 2) return RCRE_ERR_INVALID_ARG;
+    if (target_vocab > tok->vocab_cap) target_vocab = tok->vocab_cap;
+
+    uint32_t* ids = (uint32_t*)malloc(corpus_len * sizeof(uint32_t));
+    if (!ids) return RCRE_ERR_OUT_OF_MEMORY;
+    for (size_t i = 0; i < corpus_len; ++i) ids[i] = (uint32_t)corpus[i];
+    size_t cur_len = corpus_len;
+
+    const size_t TBL_CAP = 16384U;
+    uint64_t* keys = (uint64_t*)malloc(TBL_CAP * sizeof(uint64_t));
+    uint32_t* cnts = (uint32_t*)malloc(TBL_CAP * sizeof(uint32_t));
+    if (!keys || !cnts) {
+        free(ids); free(keys); free(cnts);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    while (tok->vocab_size < target_vocab && cur_len >= 2) {
+        for (size_t i = 0; i < TBL_CAP; ++i) {
+            keys[i] = UINT64_MAX;
+            cnts[i] = 0;
+        }
+        uint64_t best_key = UINT64_MAX;
+        uint32_t best_cnt = 1; /* require frequency >= 2 */
+
+        for (size_t i = 0; i + 1 < cur_len; ++i) {
+            uint64_t k = ((uint64_t)ids[i] << 32) | (uint64_t)ids[i + 1];
+            size_t slot = (size_t)(llm_fnv1a(&k, sizeof(k)) & (TBL_CAP - 1U));
+            for (size_t probe = 0; probe < TBL_CAP; ++probe) {
+                size_t p = (slot + probe) & (TBL_CAP - 1U);
+                if (keys[p] == UINT64_MAX || keys[p] == k) {
+                    keys[p] = k;
+                    cnts[p]++;
+                    if (cnts[p] > best_cnt) {
+                        best_cnt = cnts[p];
+                        best_key = k;
+                    }
+                    break;
+                }
+            }
+        }
+        if (best_key == UINT64_MAX) break;
+
+        uint32_t l = (uint32_t)(best_key >> 32);
+        uint32_t r = (uint32_t)(best_key & 0xFFFFFFFFULL);
+        size_t new_len = tok->piece_lens[l] + tok->piece_lens[r];
+        uint8_t* combined = (uint8_t*)malloc(new_len);
+        if (!combined) break;
+        memcpy(combined, tok->pieces[l], tok->piece_lens[l]);
+        memcpy(combined + tok->piece_lens[l], tok->pieces[r], tok->piece_lens[r]);
+
+        int merged_id = rcre_byte_bpe_add_token(tok, combined, new_len);
+        free(combined);
+        if (merged_id < 0) break;
+
+        uint32_t m_idx = (uint32_t)tok->n_merges++;
+        tok->merges[m_idx] = (RCRE_ByteBPEMerge){ l, r, (uint32_t)merged_id };
+        llm_bpe_insert_pair_hash(tok, l, r, m_idx);
+
+        /* Rewrite active token stream */
+        size_t out_n = 0;
+        for (size_t i = 0; i < cur_len; ) {
+            if (i + 1 < cur_len && ids[i] == l && ids[i + 1] == r) {
+                ids[out_n++] = (uint32_t)merged_id;
+                i += 2;
+            } else {
+                ids[out_n++] = ids[i++];
+            }
+        }
+        cur_len = out_n;
+    }
+
+    free(keys);
+    free(cnts);
+    free(ids);
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD size_t rcre_byte_bpe_encode(const RCRE_ByteBPE* tok, const char* text,
+                                           size_t len, int32_t* out_ids, size_t max_ids) {
+    if (!tok || !text || !out_ids || max_ids == 0 || len == 0) return 0;
+    uint32_t* buf = (uint32_t*)malloc(len * sizeof(uint32_t));
+    if (!buf) return 0;
+
+    for (size_t i = 0; i < len; ++i) {
+        buf[i] = (uint32_t)(uint8_t)text[i];
+    }
+    size_t n = len;
+
+    for (;;) {
+        int32_t best_rank = INT32_MAX;
+        size_t best_pos = SIZE_MAX;
+        uint32_t best_merged = 0;
+
+        for (size_t i = 0; i + 1 < n; ++i) {
+            int32_t r = llm_bpe_find_pair_rank(tok, buf[i], buf[i + 1]);
+            if (r >= 0 && r < best_rank) {
+                best_rank = r;
+                best_pos = i;
+                best_merged = tok->merges[r].merged;
+            }
+        }
+        if (best_pos == SIZE_MAX) break;
+
+        /* Apply lowest-rank merge across buffer */
+        uint32_t l = buf[best_pos];
+        uint32_t r = buf[best_pos + 1];
+        size_t w = 0;
+        for (size_t i = 0; i < n; ) {
+            if (i + 1 < n && buf[i] == l && buf[i + 1] == r) {
+                buf[w++] = best_merged;
+                i += 2;
+            } else {
+                buf[w++] = buf[i++];
+            }
+        }
+        n = w;
+    }
+
+    size_t copy_n = (n < max_ids) ? n : max_ids;
+    for (size_t i = 0; i < copy_n; ++i) out_ids[i] = (int32_t)buf[i];
+    free(buf);
+    (void)llm_bpe_find_piece;
+    return copy_n;
+}
+
+RCRE_NODISCARD size_t rcre_byte_bpe_decode(const RCRE_ByteBPE* tok, const int32_t* ids,
+                                           size_t n_ids, char* out_text, size_t max_len) {
+    if (!tok || !ids || !out_text || max_len == 0) return 0;
+    size_t pos = 0;
+    for (size_t i = 0; i < n_ids; ++i) {
+        int32_t id = ids[i];
+        if (id < 0 || (size_t)id >= tok->vocab_size) continue;
+        size_t plen = tok->piece_lens[id];
+        if (pos + plen >= max_len) break;
+        memcpy(out_text + pos, tok->pieces[id], plen);
+        pos += plen;
+    }
+    out_text[pos] = '\0';
+    return pos;
+}
+
+/* ========================================================================= */
+/* 4. Thread-Safe Advanced Sampler                                           */
+/* ========================================================================= */
+
+typedef struct {
+    float   prob;
+    int32_t id;
+} RCRE_ProbIdx;
+
+static int llm_cmp_prob_desc(const void* a, const void* b) {
+    const RCRE_ProbIdx* pa = (const RCRE_ProbIdx*)a;
+    const RCRE_ProbIdx* pb = (const RCRE_ProbIdx*)b;
+    if (pb->prob > pa->prob) return 1;
+    if (pb->prob < pa->prob) return -1;
+    return 0;
+}
+
+RCRE_NODISCARD RCRE_Sampler* rcre_sampler_create(size_t vocab_size, RCRE_SamplerConfig cfg) {
+    if (vocab_size == 0) return nullptr;
+    RCRE_Sampler* s = (RCRE_Sampler*)calloc(1, sizeof(RCRE_Sampler));
+    if (!s) return nullptr;
+    s->cfg = cfg;
+    if (s->cfg.rng_state == 0) s->cfg.rng_state = 0xCAFEBABE12345678ULL;
+    s->vocab_size = vocab_size;
+    s->scratch_probs = (float*)calloc(vocab_size, sizeof(float));
+    s->scratch_idx   = (int32_t*)calloc(vocab_size, sizeof(int32_t));
+    if (!s->scratch_probs || !s->scratch_idx) {
+        rcre_sampler_free(s);
+        return nullptr;
+    }
+    return s;
+}
+
+void rcre_sampler_free(RCRE_Sampler* sampler) {
+    if (!sampler) return;
+    free(sampler->scratch_probs);
+    free(sampler->scratch_idx);
+    free(sampler);
+}
+
+RCRE_NODISCARD int32_t rcre_sampler_sample(RCRE_Sampler* sampler, const float* logits,
+                                           const int32_t* recent_tokens, size_t n_recent) {
+    if (!sampler || !logits || sampler->vocab_size == 0) return 0;
+    size_t V = sampler->vocab_size;
+    float* p = sampler->scratch_probs;
+    memcpy(p, logits, V * sizeof(float));
+
+    /* 1. Repetition penalty over recent window */
+    if (sampler->cfg.repeat_penalty > 1.0f && recent_tokens && n_recent > 0) {
+        size_t w = (sampler->cfg.repeat_window > 0 && sampler->cfg.repeat_window < n_recent)
+                       ? sampler->cfg.repeat_window
+                       : n_recent;
+        size_t start = n_recent - w;
+        float rp = sampler->cfg.repeat_penalty;
+        for (size_t i = start; i < n_recent; ++i) {
+            int32_t tid = recent_tokens[i];
+            if (tid >= 0 && (size_t)tid < V) {
+                p[tid] = (p[tid] > 0.0f) ? (p[tid] / rp) : (p[tid] * rp);
+            }
+        }
+    }
+
+    /* Greedy argmax when temperature <= 0 */
+    if (sampler->cfg.temperature <= 0.0f) {
+        size_t best = 0;
+        for (size_t i = 1; i < V; ++i) {
+            if (p[i] > p[best]) best = i;
+        }
+        return (int32_t)best;
+    }
+
+    /* 2. Temperature scaling + numerically stable softmax */
+    float inv_t = 1.0f / sampler->cfg.temperature;
+    float max_l = p[0] * inv_t;
+    for (size_t i = 1; i < V; ++i) {
+        float v = p[i] * inv_t;
+        if (v > max_l) max_l = v;
+    }
+    float sum = 0.0f;
+    for (size_t i = 0; i < V; ++i) {
+        p[i] = expf(p[i] * inv_t - max_l);
+        sum += p[i];
+    }
+    float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 1.0f;
+    for (size_t i = 0; i < V; ++i) p[i] *= inv_sum;
+
+    /* 3. Sort candidate distribution when top-k / top-p / min-p active */
+    RCRE_ProbIdx* pairs = (RCRE_ProbIdx*)malloc(V * sizeof(RCRE_ProbIdx));
+    if (!pairs) return 0;
+    for (size_t i = 0; i < V; ++i) {
+        pairs[i].prob = p[i];
+        pairs[i].id   = (int32_t)i;
+    }
+    qsort(pairs, V, sizeof(RCRE_ProbIdx), llm_cmp_prob_desc);
+
+    size_t cutoff = V;
+    if (sampler->cfg.top_k > 0 && (size_t)sampler->cfg.top_k < cutoff) {
+        cutoff = (size_t)sampler->cfg.top_k;
+    }
+
+    if (sampler->cfg.min_p > 0.0f && cutoff > 1) {
+        float thresh = pairs[0].prob * sampler->cfg.min_p;
+        for (size_t i = 1; i < cutoff; ++i) {
+            if (pairs[i].prob < thresh) {
+                cutoff = i;
+                break;
+            }
+        }
+    }
+
+    if (sampler->cfg.top_p > 0.0f && sampler->cfg.top_p < 1.0f && cutoff > 1) {
+        float cum = 0.0f;
+        for (size_t i = 0; i < cutoff; ++i) {
+            cum += pairs[i].prob;
+            if (cum >= sampler->cfg.top_p) {
+                cutoff = i + 1U;
+                break;
+            }
+        }
+    }
+
+    float renorm = 0.0f;
+    for (size_t i = 0; i < cutoff; ++i) renorm += pairs[i].prob;
+    double r = ((double)(llm_splitmix64(&sampler->cfg.rng_state) >> 11) / 9007199254740992.0) * (double)renorm;
+    float cdf = 0.0f;
+    int32_t chosen = pairs[0].id;
+    for (size_t i = 0; i < cutoff; ++i) {
+        cdf += pairs[i].prob;
+        if ((double)cdf >= r) {
+            chosen = pairs[i].id;
+            break;
+        }
+    }
+
+    free(pairs);
+    return chosen;
+}
+
+/* ========================================================================= */
+/* 5. Modern LLaMA Model Inference & GGUF Binding                            */
+/* ========================================================================= */
+
+static size_t llm_weight_matrix_bytes(RCRE_LLMWeightType wtype, size_t rows, size_t cols) {
+    if (wtype == RCRE_LLM_W_Q8_0) {
+        return rows * ((cols + 31U) / 32U) * sizeof(RCRE_BlockQ8_0);
+    }
+    if (wtype == RCRE_LLM_W_Q4_0) {
+        return rows * ((cols + 31U) / 32U) * sizeof(RCRE_BlockQ4_0);
+    }
+    return rows * cols * sizeof(float);
+}
+
+RCRE_NODISCARD RCRE_LlamaModel* rcre_llama_create(RCRE_LlamaConfig cfg, RCRE_LLMWeightType wtype, uint64_t seed) {
+    if (cfg.vocab_size == 0 || cfg.dim == 0 || cfg.hidden_dim == 0 ||
+        cfg.n_layers == 0 || cfg.n_heads == 0 || cfg.n_kv_heads == 0 ||
+        (cfg.dim % cfg.n_heads) != 0 || (cfg.n_heads % cfg.n_kv_heads) != 0) {
+        return nullptr;
+    }
+    if (cfg.rms_eps <= 0.0f) cfg.rms_eps = 1e-5f;
+    if (cfg.rope_theta <= 0.0f) cfg.rope_theta = 10000.0f;
+    if (cfg.max_seq_len == 0) cfg.max_seq_len = 256;
+
+    RCRE_LlamaModel* m = (RCRE_LlamaModel*)calloc(1, sizeof(RCRE_LlamaModel));
+    if (!m) return nullptr;
+    m->cfg = cfg;
+    m->wtype = wtype;
+    m->owns_memory = true;
+    m->tok_emb   = (float*)calloc(cfg.vocab_size * cfg.dim, sizeof(float));
+    m->rms_final = (float*)calloc(cfg.dim, sizeof(float));
+    m->lm_head   = calloc(1, llm_weight_matrix_bytes(wtype, cfg.vocab_size, cfg.dim));
+    m->layers    = (RCRE_LlamaLayerWeights*)calloc(cfg.n_layers, sizeof(RCRE_LlamaLayerWeights));
+
+    if (!m->tok_emb || !m->rms_final || !m->lm_head || !m->layers) {
+        rcre_llama_free(m);
+        return nullptr;
+    }
+
+    size_t kv_dim = (cfg.dim / cfg.n_heads) * cfg.n_kv_heads;
+    float* tmp_w = (float*)malloc(cfg.hidden_dim * cfg.dim * sizeof(float) + cfg.vocab_size * cfg.dim * sizeof(float));
+    if (!tmp_w) { rcre_llama_free(m); return nullptr; }
+
+    for (size_t i = 0; i < cfg.vocab_size * cfg.dim; ++i) {
+        m->tok_emb[i] = llm_rand_normal(&seed, 0.02f);
+        tmp_w[i]      = m->tok_emb[i];
+    }
+    if (wtype == RCRE_LLM_W_Q8_0) {
+        for (size_t r = 0; r < cfg.vocab_size; ++r) {
+            rcre_quantize_q8_0(tmp_w + r * cfg.dim,
+                               (uint8_t*)m->lm_head + r * ((cfg.dim + 31U) / 32U) * sizeof(RCRE_BlockQ8_0),
+                               cfg.dim);
+        }
+    } else if (wtype == RCRE_LLM_W_Q4_0) {
+        for (size_t r = 0; r < cfg.vocab_size; ++r) {
+            rcre_quantize_q4_0(tmp_w + r * cfg.dim,
+                               (uint8_t*)m->lm_head + r * ((cfg.dim + 31U) / 32U) * sizeof(RCRE_BlockQ4_0),
+                               cfg.dim);
+        }
+    } else {
+        memcpy(m->lm_head, tmp_w, cfg.vocab_size * cfg.dim * sizeof(float));
+    }
+
+    for (size_t i = 0; i < cfg.dim; ++i) m->rms_final[i] = 1.0f;
+
+    for (size_t l = 0; l < cfg.n_layers; ++l) {
+        RCRE_LlamaLayerWeights* lw = &m->layers[l];
+        lw->wtype   = wtype;
+        lw->rms_att = malloc(cfg.dim * sizeof(float));
+        lw->rms_ffn = malloc(cfg.dim * sizeof(float));
+        lw->wq      = calloc(1, llm_weight_matrix_bytes(wtype, cfg.dim, cfg.dim));
+        lw->wk      = calloc(1, llm_weight_matrix_bytes(wtype, kv_dim, cfg.dim));
+        lw->wv      = calloc(1, llm_weight_matrix_bytes(wtype, kv_dim, cfg.dim));
+        lw->wo      = calloc(1, llm_weight_matrix_bytes(wtype, cfg.dim, cfg.dim));
+        lw->w_gate  = calloc(1, llm_weight_matrix_bytes(wtype, cfg.hidden_dim, cfg.dim));
+        lw->w_up    = calloc(1, llm_weight_matrix_bytes(wtype, cfg.hidden_dim, cfg.dim));
+        lw->w_down  = calloc(1, llm_weight_matrix_bytes(wtype, cfg.dim, cfg.hidden_dim));
+
+        if (!lw->rms_att || !lw->rms_ffn || !lw->wq || !lw->wk || !lw->wv ||
+            !lw->wo || !lw->w_gate || !lw->w_up || !lw->w_down) {
+            free(tmp_w);
+            rcre_llama_free(m);
+            return nullptr;
+        }
+        float* ra = (float*)lw->rms_att;
+        float* rf = (float*)lw->rms_ffn;
+        for (size_t i = 0; i < cfg.dim; ++i) { ra[i] = 1.0f; rf[i] = 1.0f; }
+
+        size_t specs[7][2] = {
+            {cfg.dim, cfg.dim}, {kv_dim, cfg.dim}, {kv_dim, cfg.dim}, {cfg.dim, cfg.dim},
+            {cfg.hidden_dim, cfg.dim}, {cfg.hidden_dim, cfg.dim}, {cfg.dim, cfg.hidden_dim}
+        };
+        void* dsts[7] = { lw->wq, lw->wk, lw->wv, lw->wo, lw->w_gate, lw->w_up, lw->w_down };
+        for (int p = 0; p < 7; ++p) {
+            size_t R = specs[p][0], C = specs[p][1];
+            float std = 1.0f / sqrtf((float)C);
+            for (size_t i = 0; i < R * C; ++i) tmp_w[i] = llm_rand_normal(&seed, std);
+            if (wtype == RCRE_LLM_W_Q8_0) {
+                size_t rb = ((C + 31U) / 32U) * sizeof(RCRE_BlockQ8_0);
+                for (size_t r = 0; r < R; ++r) {
+                    rcre_quantize_q8_0(tmp_w + r * C, (uint8_t*)dsts[p] + r * rb, C);
+                }
+            } else if (wtype == RCRE_LLM_W_Q4_0) {
+                size_t rb = ((C + 31U) / 32U) * sizeof(RCRE_BlockQ4_0);
+                for (size_t r = 0; r < R; ++r) {
+                    rcre_quantize_q4_0(tmp_w + r * C, (uint8_t*)dsts[p] + r * rb, C);
+                }
+            } else {
+                memcpy(dsts[p], tmp_w, R * C * sizeof(float));
+            }
+        }
+    }
+
+    free(tmp_w);
+    return m;
+}
+
+static bool llm_gguf_read_f32_tensor(const RCRE_GGUFFile* g, const char* name, float* dst, size_t expected_elems) {
+    const RCRE_GGUFTensorInfo* ti = rcre_gguf_find_tensor(g, name);
+    if (!ti) return false;
+    const void* raw = rcre_gguf_tensor_data(g, ti);
+    if (!raw) return false;
+    if (ti->type == RCRE_GGML_TYPE_F32 && ti->nbytes == expected_elems * 4U) {
+        memcpy(dst, raw, expected_elems * 4U);
+        return true;
+    }
+    if (ti->type == RCRE_GGML_TYPE_F16 && ti->nbytes == expected_elems * 2U) {
+        rcre_f16_to_f32(raw, dst, expected_elems);
+        return true;
+    }
+    if (ti->type == RCRE_GGML_TYPE_BF16 && ti->nbytes == expected_elems * 2U) {
+        rcre_bf16_to_f32(raw, dst, expected_elems);
+        return true;
+    }
+    if (ti->type == RCRE_GGML_TYPE_Q8_0) {
+        rcre_dequantize_q8_0(raw, dst, expected_elems);
+        return true;
+    }
+    if (ti->type == RCRE_GGML_TYPE_Q4_0) {
+        rcre_dequantize_q4_0(raw, dst, expected_elems);
+        return true;
+    }
+    return false;
+}
+
+static const void* llm_gguf_bind_weight(const RCRE_GGUFFile* g, const char* name, RCRE_LLMWeightType* out_wt) {
+    const RCRE_GGUFTensorInfo* ti = rcre_gguf_find_tensor(g, name);
+    if (!ti) return nullptr;
+    if (ti->type == RCRE_GGML_TYPE_F32) *out_wt = RCRE_LLM_W_F32;
+    else if (ti->type == RCRE_GGML_TYPE_Q8_0) *out_wt = RCRE_LLM_W_Q8_0;
+    else if (ti->type == RCRE_GGML_TYPE_Q4_0) *out_wt = RCRE_LLM_W_Q4_0;
+    else return nullptr;
+    return rcre_gguf_tensor_data(g, ti);
+}
+
+RCRE_NODISCARD RCRE_LlamaModel* rcre_llama_load_gguf(const char* filepath, int* out_err) {
+    if (out_err) *out_err = RCRE_ERR_INVALID_ARG;
+    if (!filepath) return nullptr;
+
+    RCRE_GGUFFile* g = (RCRE_GGUFFile*)calloc(1, sizeof(RCRE_GGUFFile));
+    if (!g) { if (out_err) *out_err = RCRE_ERR_OUT_OF_MEMORY; return nullptr; }
+    int rc = rcre_gguf_open(filepath, g);
+    if (rc != RCRE_OK) { free(g); if (out_err) *out_err = rc; return nullptr; }
+
+    uint32_t dim = 0, hidden = 0, n_layers = 0, n_heads = 0, n_kv = 0, ctx_len = 256, vocab = 0;
+    float eps = 1e-5f, theta = 10000.0f;
+    if (!rcre_gguf_get_u32(g, "llama.embedding_length", &dim) ||
+        !rcre_gguf_get_u32(g, "llama.feed_forward_length", &hidden) ||
+        !rcre_gguf_get_u32(g, "llama.block_count", &n_layers) ||
+        !rcre_gguf_get_u32(g, "llama.attention.head_count", &n_heads) ||
+        !rcre_gguf_get_u32(g, "llama.vocab_size", &vocab)) {
+        rcre_gguf_close(g); free(g);
+        if (out_err) *out_err = RCRE_ERR_IO;
+        return nullptr;
+    }
+    if (!rcre_gguf_get_u32(g, "llama.attention.head_count_kv", &n_kv)) n_kv = n_heads;
+    (void)rcre_gguf_get_u32(g, "llama.context_length", &ctx_len);
+    (void)rcre_gguf_get_f32(g, "llama.attention.layer_norm_rms_epsilon", &eps);
+    (void)rcre_gguf_get_f32(g, "llama.rope.freq_base", &theta);
+
+    RCRE_LlamaModel* m = (RCRE_LlamaModel*)calloc(1, sizeof(RCRE_LlamaModel));
+    if (!m) { rcre_gguf_close(g); free(g); if (out_err) *out_err = RCRE_ERR_OUT_OF_MEMORY; return nullptr; }
+    m->cfg = (RCRE_LlamaConfig){
+        .vocab_size  = vocab,
+        .dim         = dim,
+        .hidden_dim  = hidden,
+        .n_layers    = n_layers,
+        .n_heads     = n_heads,
+        .n_kv_heads  = n_kv,
+        .max_seq_len = ctx_len,
+        .rms_eps     = eps,
+        .rope_theta  = theta
+    };
+    m->owns_memory = false;
+    m->backed_gguf = g;
+
+    m->tok_emb   = (float*)malloc((size_t)vocab * dim * sizeof(float));
+    m->rms_final = (float*)malloc(dim * sizeof(float));
+    m->layers    = (RCRE_LlamaLayerWeights*)calloc(n_layers, sizeof(RCRE_LlamaLayerWeights));
+    if (!m->tok_emb || !m->rms_final || !m->layers ||
+        !llm_gguf_read_f32_tensor(g, "token_embd.weight", m->tok_emb, (size_t)vocab * dim) ||
+        !llm_gguf_read_f32_tensor(g, "output_norm.weight", m->rms_final, dim)) {
+        rcre_llama_free(m);
+        if (out_err) *out_err = RCRE_ERR_IO;
+        return nullptr;
+    }
+    RCRE_LLMWeightType head_wt = RCRE_LLM_W_F32;
+    m->lm_head = (void*)(uintptr_t)llm_gguf_bind_weight(g, "output.weight", &head_wt);
+    if (!m->lm_head) m->lm_head = m->tok_emb; /* Tied weights fallback */
+    m->wtype = head_wt;
+
+    for (uint32_t l = 0; l < n_layers; ++l) {
+        RCRE_LlamaLayerWeights* lw = &m->layers[l];
+        lw->rms_att = malloc(dim * sizeof(float));
+        lw->rms_ffn = malloc(dim * sizeof(float));
+        if (!lw->rms_att || !lw->rms_ffn) { rcre_llama_free(m); if (out_err) *out_err = RCRE_ERR_OUT_OF_MEMORY; return nullptr; }
+
+        char nbuf[128];
+        snprintf(nbuf, sizeof(nbuf), "blk.%u.attn_norm.weight", l);
+        if (!llm_gguf_read_f32_tensor(g, nbuf, (float*)lw->rms_att, dim)) { rcre_llama_free(m); if (out_err) *out_err = RCRE_ERR_IO; return nullptr; }
+        snprintf(nbuf, sizeof(nbuf), "blk.%u.ffn_norm.weight", l);
+        if (!llm_gguf_read_f32_tensor(g, nbuf, (float*)lw->rms_ffn, dim)) { rcre_llama_free(m); if (out_err) *out_err = RCRE_ERR_IO; return nullptr; }
+
+        const char* suffixes[7] = { "attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight",
+                                    "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight" };
+        void** targets[7] = { &lw->wq, &lw->wk, &lw->wv, &lw->wo, &lw->w_gate, &lw->w_up, &lw->w_down };
+        for (int p = 0; p < 7; ++p) {
+            RCRE_LLMWeightType wt = RCRE_LLM_W_F32;
+            snprintf(nbuf, sizeof(nbuf), "blk.%u.%s", l, suffixes[p]);
+            *targets[p] = (void*)(uintptr_t)llm_gguf_bind_weight(g, nbuf, &wt);
+            if (!*targets[p]) { rcre_llama_free(m); if (out_err) *out_err = RCRE_ERR_IO; return nullptr; }
+            lw->wtype = wt;
+        }
+    }
+
+    if (out_err) *out_err = RCRE_OK;
+    return m;
+}
+
+void rcre_llama_free(RCRE_LlamaModel* model) {
+    if (!model) return;
+    if (model->owns_memory) {
+        free(model->tok_emb);
+        free(model->rms_final);
+        free(model->lm_head);
+        if (model->layers) {
+            for (size_t l = 0; l < model->cfg.n_layers; ++l) {
+                RCRE_LlamaLayerWeights* lw = &model->layers[l];
+                free(lw->rms_att);
+                free(lw->rms_ffn);
+                free(lw->wq); free(lw->wk); free(lw->wv); free(lw->wo);
+                free(lw->w_gate); free(lw->w_up); free(lw->w_down);
+            }
+            free(model->layers);
+        }
+    } else {
+        free(model->tok_emb);
+        free(model->rms_final);
+        if (model->layers) {
+            for (size_t l = 0; l < model->cfg.n_layers; ++l) {
+                free(model->layers[l].rms_att);
+                free(model->layers[l].rms_ffn);
+            }
+            free(model->layers);
+        }
+        if (model->backed_gguf) {
+            rcre_gguf_close(model->backed_gguf);
+            free(model->backed_gguf);
+        }
+    }
+    free(model);
+}
+
+RCRE_NODISCARD RCRE_LlamaState* rcre_llama_state_create(const RCRE_LlamaConfig* cfg) {
+    if (!cfg || cfg->dim == 0 || cfg->n_heads == 0) return nullptr;
+    size_t kv_dim = (cfg->dim / cfg->n_heads) * cfg->n_kv_heads;
+    RCRE_LlamaState* s = (RCRE_LlamaState*)calloc(1, sizeof(RCRE_LlamaState));
+    if (!s) return nullptr;
+    s->cfg = *cfg;
+    s->x           = (float*)calloc(cfg->dim, sizeof(float));
+    s->xb          = (float*)calloc(cfg->dim, sizeof(float));
+    s->xb2         = (float*)calloc(cfg->dim, sizeof(float));
+    s->hb          = (float*)calloc(cfg->hidden_dim, sizeof(float));
+    s->hb2         = (float*)calloc(cfg->hidden_dim, sizeof(float));
+    s->q           = (float*)calloc(cfg->dim, sizeof(float));
+    s->k           = (float*)calloc(kv_dim, sizeof(float));
+    s->v           = (float*)calloc(kv_dim, sizeof(float));
+    s->att_out     = (float*)calloc(cfg->dim, sizeof(float));
+    s->logits      = (float*)calloc(cfg->vocab_size, sizeof(float));
+    s->key_cache   = (float*)calloc(cfg->n_layers * cfg->max_seq_len * kv_dim, sizeof(float));
+    s->value_cache = (float*)calloc(cfg->n_layers * cfg->max_seq_len * kv_dim, sizeof(float));
+    if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q || !s->k || !s->v ||
+        !s->att_out || !s->logits || !s->key_cache || !s->value_cache) {
+        rcre_llama_state_free(s);
+        return nullptr;
+    }
+    return s;
+}
+
+void rcre_llama_state_reset(RCRE_LlamaState* state) {
+    if (!state) return;
+    size_t kv_dim = (state->cfg.dim / state->cfg.n_heads) * state->cfg.n_kv_heads;
+    memset(state->key_cache, 0, state->cfg.n_layers * state->cfg.max_seq_len * kv_dim * sizeof(float));
+    memset(state->value_cache, 0, state->cfg.n_layers * state->cfg.max_seq_len * kv_dim * sizeof(float));
+}
+
+void rcre_llama_state_free(RCRE_LlamaState* state) {
+    if (!state) return;
+    free(state->x); free(state->xb); free(state->xb2);
+    free(state->hb); free(state->hb2);
+    free(state->q); free(state->k); free(state->v);
+    free(state->att_out); free(state->logits);
+    free(state->key_cache); free(state->value_cache);
+    free(state);
+}
+
+RCRE_NODISCARD int rcre_llama_forward_token(const RCRE_LlamaModel* model, RCRE_LlamaState* state,
+                                            int32_t token, size_t pos) {
+    if (!model || !state || token < 0 || (size_t)token >= model->cfg.vocab_size ||
+        pos >= model->cfg.max_seq_len) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    const RCRE_LlamaConfig* c = &model->cfg;
+    size_t dim = c->dim;
+    size_t hd  = dim / c->n_heads;
+    size_t kv_dim = hd * c->n_kv_heads;
+
+    memcpy(state->x, model->tok_emb + (size_t)token * dim, dim * sizeof(float));
+
+    for (size_t l = 0; l < c->n_layers; ++l) {
+        const RCRE_LlamaLayerWeights* lw = &model->layers[l];
+        rcre_llm_rmsnorm(state->xb, state->x, (const float*)lw->rms_att, dim, c->rms_eps);
+
+        rcre_llm_gemv_quant(lw->wtype, lw->wq, state->xb, state->q, dim, dim, model->pool);
+        rcre_llm_gemv_quant(lw->wtype, lw->wk, state->xb, state->k, kv_dim, dim, model->pool);
+        rcre_llm_gemv_quant(lw->wtype, lw->wv, state->xb, state->v, kv_dim, dim, model->pool);
+
+        rcre_llm_rope(state->q, state->k, c->n_heads, c->n_kv_heads, hd, pos, c->rope_theta);
+
+        size_t loff = l * c->max_seq_len * kv_dim;
+        float* k_cache_l = state->key_cache + loff;
+        float* v_cache_l = state->value_cache + loff;
+        memcpy(k_cache_l + pos * kv_dim, state->k, kv_dim * sizeof(float));
+        memcpy(v_cache_l + pos * kv_dim, state->v, kv_dim * sizeof(float));
+
+        rcre_llm_flash_attention_gqa(state->att_out, state->q, k_cache_l, v_cache_l,
+                                     c->n_heads, c->n_kv_heads, hd, pos + 1U, kv_dim);
+
+        rcre_llm_gemv_quant(lw->wtype, lw->wo, state->att_out, state->xb2, dim, dim, model->pool);
+        for (size_t i = 0; i < dim; ++i) state->x[i] += state->xb2[i];
+
+        /* SwiGLU FFN */
+        rcre_llm_rmsnorm(state->xb, state->x, (const float*)lw->rms_ffn, dim, c->rms_eps);
+        rcre_llm_gemv_quant(lw->wtype, lw->w_gate, state->xb, state->hb, c->hidden_dim, dim, model->pool);
+        rcre_llm_gemv_quant(lw->wtype, lw->w_up, state->xb, state->hb2, c->hidden_dim, dim, model->pool);
+        rcre_llm_swiglu(state->hb, state->hb, state->hb2, c->hidden_dim);
+        rcre_llm_gemv_quant(lw->wtype, lw->w_down, state->hb, state->xb2, dim, c->hidden_dim, model->pool);
+        for (size_t i = 0; i < dim; ++i) state->x[i] += state->xb2[i];
+    }
+
+    rcre_llm_rmsnorm(state->xb, state->x, model->rms_final, dim, c->rms_eps);
+    rcre_llm_gemv_quant(model->wtype, model->lm_head, state->xb, state->logits, c->vocab_size, dim, model->pool);
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_llama_generate(
+    const RCRE_LlamaModel* model,
+    RCRE_LlamaState* state,
+    RCRE_Sampler* sampler,
+    const int32_t* prompt_tokens,
+    size_t n_prompt,
+    int32_t* out_tokens,
+    size_t max_new_tokens,
+    size_t* out_generated
+) {
+    if (!model || !state || !sampler || !prompt_tokens || n_prompt == 0 || !out_tokens) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    rcre_llama_state_reset(state);
+
+    size_t pos = 0;
+    for (size_t i = 0; i < n_prompt && pos < model->cfg.max_seq_len; ++i) {
+        int rc = rcre_llama_forward_token(model, state, prompt_tokens[i], pos++);
+        if (rc != RCRE_OK) return rc;
+    }
+
+    size_t gen = 0;
+    int32_t next_tok = rcre_sampler_sample(sampler, state->logits, prompt_tokens, n_prompt);
+    while (gen < max_new_tokens && pos < model->cfg.max_seq_len) {
+        out_tokens[gen++] = next_tok;
+        if (gen == max_new_tokens || pos >= model->cfg.max_seq_len) break;
+        int rc = rcre_llama_forward_token(model, state, next_tok, pos++);
+        if (rc != RCRE_OK) return rc;
+        next_tok = rcre_sampler_sample(sampler, state->logits, out_tokens, gen);
+    }
+
+    if (out_generated) *out_generated = gen;
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 6. Phase 3: LoRA Adapters, Checkpointed/BF16 Training & Shard Stream      */
+/* ========================================================================= */
+
+RCRE_NODISCARD RCRE_LoRAAdapter* rcre_lora_create(size_t rank, size_t in_dim, size_t out_dim,
+                                                  float alpha, uint64_t seed) {
+    if (rank == 0 || in_dim == 0 || out_dim == 0) return nullptr;
+    RCRE_LoRAAdapter* l = (RCRE_LoRAAdapter*)calloc(1, sizeof(RCRE_LoRAAdapter));
+    if (!l) return nullptr;
+    l->rank    = rank;
+    l->in_dim  = in_dim;
+    l->out_dim = out_dim;
+    l->alpha   = alpha;
+    l->A       = (float*)calloc(rank * in_dim, sizeof(float));
+    l->B       = (float*)calloc(out_dim * rank, sizeof(float)); /* B starts at 0 per LoRA paper */
+    l->grad_A  = (float*)calloc(rank * in_dim, sizeof(float));
+    l->grad_B  = (float*)calloc(out_dim * rank, sizeof(float));
+    l->m_A     = (float*)calloc(rank * in_dim, sizeof(float));
+    l->v_A     = (float*)calloc(rank * in_dim, sizeof(float));
+    l->m_B     = (float*)calloc(out_dim * rank, sizeof(float));
+    l->v_B     = (float*)calloc(out_dim * rank, sizeof(float));
+    if (!l->A || !l->B || !l->grad_A || !l->grad_B || !l->m_A || !l->v_A || !l->m_B || !l->v_B) {
+        rcre_lora_free(l);
+        return nullptr;
+    }
+    float std = 1.0f / sqrtf((float)in_dim);
+    for (size_t i = 0; i < rank * in_dim; ++i) l->A[i] = llm_rand_normal(&seed, std);
+    return l;
+}
+
+void rcre_lora_free(RCRE_LoRAAdapter* lora) {
+    if (!lora) return;
+    free(lora->A); free(lora->B);
+    free(lora->grad_A); free(lora->grad_B);
+    free(lora->m_A); free(lora->v_A);
+    free(lora->m_B); free(lora->v_B);
+    free(lora);
+}
+
+void rcre_lora_forward_add(const RCRE_LoRAAdapter* lora, const float* x, float* y) {
+    if (!lora || !x || !y) return;
+    float scale = lora->alpha / (float)lora->rank;
+    float* h = (float*)malloc(lora->rank * sizeof(float));
+    if (!h) return;
+    for (size_t r = 0; r < lora->rank; ++r) {
+        h[r] = rcre_hal.dot_f32(lora->A + r * lora->in_dim, x, lora->in_dim);
+    }
+    for (size_t o = 0; o < lora->out_dim; ++o) {
+        y[o] += scale * rcre_hal.dot_f32(lora->B + o * lora->rank, h, lora->rank);
+    }
+    free(h);
+}
+
+RCRE_NODISCARD float rcre_lora_train_step(
+    RCRE_LoRAAdapter* lora,
+    const float* base_W_rowmajor,
+    const float* x,
+    const float* target_y,
+    float lr
+) {
+    if (!lora || !base_W_rowmajor || !x || !target_y) return -1.0f;
+    float* pred = (float*)calloc(lora->out_dim, sizeof(float));
+    float* h    = (float*)calloc(lora->rank, sizeof(float));
+    float* dy   = (float*)calloc(lora->out_dim, sizeof(float));
+    float* dh   = (float*)calloc(lora->rank, sizeof(float));
+    if (!pred || !h || !dy || !dh) {
+        free(pred); free(h); free(dy); free(dh);
+        return -1.0f;
+    }
+
+    rcre_hal.gemv_f32(lora->out_dim, lora->in_dim, 1.0f, base_W_rowmajor, lora->in_dim, x, 0.0f, pred);
+    float scale = lora->alpha / (float)lora->rank;
+    for (size_t r = 0; r < lora->rank; ++r) {
+        h[r] = rcre_hal.dot_f32(lora->A + r * lora->in_dim, x, lora->in_dim);
+    }
+    float loss = 0.0f;
+    for (size_t o = 0; o < lora->out_dim; ++o) {
+        pred[o] += scale * rcre_hal.dot_f32(lora->B + o * lora->rank, h, lora->rank);
+        float diff = pred[o] - target_y[o];
+        loss += 0.5f * diff * diff;
+        dy[o] = diff;
+    }
+    loss /= (float)lora->out_dim;
+
+    for (size_t o = 0; o < lora->out_dim; ++o) {
+        float g = scale * dy[o] / (float)lora->out_dim;
+        for (size_t r = 0; r < lora->rank; ++r) {
+            lora->grad_B[o * lora->rank + r] = g * h[r];
+            dh[r] += g * lora->B[o * lora->rank + r];
+        }
+    }
+    for (size_t r = 0; r < lora->rank; ++r) {
+        for (size_t i = 0; i < lora->in_dim; ++i) {
+            lora->grad_A[r * lora->in_dim + i] = dh[r] * x[i];
+        }
+    }
+
+    lora->step++;
+    float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f;
+    float bc1 = 1.0f - powf(b1, (float)lora->step);
+    float bc2 = 1.0f - powf(b2, (float)lora->step);
+
+    for (size_t i = 0; i < lora->rank * lora->in_dim; ++i) {
+        float g = lora->grad_A[i];
+        lora->m_A[i] = b1 * lora->m_A[i] + (1.0f - b1) * g;
+        lora->v_A[i] = b2 * lora->v_A[i] + (1.0f - b2) * g * g;
+        lora->A[i] -= lr * (lora->m_A[i] / bc1) / (sqrtf(lora->v_A[i] / bc2) + eps);
+    }
+    for (size_t i = 0; i < lora->out_dim * lora->rank; ++i) {
+        float g = lora->grad_B[i];
+        lora->m_B[i] = b1 * lora->m_B[i] + (1.0f - b1) * g;
+        lora->v_B[i] = b2 * lora->v_B[i] + (1.0f - b2) * g * g;
+        lora->B[i] -= lr * (lora->m_B[i] / bc1) / (sqrtf(lora->v_B[i] / bc2) + eps);
+    }
+
+    free(pred); free(h); free(dy); free(dh);
+    return loss;
+}
+
+static void llm_rmsnorm_backward(float* dx, float* dw, const float* dout,
+                                 const float* x, const float* w, size_t n, float eps) {
+    float ss = rcre_hal.dot_f32(x, x, n);
+    float inv_rms = 1.0f / sqrtf((ss / (float)n) + eps);
+    float inv_rms3_n = (inv_rms * inv_rms * inv_rms) / (float)n;
+    float sum_wdoutx = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        if (dw) dw[i] += dout[i] * x[i] * inv_rms;
+        sum_wdoutx += w[i] * dout[i] * x[i];
+    }
+    for (size_t i = 0; i < n; ++i) {
+        dx[i] += (w[i] * dout[i] * inv_rms) - x[i] * sum_wdoutx * inv_rms3_n;
+    }
+}
+
+RCRE_NODISCARD float rcre_llama_train_step_f32(
+    RCRE_LlamaModel* model,
+    const int32_t* tokens,
+    size_t seq_len,
+    float lr,
+    bool bf16_activations,
+    bool grad_checkpoint
+) {
+    if (!model || !tokens || seq_len < 2 || model->wtype != RCRE_LLM_W_F32) return -1.0f;
+    const RCRE_LlamaConfig* c = &model->cfg;
+    size_t T = seq_len - 1U;
+    size_t D = c->dim;
+    size_t H = c->hidden_dim;
+    size_t V = c->vocab_size;
+
+    /* Per-position F32 training buffers with true layer-boundary gradient checkpointing */
+    float* layer_in = (float*)calloc((c->n_layers + 1U) * T * D, sizeof(float));
+    float* final_x  = (float*)calloc(T * D, sizeof(float));
+    float* logits   = (float*)calloc(T * V, sizeof(float));
+    float* dlogits  = (float*)calloc(T * V, sizeof(float));
+    float* dx_cur   = (float*)calloc(T * D, sizeof(float));
+    float* dx_next  = (float*)calloc(T * D, sizeof(float));
+
+    /* Single-layer recompute / checkpoint scratch */
+    size_t save_layers = grad_checkpoint ? 1U : c->n_layers;
+    float* blk_norm1 = (float*)calloc(save_layers * T * D, sizeof(float));
+    float* blk_att   = (float*)calloc(save_layers * T * D, sizeof(float));
+    float* blk_res1  = (float*)calloc(save_layers * T * D, sizeof(float));
+    float* blk_norm2 = (float*)calloc(save_layers * T * D, sizeof(float));
+    float* blk_gate  = (float*)calloc(save_layers * T * H, sizeof(float));
+    float* blk_up    = (float*)calloc(save_layers * T * H, sizeof(float));
+    float* blk_act   = (float*)calloc(save_layers * T * H, sizeof(float));
+
+    if (!layer_in || !final_x || !logits || !dlogits || !dx_cur || !dx_next ||
+        !blk_norm1 || !blk_att || !blk_res1 || !blk_norm2 || !blk_gate || !blk_up || !blk_act) {
+        free(layer_in); free(final_x); free(logits); free(dlogits); free(dx_cur); free(dx_next);
+        free(blk_norm1); free(blk_att); free(blk_res1); free(blk_norm2);
+        free(blk_gate); free(blk_up); free(blk_act);
+        return -1.0f;
+    }
+
+    for (size_t t = 0; t < T; ++t) {
+        int32_t tok = tokens[t];
+        if (tok < 0 || (size_t)tok >= V) tok = 0;
+        memcpy(layer_in + t * D, model->tok_emb + (size_t)tok * D, D * sizeof(float));
+    }
+
+    for (size_t l = 0; l < c->n_layers; ++l) {
+        const RCRE_LlamaLayerWeights* lw = &model->layers[l];
+        size_t slot = grad_checkpoint ? 0U : l;
+        float* cur_in = layer_in + l * T * D;
+        float* cur_out = layer_in + (l + 1U) * T * D;
+        float* n1 = blk_norm1 + slot * T * D;
+        float* at = blk_att   + slot * T * D;
+        float* r1 = blk_res1  + slot * T * D;
+        float* n2 = blk_norm2 + slot * T * D;
+        float* gt = blk_gate  + slot * T * H;
+        float* up = blk_up    + slot * T * H;
+        float* ac = blk_act   + slot * T * H;
+
+        for (size_t t = 0; t < T; ++t) {
+            rcre_llm_rmsnorm(n1 + t * D, cur_in + t * D, (const float*)lw->rms_att, D, c->rms_eps);
+            llm_maybe_bf16_roundtrip(n1 + t * D, D, bf16_activations);
+            rcre_hal.gemv_f32(D, D, 1.0f, (const float*)lw->wo, D, n1 + t * D, 0.0f, at + t * D);
+            for (size_t i = 0; i < D; ++i) r1[t * D + i] = cur_in[t * D + i] + at[t * D + i];
+
+            rcre_llm_rmsnorm(n2 + t * D, r1 + t * D, (const float*)lw->rms_ffn, D, c->rms_eps);
+            llm_maybe_bf16_roundtrip(n2 + t * D, D, bf16_activations);
+            rcre_hal.gemv_f32(H, D, 1.0f, (const float*)lw->w_gate, D, n2 + t * D, 0.0f, gt + t * H);
+            rcre_hal.gemv_f32(H, D, 1.0f, (const float*)lw->w_up, D, n2 + t * D, 0.0f, up + t * H);
+            rcre_llm_swiglu(ac + t * H, gt + t * H, up + t * H, H);
+            rcre_hal.gemv_f32(D, H, 1.0f, (const float*)lw->w_down, H, ac + t * H, 0.0f, cur_out + t * D);
+            for (size_t i = 0; i < D; ++i) cur_out[t * D + i] += r1[t * D + i];
+        }
+    }
+
+    float total_loss = 0.0f;
+    float* head_w = (float*)model->lm_head;
+    for (size_t t = 0; t < T; ++t) {
+        rcre_llm_rmsnorm(final_x + t * D, layer_in + c->n_layers * T * D + t * D,
+                         model->rms_final, D, c->rms_eps);
+        rcre_hal.gemv_f32(V, D, 1.0f, head_w, D, final_x + t * D, 0.0f, logits + t * V);
+
+        float* lt = logits + t * V;
+        float* dl = dlogits + t * V;
+        float mx = lt[0];
+        for (size_t v = 1; v < V; ++v) if (lt[v] > mx) mx = lt[v];
+        float s = 0.0f;
+        for (size_t v = 0; v < V; ++v) {
+            dl[v] = expf(lt[v] - mx);
+            s += dl[v];
+        }
+        int32_t tgt = tokens[t + 1U];
+        if (tgt < 0 || (size_t)tgt >= V) tgt = 0;
+        for (size_t v = 0; v < V; ++v) dl[v] /= s;
+        total_loss += -logf(dl[tgt] + 1e-12f);
+        dl[tgt] -= 1.0f;
+        for (size_t v = 0; v < V; ++v) dl[v] /= (float)T;
+    }
+    total_loss /= (float)T;
+
+    /* Head backward */
+    float* d_final_w = (float*)calloc(D, sizeof(float));
+    float* dfx = (float*)calloc(T * D, sizeof(float));
+    if (d_final_w && dfx) {
+        for (size_t t = 0; t < T; ++t) {
+            for (size_t v = 0; v < V; ++v) {
+                float gv = dlogits[t * V + v];
+                for (size_t d = 0; d < D; ++d) {
+                    dfx[t * D + d] += gv * head_w[v * D + d];
+                    head_w[v * D + d] -= lr * gv * final_x[t * D + d];
+                }
+            }
+            llm_rmsnorm_backward(dx_cur + t * D, d_final_w, dfx + t * D,
+                                 layer_in + c->n_layers * T * D + t * D,
+                                 model->rms_final, D, c->rms_eps);
+        }
+        for (size_t d = 0; d < D; ++d) model->rms_final[d] -= lr * d_final_w[d];
+    }
+    free(d_final_w);
+    free(dfx);
+
+    /* Backward across transformer blocks (recomputing block activations if checkpointed) */
+    float* d_act  = (float*)calloc(H, sizeof(float));
+    float* d_gate = (float*)calloc(H, sizeof(float));
+    float* d_up   = (float*)calloc(H, sizeof(float));
+    float* d_n2   = (float*)calloc(D, sizeof(float));
+    float* d_n1   = (float*)calloc(D, sizeof(float));
+
+    for (size_t li = c->n_layers; li > 0; --li) {
+        size_t l = li - 1U;
+        RCRE_LlamaLayerWeights* lw = &model->layers[l];
+        size_t slot = grad_checkpoint ? 0U : l;
+        float* cur_in = layer_in + l * T * D;
+        float* n1 = blk_norm1 + slot * T * D;
+        float* at = blk_att   + slot * T * D;
+        float* r1 = blk_res1  + slot * T * D;
+        float* n2 = blk_norm2 + slot * T * D;
+        float* gt = blk_gate  + slot * T * H;
+        float* up = blk_up    + slot * T * H;
+        float* ac = blk_act   + slot * T * H;
+
+        if (grad_checkpoint) {
+            for (size_t t = 0; t < T; ++t) {
+                rcre_llm_rmsnorm(n1 + t * D, cur_in + t * D, (const float*)lw->rms_att, D, c->rms_eps);
+                llm_maybe_bf16_roundtrip(n1 + t * D, D, bf16_activations);
+                rcre_hal.gemv_f32(D, D, 1.0f, (const float*)lw->wo, D, n1 + t * D, 0.0f, at + t * D);
+                for (size_t i = 0; i < D; ++i) r1[t * D + i] = cur_in[t * D + i] + at[t * D + i];
+                rcre_llm_rmsnorm(n2 + t * D, r1 + t * D, (const float*)lw->rms_ffn, D, c->rms_eps);
+                llm_maybe_bf16_roundtrip(n2 + t * D, D, bf16_activations);
+                rcre_hal.gemv_f32(H, D, 1.0f, (const float*)lw->w_gate, D, n2 + t * D, 0.0f, gt + t * H);
+                rcre_hal.gemv_f32(H, D, 1.0f, (const float*)lw->w_up, D, n2 + t * D, 0.0f, up + t * H);
+                rcre_llm_swiglu(ac + t * H, gt + t * H, up + t * H, H);
+            }
+        }
+
+        memset(dx_next, 0, T * D * sizeof(float));
+        float* wo = (float*)lw->wo;
+        float* wg = (float*)lw->w_gate;
+        float* wu = (float*)lw->w_up;
+        float* wd = (float*)lw->w_down;
+        float* ra = (float*)lw->rms_att;
+        float* rf = (float*)lw->rms_ffn;
+
+        for (size_t t = 0; t < T; ++t) {
+            const float* dy = dx_cur + t * D;
+            memset(d_act, 0, H * sizeof(float));
+            memset(d_n2, 0, D * sizeof(float));
+            memset(d_n1, 0, D * sizeof(float));
+
+            for (size_t d = 0; d < D; ++d) {
+                float gd = dy[d];
+                for (size_t h = 0; h < H; ++h) {
+                    d_act[h] += gd * wd[d * H + h];
+                    wd[d * H + h] -= lr * gd * ac[t * H + h];
+                }
+            }
+            for (size_t h = 0; h < H; ++h) {
+                float g = gt[t * H + h];
+                float sig = 1.0f / (1.0f + expf(-g));
+                float silu = g * sig;
+                float dsilu = sig * (1.0f + g * (1.0f - sig));
+                d_up[h]   = d_act[h] * silu;
+                d_gate[h] = d_act[h] * up[t * H + h] * dsilu;
+            }
+            for (size_t h = 0; h < H; ++h) {
+                float dg = d_gate[h], du = d_up[h];
+                for (size_t d = 0; d < D; ++d) {
+                    d_n2[d] += dg * wg[h * D + d] + du * wu[h * D + d];
+                    wg[h * D + d] -= lr * dg * n2[t * D + d];
+                    wu[h * D + d] -= lr * du * n2[t * D + d];
+                }
+            }
+            /* dr1 accumulates residual path + FFN norm backward */
+            memcpy(dx_next + t * D, dy, D * sizeof(float));
+            llm_rmsnorm_backward(dx_next + t * D, nullptr, d_n2, r1 + t * D, rf, D, c->rms_eps);
+
+            for (size_t d = 0; d < D; ++d) {
+                float dr = dx_next[t * D + d];
+                for (size_t c2 = 0; c2 < D; ++c2) {
+                    d_n1[c2] += dr * wo[d * D + c2];
+                    wo[d * D + c2] -= lr * dr * n1[t * D + c2];
+                }
+            }
+            llm_rmsnorm_backward(dx_next + t * D, nullptr, d_n1, cur_in + t * D, ra, D, c->rms_eps);
+        }
+        memcpy(dx_cur, dx_next, T * D * sizeof(float));
+    }
+
+    for (size_t t = 0; t < T; ++t) {
+        int32_t tok = tokens[t];
+        if (tok >= 0 && (size_t)tok < V) {
+            for (size_t d = 0; d < D; ++d) {
+                model->tok_emb[(size_t)tok * D + d] -= lr * dx_cur[t * D + d];
+            }
+        }
+    }
+
+    free(d_act); free(d_gate); free(d_up); free(d_n2); free(d_n1);
+    free(layer_in); free(final_x); free(logits); free(dlogits); free(dx_cur); free(dx_next);
+    free(blk_norm1); free(blk_att); free(blk_res1); free(blk_norm2);
+    free(blk_gate); free(blk_up); free(blk_act);
+    return total_loss;
+}
+
+RCRE_NODISCARD int rcre_shard_stream_open(RCRE_ShardStream* stream, const char** shard_paths,
+                                          size_t num_shards, size_t seq_len) {
+    if (!stream || !shard_paths || num_shards == 0 || seq_len == 0) return RCRE_ERR_INVALID_ARG;
+    memset(stream, 0, sizeof(*stream));
+    stream->shard_paths = shard_paths;
+    stream->num_shards  = num_shards;
+    stream->seq_len     = seq_len;
+    return rcre_io_mmap_open(shard_paths[0], RCRE_IO_HINT_SEQUENTIAL, &stream->active_map);
+}
+
+RCRE_NODISCARD bool rcre_shard_stream_next(RCRE_ShardStream* stream, int32_t* x_out, int32_t* y_out) {
+    if (!stream || !x_out || !y_out) return false;
+    size_t need_bytes = (stream->seq_len + 1U) * sizeof(int32_t);
+    for (size_t attempts = 0; attempts < stream->num_shards; ++attempts) {
+        size_t total_tokens = stream->active_map.size / sizeof(int32_t);
+        if (stream->active_map.data && stream->token_cursor + stream->seq_len + 1U <= total_tokens) {
+            const int32_t* toks = (const int32_t*)(const void*)stream->active_map.data;
+            memcpy(x_out, toks + stream->token_cursor, stream->seq_len * sizeof(int32_t));
+            memcpy(y_out, toks + stream->token_cursor + 1U, stream->seq_len * sizeof(int32_t));
+            stream->token_cursor += stream->seq_len;
+            return true;
+        }
+        rcre_io_mmap_close(&stream->active_map);
+        stream->current_shard++;
+        if (stream->current_shard >= stream->num_shards) return false;
+        stream->token_cursor = 0;
+        if (rcre_io_mmap_open(stream->shard_paths[stream->current_shard],
+                              RCRE_IO_HINT_SEQUENTIAL, &stream->active_map) != RCRE_OK ||
+            stream->active_map.size < need_bytes) {
+            return false;
+        }
+    }
+    return false;
+}
+
+void rcre_shard_stream_close(RCRE_ShardStream* stream) {
+    if (!stream) return;
+    rcre_io_mmap_close(&stream->active_map);
+    memset(stream, 0, sizeof(*stream));
 }
 
 #endif /* RCRE_IMPLEMENTATION */

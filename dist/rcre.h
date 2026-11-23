@@ -5652,9 +5652,11 @@ void rcre_neon_gemm_i8(size_t M, size_t N, size_t K,
 #if !defined(__AVX2__)
   #if defined(__clang__)
     #pragma clang attribute push(__attribute__((target("avx2,fma"))), apply_to = function)
+    #define RCRE_NEED_POP_AVX2 2
   #elif defined(__GNUC__)
     #pragma GCC push_options
     #pragma GCC target("avx2,fma")
+    #define RCRE_NEED_POP_AVX2 1
   #endif
 #endif
 
@@ -6063,12 +6065,13 @@ void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
     }
 }
 
-#if !defined(__AVX2__)
-  #if defined(__clang__)
+#if defined(RCRE_NEED_POP_AVX2)
+  #if RCRE_NEED_POP_AVX2 == 2
     #pragma clang attribute pop
-  #elif defined(__GNUC__)
+  #elif RCRE_NEED_POP_AVX2 == 1
     #pragma GCC pop_options
   #endif
+  #undef RCRE_NEED_POP_AVX2
 #endif
 
 #endif /* (__x86_64__ || _M_X64) && AVX2-capable compiler */
@@ -6089,9 +6092,11 @@ void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
 #if !defined(__AVX512F__)
   #if defined(__clang__)
     #pragma clang attribute push(__attribute__((target("avx512f,fma"))), apply_to = function)
+    #define RCRE_NEED_POP_AVX512 2
   #elif defined(__GNUC__)
     #pragma GCC push_options
     #pragma GCC target("avx512f,fma")
+    #define RCRE_NEED_POP_AVX512 1
   #endif
 #endif
 
@@ -6228,12 +6233,13 @@ void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
     }
 }
 
-#if !defined(__AVX512F__)
-  #if defined(__clang__)
+#if defined(RCRE_NEED_POP_AVX512)
+  #if RCRE_NEED_POP_AVX512 == 2
     #pragma clang attribute pop
-  #elif defined(__GNUC__)
+  #elif RCRE_NEED_POP_AVX512 == 1
     #pragma GCC pop_options
   #endif
+  #undef RCRE_NEED_POP_AVX512
 #endif
 
 #endif /* (__x86_64__ || _M_X64) && AVX512F-capable compiler */
@@ -17723,7 +17729,7 @@ static int codec_j_read_bits(RCRE_JBitReader* r, int n) {
 static int codec_j_extend(int v, int t) {
     if (t == 0) return 0;
     int vt = 1 << (t - 1);
-    return (v < vt) ? (v + (-1 << t) + 1) : v;
+    return (v < vt) ? (v + (-(1 << t)) + 1) : v;
 }
 
 static int codec_j_huff_decode(RCRE_JBitReader* r, const RCRE_JHuff* h) {
@@ -24728,7 +24734,7 @@ void rcre_vis_terminal_heatmap(
     /* Header */
     printf("        ");
     for (size_t j = 0; j < p; ++j) {
-        char name[8];
+        char name[32];
         if (col_names && col_names[j]) {
             snprintf(name, sizeof(name), "%-7s", col_names[j]);
         } else {
@@ -24739,7 +24745,7 @@ void rcre_vis_terminal_heatmap(
     printf("\n");
 
     for (size_t i = 0; i < p; ++i) {
-        char row_name[8];
+        char row_name[32];
         if (col_names && col_names[i]) {
             snprintf(row_name, sizeof(row_name), "%-7s", col_names[i]);
         } else {
@@ -25795,7 +25801,7 @@ void rcre_gpt_backward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inpu
      * fall back to checked malloc/free. No VLAs: the per-block gradient
      * descriptor array is heap/arena scratch for arbitrary layer counts.
      */
-    GPTScratch scratch;
+    GPTScratch scratch = {0};
     gpt_scratch_begin(&scratch, model->arena);
 
     float *d_logits  = gpt_scratch_alloc(&scratch, sizeof(float) * BT * V);
@@ -25987,7 +25993,7 @@ bool rcre_gpt_forward_token(
      * Local buffers via the scratch pool: arena-resident models bump the
      * model's arena (rolled back per token); heap models malloc with checks.
      */
-    GPTScratch scratch;
+    GPTScratch scratch = {0};
     gpt_scratch_begin(&scratch, model->arena);
     float *x        = gpt_scratch_alloc(&scratch, sizeof(float) * C);
     float *x_norm   = gpt_scratch_alloc(&scratch, sizeof(float) * C);

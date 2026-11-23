@@ -90,7 +90,7 @@ bool rcre_gpt_forward_token(
      * Local buffers via the scratch pool: arena-resident models bump the
      * model's arena (rolled back per token); heap models malloc with checks.
      */
-    GPTScratch scratch;
+    GPTScratch scratch = {0};
     gpt_scratch_begin(&scratch, model->arena);
     float *x        = gpt_scratch_alloc(&scratch, sizeof(float) * C);
     float *x_norm   = gpt_scratch_alloc(&scratch, sizeof(float) * C);

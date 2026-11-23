@@ -461,7 +461,7 @@ void rcre_gpt_backward(RCRE_GPTModel *model, RCRE_GPTActs *acts, const int *inpu
      * fall back to checked malloc/free. No VLAs: the per-block gradient
      * descriptor array is heap/arena scratch for arbitrary layer counts.
      */
-    GPTScratch scratch;
+    GPTScratch scratch = {0};
     gpt_scratch_begin(&scratch, model->arena);
 
     float *d_logits  = gpt_scratch_alloc(&scratch, sizeof(float) * BT * V);

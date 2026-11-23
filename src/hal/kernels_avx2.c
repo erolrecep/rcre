@@ -15,9 +15,11 @@
 #if !defined(__AVX2__)
   #if defined(__clang__)
     #pragma clang attribute push(__attribute__((target("avx2,fma"))), apply_to = function)
+    #define RCRE_NEED_POP_AVX2 2
   #elif defined(__GNUC__)
     #pragma GCC push_options
     #pragma GCC target("avx2,fma")
+    #define RCRE_NEED_POP_AVX2 1
   #endif
 #endif
 
@@ -426,12 +428,13 @@ void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
     }
 }
 
-#if !defined(__AVX2__)
-  #if defined(__clang__)
+#if defined(RCRE_NEED_POP_AVX2)
+  #if RCRE_NEED_POP_AVX2 == 2
     #pragma clang attribute pop
-  #elif defined(__GNUC__)
+  #elif RCRE_NEED_POP_AVX2 == 1
     #pragma GCC pop_options
   #endif
+  #undef RCRE_NEED_POP_AVX2
 #endif
 
 #endif /* (__x86_64__ || _M_X64) && AVX2-capable compiler */

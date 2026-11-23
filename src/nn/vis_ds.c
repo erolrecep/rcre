@@ -26,7 +26,7 @@ void rcre_vis_terminal_heatmap(
     /* Header */
     printf("        ");
     for (size_t j = 0; j < p; ++j) {
-        char name[8];
+        char name[32];
         if (col_names && col_names[j]) {
             snprintf(name, sizeof(name), "%-7s", col_names[j]);
         } else {
@@ -37,7 +37,7 @@ void rcre_vis_terminal_heatmap(
     printf("\n");
 
     for (size_t i = 0; i < p; ++i) {
-        char row_name[8];
+        char row_name[32];
         if (col_names && col_names[i]) {
             snprintf(row_name, sizeof(row_name), "%-7s", col_names[i]);
         } else {

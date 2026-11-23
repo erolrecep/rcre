@@ -669,7 +669,7 @@ static int codec_j_read_bits(RCRE_JBitReader* r, int n) {
 static int codec_j_extend(int v, int t) {
     if (t == 0) return 0;
     int vt = 1 << (t - 1);
-    return (v < vt) ? (v + (-1 << t) + 1) : v;
+    return (v < vt) ? (v + (-(1 << t)) + 1) : v;
 }
 
 static int codec_j_huff_decode(RCRE_JBitReader* r, const RCRE_JHuff* h) {

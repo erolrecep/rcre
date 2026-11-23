@@ -14,9 +14,11 @@
 #if !defined(__AVX512F__)
   #if defined(__clang__)
     #pragma clang attribute push(__attribute__((target("avx512f,fma"))), apply_to = function)
+    #define RCRE_NEED_POP_AVX512 2
   #elif defined(__GNUC__)
     #pragma GCC push_options
     #pragma GCC target("avx512f,fma")
+    #define RCRE_NEED_POP_AVX512 1
   #endif
 #endif
 
@@ -153,12 +155,13 @@ void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
     }
 }
 
-#if !defined(__AVX512F__)
-  #if defined(__clang__)
+#if defined(RCRE_NEED_POP_AVX512)
+  #if RCRE_NEED_POP_AVX512 == 2
     #pragma clang attribute pop
-  #elif defined(__GNUC__)
+  #elif RCRE_NEED_POP_AVX512 == 1
     #pragma GCC pop_options
   #endif
+  #undef RCRE_NEED_POP_AVX512
 #endif
 
 #endif /* (__x86_64__ || _M_X64) && AVX512F-capable compiler */
