@@ -229,3 +229,42 @@ RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tenso
 
     return RCRE_OK;
 }
+
+RCRE_NODISCARD int rcre_ml_sparse_linear_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
+                                             float l1_reg, float l2_reg, size_t max_iter,
+                                             RCRE_Tensor* weights) {
+    if (!X || !X->data || !y || !y->data || !weights || !weights->data) return RCRE_ERR_INVALID_ARG;
+    if (X->ndim != 2 || y->ndim < 1 || weights->ndim < 1) return RCRE_ERR_SHAPE_MISMATCH;
+    size_t N = X->shape[0], D = X->shape[1];
+    if (y->shape[0] != N || weights->shape[0] != D) return RCRE_ERR_SHAPE_MISMATCH;
+    if (max_iter == 0) max_iter = 50;
+
+    const float* Xd = (const float*)X->data;
+    const float* yd = (const float*)y->data;
+    float* wd = (float*)weights->data;
+    memset(wd, 0, D * sizeof(float));
+
+    for (size_t it = 0; it < max_iter; ++it) {
+        for (size_t j = 0; j < D; ++j) {
+            float rho = 0.0f;
+            float zj = 0.0f;
+            for (size_t i = 0; i < N; ++i) {
+                float xij = Xd[i * D + j];
+                if (xij == 0.0f) continue;
+                float pred_wo = 0.0f;
+                for (size_t k = 0; k < D; ++k) {
+                    if (k != j) pred_wo += Xd[i * D + k] * wd[k];
+                }
+                rho += xij * (yd[i] - pred_wo);
+                zj  += xij * xij;
+            }
+            rho /= (float)N;
+            float denom = (zj / (float)N) + l2_reg;
+            if (denom < 1e-12f) denom = 1e-12f;
+            if (rho < -l1_reg) wd[j] = (rho + l1_reg) / denom;
+            else if (rho > l1_reg) wd[j] = (rho - l1_reg) / denom;
+            else wd[j] = 0.0f;
+        }
+    }
+    return RCRE_OK;
+}

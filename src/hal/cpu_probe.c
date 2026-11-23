@@ -113,6 +113,12 @@ static void probe_cpu(void) {
 #if defined(__ARM_NEON) || defined(__aarch64__) || defined(_M_ARM64)
     feats |= RCRE_CPU_FEAT_NEON;
 #endif
+#if defined(__ARM_FEATURE_DOTPROD)
+    feats |= RCRE_CPU_FEAT_ARM_DOTPROD;
+#endif
+#if defined(__ARM_FEATURE_SVE2)
+    feats |= RCRE_CPU_FEAT_ARM_SVE2;
+#endif
 
 #if defined(__wasm_simd128__)
     feats |= RCRE_CPU_FEAT_WASM_SIMD;

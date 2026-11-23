@@ -41,9 +41,7 @@ extern "C" {
 #endif
 
 #define RCRE_ABI_VERSION 0x020000U
-RCRE_NODISCARD static inline uint32_t rcre_abi_version(void) {
-    return RCRE_ABI_VERSION;
-}
+RCRE_NODISCARD uint32_t rcre_abi_version(void);
 
 #ifndef constexpr
   #if !defined(__cpp_constexpr) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L)
@@ -573,6 +571,28 @@ RCRE_NODISCARD int rcre_cv_match_descriptors(const RCRE_CV_Descriptor* a, int na
                                             float ratio_thresh, RCRE_CV_Match** out_matches,
                                             int* out_count, RCRE_Arena* arena);
 
+typedef struct RCRE_ORBKeypoint {
+    float    x;
+    float    y;
+    float    angle;   /* Dominant orientation in radians [-pi, pi] */
+    uint32_t score;   /* FAST corner score */
+    uint32_t bits[8]; /* 256-bit rotated BRIEF descriptor */
+} RCRE_ORBKeypoint;
+
+/** Detects FAST-9 corners on a grayscale/RGB F32 or U8 image and computes intensity-centroid orientation. */
+RCRE_NODISCARD int rcre_cv_fast_detect(const RCRE_Tensor* gray_f32, float threshold,
+                                       int max_keypoints, RCRE_ORBKeypoint** out_kps,
+                                       int* out_count, RCRE_Arena* arena);
+
+/** Computes 256-bit rotated BRIEF binary descriptors at detected ORB keypoints. */
+RCRE_NODISCARD int rcre_cv_orb_extract(const RCRE_Tensor* gray_f32, RCRE_ORBKeypoint* kps, int count);
+
+/** Matches two sets of ORB binary descriptors using Hamming distance (popcount) + ratio filter. */
+RCRE_NODISCARD int rcre_cv_orb_match(const RCRE_ORBKeypoint* a, int na,
+                                     const RCRE_ORBKeypoint* b, int nb,
+                                     int max_hamming, RCRE_CV_Match** out_matches,
+                                     int* out_count, RCRE_Arena* arena);
+
 /**
  * @brief Draws crosshair markers on an image for detected keypoints.
  */
@@ -833,6 +853,11 @@ RCRE_NODISCARD int rcre_ml_pegasos_svm_fit(const RCRE_Tensor* X, const RCRE_Tens
 RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tensor* weights, 
                                           RCRE_Tensor* preds);
 
+/** Fits L1+L2 ElasticNet sparse linear model via coordinate descent. */
+RCRE_NODISCARD int rcre_ml_sparse_linear_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
+                                             float l1_reg, float l2_reg, size_t max_iter,
+                                             RCRE_Tensor* weights);
+
 /* ========================================================================= */
 /* Clustering & Dimensionality Reduction (ML-REQ-02)                         */
 /* ========================================================================= */
@@ -1092,6 +1117,28 @@ RCRE_NODISCARD int rcre_ml_gbdt_predict(const RCRE_GBDTModel* model,
                                         const RCRE_Tensor* X, 
                                         RCRE_Tensor* preds);
 
+typedef struct RCRE_RFNode {
+    int32_t feature_idx;
+    float   threshold;
+    int32_t left;
+    int32_t right;
+    float   leaf_prob;
+} RCRE_RFNode;
+
+typedef struct RCRE_RandomForest {
+    RCRE_RFNode* nodes;
+    size_t*      tree_roots;
+    size_t       num_trees;
+    size_t       num_nodes;
+    size_t       num_features;
+    size_t       max_depth;
+} RCRE_RandomForest;
+
+RCRE_NODISCARD int rcre_ml_rf_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
+                                  size_t num_trees, size_t max_depth, uint64_t seed,
+                                  RCRE_Arena* arena, RCRE_RandomForest* out_rf);
+RCRE_NODISCARD int rcre_ml_rf_predict(const RCRE_RandomForest* rf, const RCRE_Tensor* X, RCRE_Tensor* out_probs);
+
 /* ========================================================================= */
 /* Similarity & Fast Vector Search: HNSW Graph Index (ML-REQ-04)             */
 /* ========================================================================= */
@@ -1231,6 +1278,35 @@ RCRE_CpuTopology rcre_cpu_get_topology(void);
 int rcre_cpu_get_memory_pressure(void);
 
 /* ========================================================================= */
+/* Apache Arrow C Data Interface (Standard Interoperability Structs)         */
+/* ========================================================================= */
+
+typedef struct RCRE_ArrowSchema {
+    const char*                format;      /* "f" = F32, "i" = I32, "C" = U8 */
+    const char*                name;
+    const char*                metadata;
+    int64_t                    flags;
+    int64_t                    n_children;
+    struct RCRE_ArrowSchema**  children;
+    struct RCRE_ArrowSchema*   dictionary;
+    void (*release)(struct RCRE_ArrowSchema*);
+    void*                      private_data;
+} RCRE_ArrowSchema;
+
+typedef struct RCRE_ArrowArray {
+    int64_t                   length;
+    int64_t                   null_count;
+    int64_t                   offset;
+    int64_t                   n_buffers;
+    int64_t                   n_children;
+    const void**              buffers;     /* buffers[0]=validity, buffers[1]=data */
+    struct RCRE_ArrowArray**  children;
+    struct RCRE_ArrowArray*   dictionary;
+    void (*release)(struct RCRE_ArrowArray*);
+    void*                     private_data;
+} RCRE_ArrowArray;
+
+/* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */
 /* ========================================================================= */
 #ifndef RCRE_NO_AUTOGRAD
@@ -1244,11 +1320,62 @@ int rcre_cpu_get_memory_pressure(void);
 #include "rcre_transformer.h"
 #endif
 
+#ifndef RCRE_BUILDING_FROM_SUBHEADER
 /* ========================================================================= */
 /* High-Performance Scientific Data I/O & Zero-Copy Ecosystem Bridges         */
 /* ========================================================================= */
 #ifndef RCRE_NO_IO
 #include "rcre_io.h"
+#endif
+
+/* ========================================================================= */
+/* Modern LLM Architecture, GGUF Reader, Q8_0/Q4_0 Quantization & LoRA       */
+/* ========================================================================= */
+#ifndef RCRE_NO_LLM
+#include "rcre_llm.h"
+#endif
+
+/* ========================================================================= */
+/* Zero-Dependency Image Codecs & Minimal ONNX Protobuf Inference            */
+/* ========================================================================= */
+#ifndef RCRE_NO_CODEC
+#include "rcre_codec.h"
+#endif
+#endif /* !RCRE_BUILDING_FROM_SUBHEADER */
+
+/* ========================================================================= */
+/* High-Performance Columnar DataFrame Engine (rcre_df)                      */
+/* ========================================================================= */
+#ifndef RCRE_NO_DF
+#include "rcre_df.h"
+#endif
+
+/* ========================================================================= */
+/* Exploratory Data Analysis & Statistics (rcre_stat)                        */
+/* ========================================================================= */
+#ifndef RCRE_NO_STAT
+#include "rcre_stat.h"
+#endif
+
+/* ========================================================================= */
+/* Feature Engineering & Data Preprocessing (rcre_prep)                      */
+/* ========================================================================= */
+#ifndef RCRE_NO_PREP
+#include "rcre_prep.h"
+#endif
+
+/* ========================================================================= */
+/* Model Evaluation Metrics & Validation Protocol (rcre_metric)              */
+/* ========================================================================= */
+#ifndef RCRE_NO_METRIC
+#include "rcre_metric.h"
+#endif
+
+/* ========================================================================= */
+/* Data Science Terminal & ASCII Visualizations (rcre_vis_ds)                */
+/* ========================================================================= */
+#ifndef RCRE_NO_VIS_DS
+#include "rcre_vis_ds.h"
 #endif
 
 #ifdef __cplusplus

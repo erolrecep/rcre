@@ -31,6 +31,7 @@ pub struct RCRE_Tensor {
 }
 
 extern "C" {
+    pub fn rcre_abi_version() -> u32;
     pub fn rcre_arena_create(capacity: usize) -> *mut RCRE_Arena;
     pub fn rcre_arena_reset(arena: *mut RCRE_Arena);
     pub fn rcre_arena_destroy(arena: *mut RCRE_Arena);
@@ -87,6 +88,10 @@ impl Drop for Arena {
             self.raw = std::ptr::null_mut();
         }
     }
+}
+
+pub fn abi_version() -> u32 {
+    unsafe { rcre_abi_version() }
 }
 
 /// Returns the detected host CPU brand string.

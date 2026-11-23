@@ -109,10 +109,13 @@ def main():
     rcre_transformer_h = root / "include" / "rcre_transformer.h"
     rcre_sparse_h = root / "include" / "rcre_sparse.h"
     rcre_io_h = root / "include" / "rcre_io.h"
+    rcre_llm_h = root / "include" / "rcre_llm.h"
+    rcre_codec_h = root / "include" / "rcre_codec.h"
+    rcre_gpu_h = root / "include" / "extras" / "rcre_gpu.h"
     rcre_cam_h = root / "include" / "extras" / "rcre_cam.h"
 
     all_funcs = []
-    for h in [rcre_h, rcre_prof_h, rcre_autograd_h, rcre_transformer_h, rcre_sparse_h, rcre_io_h, rcre_cam_h]:
+    for h in [rcre_h, rcre_prof_h, rcre_autograd_h, rcre_transformer_h, rcre_sparse_h, rcre_io_h, rcre_llm_h, rcre_codec_h, rcre_gpu_h, rcre_cam_h]:
         if h.exists():
             all_funcs.extend(parse_header(h))
 

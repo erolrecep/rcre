@@ -15,6 +15,31 @@
     "header": "rcre.h"
   },
   {
+    "name": "rcre_arena_from_buffer",
+    "return_type": "int",
+    "brief": "Initializes a stack/static RCRE_Arena over caller-supplied memory",
+    "params": [
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Caller-owned RCRE_Arena struct to initialize."
+      },
+      {
+        "name": "backing_buffer",
+        "type": "void*",
+        "description": "Pre-allocated memory buffer (64-byte alignment recommended)."
+      },
+      {
+        "name": "capacity",
+        "type": "size_t",
+        "description": "Byte capacity of backing_buffer."
+      }
+    ],
+    "returns": "RCRE_OK on success, RCRE_ERR_INVALID_ARG on NULL/zero capacity.",
+    "category": "Memory & Arenas",
+    "header": "rcre.h"
+  },
+  {
     "name": "rcre_arena_alloc",
     "return_type": "void*",
     "brief": "Allocates an aligned buffer from the linear scratchpad arena.",
@@ -372,6 +397,131 @@
     ],
     "returns": "",
     "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_tensor_broadcast_shape",
+    "return_type": "int",
+    "brief": "Computes NumPy-compatible broadcast output shape for two tensors.",
+    "params": [
+      {
+        "name": "shape_a",
+        "type": "const size_t*",
+        "description": ""
+      },
+      {
+        "name": "ndim_a",
+        "type": "uint8_t",
+        "description": ""
+      },
+      {
+        "name": "shape_b",
+        "type": "const size_t*",
+        "description": ""
+      },
+      {
+        "name": "ndim_b",
+        "type": "uint8_t",
+        "description": ""
+      },
+      {
+        "name": "out_shape[RCRE_MAX_DIMS]",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "out_ndim",
+        "type": "uint8_t*",
+        "description": ""
+      }
+    ],
+    "returns": "RCRE_OK if shapes are broadcast-compatible, RCRE_ERR_SHAPE_MISMATCH otherwise.",
+    "category": "Strided Tensors",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_tensor_broadcast_to",
+    "return_type": "RCRE_Tensor",
+    "brief": "Creates a zero-copy strided broadcast view (0-stride along expanded axes).",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "target_shape",
+        "type": "const size_t*",
+        "description": ""
+      },
+      {
+        "name": "target_ndim",
+        "type": "uint8_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Strided Tensors",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_tensor_add_broadcast",
+    "return_type": "int",
+    "brief": "Broadcasted elementwise addition: dst = a + b (F32).",
+    "params": [
+      {
+        "name": "a",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "b",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Strided Tensors",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_tensor_mul_broadcast",
+    "return_type": "int",
+    "brief": "Broadcasted elementwise multiplication: dst = a * b (F32).",
+    "params": [
+      {
+        "name": "a",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "b",
+        "type": "const RCRE_Tensor*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "dst",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Strided Tensors",
     "header": "rcre.h"
   },
   {
@@ -2594,6 +2744,76 @@
     "header": "rcre.h"
   },
   {
+    "name": "rcre_hal_gemm_f32_mt",
+    "return_type": "void",
+    "brief": "Opt-in parallel SGEMM partitioned over RCRE_ThreadPool row slabs.",
+    "params": [
+      {
+        "name": "pool",
+        "type": "RCRE_ThreadPool*",
+        "description": ""
+      },
+      {
+        "name": "M",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "N",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "K",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "alpha",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "A",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "B",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "ldb",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "beta",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "C",
+        "type": "float*",
+        "description": ""
+      },
+      {
+        "name": "ldc",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Hardware Acceleration",
+    "header": "rcre.h"
+  },
+  {
     "name": "rcre_hal_init",
     "return_type": "void",
     "brief": "Probes host hardware and initializes dynamic SIMD dispatch table.",
@@ -3408,6 +3628,76 @@
     "header": "rcre_io.h"
   },
   {
+    "name": "rcre_io_safetensors_get_tensor_f32",
+    "return_type": "int",
+    "brief": "Retrieves a tensor by name and guarantees output is an F32 tensor.",
+    "params": [
+      {
+        "name": "archive",
+        "type": "const RCRE_SafeTensorsArchive*",
+        "description": "Open .safetensors archive."
+      },
+      {
+        "name": "name",
+        "type": "const char*",
+        "description": "Tensor name to look up."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Destination arena for dequantized payload (ignored if zero-copy F32)."
+      },
+      {
+        "name": "out_f32_tensor",
+        "type": "RCRE_Tensor*",
+        "description": "Output F32 tensor."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_safetensors_get_tensor_slice_f32",
+    "return_type": "int",
+    "brief": "Retrieves a 64-bit row-sliced view/dequantization of a tensor by name",
+    "params": [
+      {
+        "name": "archive",
+        "type": "const RCRE_SafeTensorsArchive*",
+        "description": "Open .safetensors archive."
+      },
+      {
+        "name": "name",
+        "type": "const char*",
+        "description": "Tensor name to look up."
+      },
+      {
+        "name": "start_row",
+        "type": "size_t",
+        "description": "Starting outer dimension row index."
+      },
+      {
+        "name": "num_rows",
+        "type": "size_t",
+        "description": "Number of rows to read in this chunk."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Destination arena for F32 tensor or unaligned copy."
+      },
+      {
+        "name": "out_slice",
+        "type": "RCRE_Tensor*",
+        "description": "Output sliced F32 tensor [num_rows, ...]."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
     "name": "rcre_io_safetensors_save",
     "return_type": "int",
     "brief": "Saves an array of named RCRE_Tensors to a 64-byte aligned .safetensors file.",
@@ -3493,6 +3783,181 @@
     "header": "rcre_io.h"
   },
   {
+    "name": "rcre_io_byte_shuffle_16",
+    "return_type": "void",
+    "brief": "Applies a SIMD-accelerated 16-bit byte-shuffle transpose on F16/BF16 elements,",
+    "params": [
+      {
+        "name": "src",
+        "type": "const void*",
+        "description": "Source array of num_elements 16-bit values (2 * num_elements bytes)."
+      },
+      {
+        "name": "dst",
+        "type": "void*",
+        "description": "Destination buffer (2 * num_elements bytes)."
+      },
+      {
+        "name": "num_elements",
+        "type": "size_t",
+        "description": "Number of 16-bit elements."
+      }
+    ],
+    "returns": "",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_byte_unshuffle_16",
+    "return_type": "void",
+    "brief": "Reconstructs interleaved 16-bit elements from a 16-bit byte-shuffled buffer.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const void*",
+        "description": "Byte-shuffled source buffer (2 * num_elements bytes)."
+      },
+      {
+        "name": "dst",
+        "type": "void*",
+        "description": "Destination array of num_elements 16-bit values."
+      },
+      {
+        "name": "num_elements",
+        "type": "size_t",
+        "description": "Number of 16-bit elements."
+      }
+    ],
+    "returns": "",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_f16_to_f32",
+    "return_type": "void",
+    "brief": "Converts an array of IEEE-754 binary16 (FP16) floats to IEEE-754 F32",
+    "params": [
+      {
+        "name": "src",
+        "type": "const void*",
+        "description": "Pointer to numel uint16_t FP16 values."
+      },
+      {
+        "name": "dst",
+        "type": "float*",
+        "description": "Pointer to numel float output buffer."
+      },
+      {
+        "name": "numel",
+        "type": "size_t",
+        "description": "Number of elements to convert."
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_bf16_to_f32",
+    "return_type": "void",
+    "brief": "Converts an array of Google Brain bfloat16 (BF16) floats to IEEE-754 F32",
+    "params": [
+      {
+        "name": "src",
+        "type": "const void*",
+        "description": "Pointer to numel uint16_t BF16 values."
+      },
+      {
+        "name": "dst",
+        "type": "float*",
+        "description": "Pointer to numel float output buffer."
+      },
+      {
+        "name": "numel",
+        "type": "size_t",
+        "description": "Number of elements to convert."
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_f32_to_f16",
+    "return_type": "void",
+    "brief": "Converts an array of IEEE-754 F32 floats to IEEE-754 binary16 (FP16).",
+    "params": [
+      {
+        "name": "src",
+        "type": "const float*",
+        "description": "Pointer to numel float values."
+      },
+      {
+        "name": "dst",
+        "type": "void*",
+        "description": "Pointer to numel uint16_t FP16 output buffer."
+      },
+      {
+        "name": "numel",
+        "type": "size_t",
+        "description": "Number of elements to convert."
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_f32_to_bf16",
+    "return_type": "void",
+    "brief": "Converts an array of IEEE-754 F32 floats to Google Brain bfloat16 (BF16)",
+    "params": [
+      {
+        "name": "src",
+        "type": "const float*",
+        "description": "Pointer to numel float values."
+      },
+      {
+        "name": "dst",
+        "type": "void*",
+        "description": "Pointer to numel uint16_t BF16 output buffer."
+      },
+      {
+        "name": "numel",
+        "type": "size_t",
+        "description": "Number of elements to convert."
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_tensor_to_f32",
+    "return_type": "int",
+    "brief": "Converts any RCRE_Tensor (U8, I32, F16, BF16, or F32) to an F32 tensor.",
+    "params": [
+      {
+        "name": "src",
+        "type": "const RCRE_Tensor*",
+        "description": "Input source tensor."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Destination arena to allocate output F32 tensor (ignored if already F32 view)."
+      },
+      {
+        "name": "dst_f32",
+        "type": "RCRE_Tensor*",
+        "description": "Output F32 tensor."
+      }
+    ],
+    "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Strided Tensors",
+    "header": "rcre_io.h"
+  },
+  {
     "name": "rcre_io_compress_tensor",
     "return_type": "int",
     "brief": "Compresses a contiguous 32-bit tensor (F32/I32) using SIMD byte-shuffle",
@@ -3539,6 +4004,30 @@
       }
     ],
     "returns": "RCRE_OK on success, error code otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_is_io_uring_available",
+    "return_type": "bool",
+    "brief": "Checks if Linux io_uring ring buffer syscalls are supported by host kernel.",
+    "params": [],
+    "returns": "true if io_uring is functional, false otherwise.",
+    "category": "Data I/O & Interop",
+    "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_io_stream_enable_async",
+    "return_type": "int",
+    "brief": "Enables asynchronous non-blocking prefetch on an open RCRE_TensorStream.",
+    "params": [
+      {
+        "name": "stream",
+        "type": "RCRE_TensorStream*",
+        "description": "Active tensor stream."
+      }
+    ],
+    "returns": "RCRE_OK on success.",
     "category": "Data I/O & Interop",
     "header": "rcre_io.h"
   },
@@ -3721,6 +4210,235 @@
     "returns": "RCRE_OK on success, error code otherwise.",
     "category": "Data I/O & Interop",
     "header": "rcre_io.h"
+  },
+  {
+    "name": "rcre_llm_rmsnorm",
+    "return_type": "void",
+    "brief": "Modern LLM Architecture, GGUF v2/v3 Reader, Block Quantization (Q8_0/Q4_0),",
+    "params": [
+      {
+        "name": "out",
+        "type": "float*",
+        "description": ""
+      },
+      {
+        "name": "x",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "weight",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "eps",
+        "type": "float",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_llm.h"
+  },
+  {
+    "name": "rcre_llm_flash_attention_gqa",
+    "return_type": "void",
+    "brief": "Flash-Attention style single-query online softmax attention over KV cache.",
+    "params": [
+      {
+        "name": "out",
+        "type": "float*",
+        "description": ""
+      },
+      {
+        "name": "q",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "k_cache",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "v_cache",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "n_heads",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n_kv_heads",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "head_dim",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "seq_len",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "kv_stride_elems",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_llm.h"
+  },
+  {
+    "name": "rcre_llama_train_step_f32",
+    "return_type": "float",
+    "brief": "Trains a tiny F32 LLaMA step with gradient checkpointing and optional BF16 activation rounding.",
+    "params": [
+      {
+        "name": "model",
+        "type": "RCRE_LlamaModel*",
+        "description": ""
+      },
+      {
+        "name": "tokens",
+        "type": "const int32_t*",
+        "description": ""
+      },
+      {
+        "name": "seq_len",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "lr",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "bf16_activations",
+        "type": "bool",
+        "description": ""
+      },
+      {
+        "name": "grad_checkpoint",
+        "type": "bool",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_llm.h"
+  },
+  {
+    "name": "rcre_codec_load_ppm",
+    "return_type": "int",
+    "brief": "Zero-Dependency Image Codecs (PNG / JPEG / BMP / PPM) & Minimal ONNX Protobuf Runner",
+    "params": [
+      {
+        "name": "filepath",
+        "type": "const char*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "out_img",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_codec.h"
+  },
+  {
+    "name": "rcre_gpu_is_available",
+    "return_type": "bool",
+    "brief": "Optional Hardware GPU Offload Extras (Metal on macOS, WebGPU in browser, CPU fallback)",
+    "params": [],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_gpu.h"
+  },
+  {
+    "name": "rcre_gpu_gemm_f32",
+    "return_type": "int",
+    "brief": "Executes C = alpha * A * B + beta * C on Metal GPU (or CPU HAL fallback).",
+    "params": [
+      {
+        "name": "M",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "N",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "K",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "alpha",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "A",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "B",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "ldb",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "beta",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "C",
+        "type": "float*",
+        "description": ""
+      },
+      {
+        "name": "ldc",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre_gpu.h"
   },
   {
     "name": "rcre_cam_default_config",

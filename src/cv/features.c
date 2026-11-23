@@ -434,3 +434,195 @@ void rcre_cv_draw_markers(RCRE_Tensor* image, const RCRE_CV_Point* points, int c
         }
     }
 }
+
+/* ========================================================================= */
+/* FAST-9 Corner Detector & Rotated BRIEF (ORB) Binary Descriptors           */
+/* ========================================================================= */
+
+static const int feat_fast_dx[16] = {0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1};
+static const int feat_fast_dy[16] = {-3, -3, -2, -1, 0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3};
+
+static int feat_cmp_orb_desc(const void* a, const void* b) {
+    const RCRE_ORBKeypoint* ka = (const RCRE_ORBKeypoint*)a;
+    const RCRE_ORBKeypoint* kb = (const RCRE_ORBKeypoint*)b;
+    if (kb->score > ka->score) return 1;
+    if (kb->score < ka->score) return -1;
+    return 0;
+}
+
+RCRE_NODISCARD int rcre_cv_fast_detect(const RCRE_Tensor* gray_f32, float threshold,
+                                       int max_keypoints, RCRE_ORBKeypoint** out_kps,
+                                       int* out_count, RCRE_Arena* arena) {
+    if (!gray_f32 || !gray_f32->data || !out_kps || !out_count || !arena ||
+        gray_f32->dtype != RCRE_DTYPE_F32 || gray_f32->ndim < 2) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    int H = (int)gray_f32->shape[0];
+    int W = (int)gray_f32->shape[1];
+    if (H < 12 || W < 12) {
+        *out_kps = nullptr;
+        *out_count = 0;
+        return RCRE_OK;
+    }
+    const float* d = (const float*)gray_f32->data;
+    int sy = (int)gray_f32->strides[0];
+    int sx = (int)gray_f32->strides[1];
+
+    int cap = (max_keypoints > 0 && max_keypoints < 4096) ? 4096 : (max_keypoints > 0 ? max_keypoints : 2048);
+    RCRE_ORBKeypoint* cands = (RCRE_ORBKeypoint*)rcre_arena_alloc(arena, (size_t)cap * sizeof(RCRE_ORBKeypoint), 16);
+    if (!cands) return RCRE_ERR_OUT_OF_MEMORY;
+
+    int count = 0;
+    for (int y = 5; y < H - 5 && count < cap; ++y) {
+        for (int x = 5; x < W - 5 && count < cap; ++x) {
+            float center = d[y * sy + x * sx];
+            /* Quick 4-cardinal rejection check (0, 4, 8, 12) */
+            float c0  = d[(y + feat_fast_dy[0]) * sy + (x + feat_fast_dx[0]) * sx];
+            float c4  = d[(y + feat_fast_dy[4]) * sy + (x + feat_fast_dx[4]) * sx];
+            float c8  = d[(y + feat_fast_dy[8]) * sy + (x + feat_fast_dx[8]) * sx];
+            float c12 = d[(y + feat_fast_dy[12]) * sy + (x + feat_fast_dx[12]) * sx];
+            int nb = (c0 > center + threshold) + (c4 > center + threshold) +
+                     (c8 > center + threshold) + (c12 > center + threshold);
+            int nd = (c0 < center - threshold) + (c4 < center - threshold) +
+                     (c8 < center - threshold) + (c12 < center - threshold);
+            if (nb < 2 && nd < 2) continue;
+
+            int run_b = 0, run_d = 0, max_b = 0, max_d = 0;
+            float score_sum = 0.0f;
+            for (int k = 0; k < 25; ++k) { /* wrap around ring of 16 + 9 */
+                int idx = k & 15;
+                float val = d[(y + feat_fast_dy[idx]) * sy + (x + feat_fast_dx[idx]) * sx];
+                if (val > center + threshold) {
+                    run_b++;
+                    run_d = 0;
+                    if (run_b > max_b) max_b = run_b;
+                    score_sum += val - center;
+                } else if (val < center - threshold) {
+                    run_d++;
+                    run_b = 0;
+                    if (run_d > max_d) max_d = run_d;
+                    score_sum += center - val;
+                } else {
+                    run_b = 0;
+                    run_d = 0;
+                }
+            }
+            if (max_b >= 9 || max_d >= 9) {
+                /* Intensity centroid orientation inside radius 5 */
+                float m10 = 0.0f, m01 = 0.0f;
+                for (int dy = -5; dy <= 5; ++dy) {
+                    for (int dx = -5; dx <= 5; ++dx) {
+                        if (dx * dx + dy * dy <= 25) {
+                            float pv = d[(y + dy) * sy + (x + dx) * sx];
+                            m10 += (float)dx * pv;
+                            m01 += (float)dy * pv;
+                        }
+                    }
+                }
+                RCRE_ORBKeypoint kp;
+                memset(&kp, 0, sizeof(kp));
+                kp.x = (float)x;
+                kp.y = (float)y;
+                kp.angle = atan2f(m01, m10);
+                kp.score = (uint32_t)(score_sum * 100.0f);
+                cands[count++] = kp;
+            }
+        }
+    }
+
+    if (count > 1) {
+        qsort(cands, (size_t)count, sizeof(RCRE_ORBKeypoint), feat_cmp_orb_desc);
+    }
+    if (max_keypoints > 0 && count > max_keypoints) count = max_keypoints;
+    *out_kps = cands;
+    *out_count = count;
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD int rcre_cv_orb_extract(const RCRE_Tensor* gray_f32, RCRE_ORBKeypoint* kps, int count) {
+    if (!gray_f32 || !gray_f32->data || !kps || count < 0 ||
+        gray_f32->dtype != RCRE_DTYPE_F32 || gray_f32->ndim < 2) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (count == 0) return RCRE_OK;
+    int H = (int)gray_f32->shape[0];
+    int W = (int)gray_f32->shape[1];
+    const float* d = (const float*)gray_f32->data;
+    int sy = (int)gray_f32->strides[0];
+    int sx = (int)gray_f32->strides[1];
+
+    /* Deterministic 256 rotated-BRIEF test pairs inside [-11, 11] patch */
+    uint32_t seed = 0x517CC1B7U;
+    int8_t pat[256][4];
+    for (int i = 0; i < 256; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            seed = seed * 1664525U + 1013904223U;
+            pat[i][j] = (int8_t)(((int)(seed >> 24) % 23) - 11);
+        }
+    }
+
+    for (int k = 0; k < count; ++k) {
+        float ca = cosf(kps[k].angle);
+        float sa = sinf(kps[k].angle);
+        float cx = kps[k].x, cy = kps[k].y;
+        memset(kps[k].bits, 0, sizeof(kps[k].bits));
+
+        for (int b = 0; b < 256; ++b) {
+            int x1 = feat_clamp_int((int)lrintf(cx + pat[b][0] * ca - pat[b][1] * sa), 0, W - 1);
+            int y1 = feat_clamp_int((int)lrintf(cy + pat[b][0] * sa + pat[b][1] * ca), 0, H - 1);
+            int x2 = feat_clamp_int((int)lrintf(cx + pat[b][2] * ca - pat[b][3] * sa), 0, W - 1);
+            int y2 = feat_clamp_int((int)lrintf(cy + pat[b][2] * sa + pat[b][3] * ca), 0, H - 1);
+            if (d[y1 * sy + x1 * sx] < d[y2 * sy + x2 * sx]) {
+                kps[k].bits[b >> 5] |= (1U << (b & 31));
+            }
+        }
+    }
+    return RCRE_OK;
+}
+
+static inline int feat_popcnt32(uint32_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcount(x);
+#else
+    int c = 0;
+    while (x) { x &= x - 1U; c++; }
+    return c;
+#endif
+}
+
+RCRE_NODISCARD int rcre_cv_orb_match(const RCRE_ORBKeypoint* a, int na,
+                                     const RCRE_ORBKeypoint* b, int nb,
+                                     int max_hamming, RCRE_CV_Match** out_matches,
+                                     int* out_count, RCRE_Arena* arena) {
+    if (!a || !b || !out_matches || !out_count || !arena || na <= 0 || nb <= 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    RCRE_CV_Match* m = (RCRE_CV_Match*)rcre_arena_alloc(arena, (size_t)na * sizeof(RCRE_CV_Match), 16);
+    if (!m) return RCRE_ERR_OUT_OF_MEMORY;
+
+    int mc = 0;
+    for (int i = 0; i < na; ++i) {
+        int best_dist = 257;
+        int best_j = -1;
+        for (int j = 0; j < nb; ++j) {
+            int dist = 0;
+            for (int w = 0; w < 8; ++w) dist += feat_popcnt32(a[i].bits[w] ^ b[j].bits[w]);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_j = j;
+            }
+        }
+        if (best_j >= 0 && best_dist <= max_hamming) {
+            m[mc++] = (RCRE_CV_Match){
+                .p        = { a[i].x, a[i].y },
+                .q        = { b[best_j].x, b[best_j].y },
+                .idx_a    = i,
+                .idx_b    = best_j,
+                .distance = (float)best_dist
+            };
+        }
+    }
+    *out_matches = m;
+    *out_count = mc;
+    return RCRE_OK;
+}
