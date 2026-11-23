@@ -32,7 +32,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 2
-#define RCRE_VERSION_MINOR 1
+#define RCRE_VERSION_MINOR 2
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -1470,6 +1470,87 @@ float  rcre_sf_expit_f32(float x);
  * named op so tests can gate it directly.
  */
 double rcre_sf_norm_cdf_f64(double x);
+
+/* ========================================================================= */
+/* H1 (2.2.0) — Reproducible Random & Quasi-Random Streams                  */
+/* =========================================================================
+ *
+ * Design (docs/hpc.md):
+ *  - PCG64 is the counter-based workhorse: 128-bit LCG state, stream is a
+ *    pure function of its seed; bit-exact conformance with numpy PCG64
+ *    (the MIT-licensed reference) is checked in tests/rng_fixtures/.
+ *  - Substreams follow the slab determinism contract: worker i derives
+ *    its stream from (base, i), so pooled runs are bit-identical across
+ *    pool sizes and machines.
+ *  - Sobol' (d = 1..20, new Joe-Kuo direction numbers) and Halton
+ *    (bases 2,3,5) are the quasi-Monte Carlo paths; both are stateless
+ *    random-access (point n is a pure function of n), which is what
+ *    out-of-core and slab-parallel code needs.
+ */
+
+/* PCG64 state (128-bit state + 128-bit odd increment). */
+typedef struct RCRE_RNG {
+    uint64_t s_hi, s_lo;   /* 128-bit LCG state: hi << 64 | lo */
+    uint64_t i_hi, i_lo;   /* 128-bit increment (odd): hi << 64 | lo */
+} RCRE_RNG;
+
+/**
+ * @brief Seed from four 64-bit parts — numpy-compatible.
+ *
+ * With s0..s3 = SeedSequence(seed).generate_state(4), this produces the
+ * exact state/inc of np.random.PCG64(seed); the raw stream is bit-identical
+ * to random_raw. See tests/rng_fixtures/ for the checked-in oracle.
+ */
+void rcre_rng_pcg_init_parts(RCRE_RNG* r,
+                             uint64_t s0, uint64_t s1,
+                             uint64_t s2, uint64_t s3);
+
+/** @brief Seed from a single 64-bit seed (RCRE-native derivation, splitmix64). */
+void rcre_rng_pcg_init(RCRE_RNG* r, uint64_t seed);
+
+/** @brief Next raw 64-bit output (step + XSL-RR output). */
+uint64_t rcre_rng_pcg_next_u64(RCRE_RNG* r);
+/** @brief Next 32 bits (top word of a raw draw). */
+uint32_t rcre_rng_pcg_next_u32(RCRE_RNG* r);
+/** @brief Next uniform double in [0,1): (u >> 11) * 2^-53 (numpy mapping). */
+double rcre_rng_pcg_next_f64(RCRE_RNG* r);
+/** @brief Next uniform float in [0,1): top 24 bits. */
+float rcre_rng_pcg_next_f32(RCRE_RNG* r);
+
+/**
+ * @brief Deterministic substream for worker `id` of base RNG.
+ *
+ * Slab determinism contract: the substream depends only on (base,
+ * id) — never on pool size or core count — so pooled results are
+ * bit-identical across machines. Distinct ids give statistically
+ * independent streams (chi-square gated in tests).
+ */
+void rcre_rng_pcg_substream(const RCRE_RNG* base, uint64_t id, RCRE_RNG* out);
+
+/** @brief Fast-forward the state by n steps (O(popcount(n)) via the jump table). */
+void rcre_rng_pcg_skip(RCRE_RNG* r, uint64_t n);
+
+/* Quasi-random (low-discrepancy) state — point counters for the
+ * stateless-at API; stateless code should call *_at directly. */
+typedef struct RCRE_QRNG {
+    uint64_t n;   /* number of points already emitted (0-based next index) */
+    int      d;   /* active dimension count (clamped per sequence) */
+} RCRE_QRNG;
+
+#define RCRE_QRNG_SOBOL_DIM  20   /* shipped Joe-Kuo direction numbers */
+#define RCRE_QRNG_HALTON_DIM 3    /* bases 2, 3, 5 */
+
+/** @brief Sobol' point x_n (n >= 0, x_0 = 0), d components, bit-exact
+ *  scipy 1.18.1 qmc.Sobol(scramble=False) for n < 2^20 (shipped depth). */
+void rcre_qrng_sobol_at(uint64_t n, int d, double* out);
+/** @brief Stateful iteration: init, then point() advances n. */
+void rcre_qrng_sobol_init(RCRE_QRNG* q, int d);
+void rcre_qrng_sobol_point(RCRE_QRNG* q, double* out);
+
+/** @brief Halton point (n is 0-based; point n+1), k components. */
+void rcre_qrng_halton_at(uint64_t n, int k, double* out);
+void rcre_qrng_halton_init(RCRE_QRNG* q, int k);
+void rcre_qrng_halton_point(RCRE_QRNG* q, double* out);
 
 /* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */
@@ -5110,6 +5191,112 @@ static inline float rcre_rng_gaussian_f32(uint64_t* state, float mean, float std
 }
 
 #endif /* RCRE_RNG_H */
+
+/* --- PCG64 Skip-Ahead Jump Table (H1) --- */
+#ifndef RCRE_RNG_PCG_TABLE_H
+#define RCRE_RNG_PCG_TABLE_H
+/* Generated: PCG64 skip-ahead table (Python-verified homomorphism + brute).
+   J[b] = (A_b, S_b): A_b = M^(2^b) mod 2^128, S_b = sum_{k<2^b} M^k mod 2^128. */
+typedef struct { uint64_t ah, al, sh, sl; } RCRE_RNG_PCG_Jump;
+static const RCRE_RNG_PCG_Jump RCRE_RNG_PCG_JUMP[64] = {
+    {0x2360ed051fc65da4ull, 0x4385df649fccf645ull, 0x0000000000000000ull, 0x0000000000000001ull},
+    {0x17bce35bdf69743cull, 0x529ed9eb20e0ae99ull, 0x2360ed051fc65da4ull, 0x4385df649fccf646ull},
+    {0xf4dd417327db7a9bull, 0xd194dfbe42d45771ull, 0x610e11a14b07e063ull, 0x817fa187adefba1cull},
+    {0x6347af777a7898f6ull, 0xd1a2d6f33505ffe1ull, 0x22ab9b110b39425cull, 0x292967d144306478ull},
+    {0xb6a4239f3b315f84ull, 0xf6ef6d3d288c03c1ull, 0x6ed699db168fb143ull, 0xa9072151352439f0ull},
+    {0x2c82901ad1cb0cd1ull, 0x82b631ba6b261781ull, 0x8b144946fe438d94ull, 0xe2deea36e161b7e0ull},
+    {0xdab03f988288676eull, 0xe49e66c4d2746f01ull, 0xdb8761d6953b44b4ull, 0xdf08a33a26647fc0ull},
+    {0x602167331d86cf56ull, 0x84fe009a6d09de01ull, 0x8c092058667b980dull, 0x6f07a26f432d3f80ull},
+    {0x61ecb5c24d95b058ull, 0xf04c80a23697bc01ull, 0x199cae2243bd8562ull, 0xfca794c07eeb7f00ull},
+    {0x4a5c31e0654c28aaull, 0x60474e83bf3f7801ull, 0x87d1e4ce03f09acaull, 0x27636e67d81afe00ull},
+    {0xae4f079d54fbece1ull, 0x478331d3c6bef001ull, 0x81417387e08bb69aull, 0xd185d642d945fc00ull},
+    {0x101b8cb830c7cb92ull, 0x7ff1ed50ae7de001ull, 0xe093f57a0dda0f13ull, 0x437e6f1056cbf800ull},
+    {0xf54a27fc056b00e7ull, 0x563f3505e0fbc001ull, 0x3a0ec29f30ee08f0ull, 0xea79ae3b3e97f000ull},
+    {0xdf8a6fc1a833d201ull, 0xf98d719dd1f78001ull, 0xb3716586d218cca0ull, 0x8022cc60c12fe000ull},
+    {0x5480a5015f101a4eull, 0xa7e3f183e3ef0001ull, 0x25e1de6cc7a9c89bull, 0x91c4d46a925fc000ull},
+    {0xa498509e76e5d792ull, 0x5f539c28c7de0001ull, 0x4bc96ebfe12bf7d0ull, 0x3d92777964bf8000ull},
+    {0x0798a3d8b10dc72eull, 0x60121cd58fbc0001ull, 0x5d57b94afaf08e76ull, 0x63a72983c97f0000ull},
+    {0x1647d1e78ec02e66ull, 0x5fafcbbb1f780001ull, 0x26d2394f2dc26b7eull, 0x6c4f3d4b92fe0000ull},
+    {0xa7c982285e72bf8cull, 0x0c8ddfb63ef00001ull, 0x092acaf128cba5f3ull, 0x846223a725fc0000ull},
+    {0x3eb78ee8fb8c56dbull, 0xc5d4e06c7de00001ull, 0xb9ff6d21bd6edb42ull, 0x75d2eb8e4bf80000ull},
+    {0x72d03b6f4681f2f9ull, 0xfe8e44d8fbc00001ull, 0x72f64944eb196ff8ull, 0x8fe0681c97f00000ull},
+    {0xea85f81e4f502c9bull, 0xc8ae99b1f7800001ull, 0xd2a8477e4dbba5efull, 0x30ab14392fe00000ull},
+    {0x629c320db08b00c6ull, 0xbfa57363ef000001ull, 0x3fee0d4f29496552ull, 0xa4ff38725fc00000ull},
+    {0xc5c4b9ce268d074aull, 0x386be6c7de000001ull, 0x90c0589db5533c56ull, 0x58a2b0e4bf800000ull},
+    {0xf30bbbbed1596187ull, 0x555bcd8fbc000001ull, 0xc96ad9dd31689e70ull, 0xebd661c97f000000ull},
+    {0x4a1000fb26c9eedaull, 0x3cc79b1f78000001ull, 0x8eb88b115bdccbf2ull, 0xc1f0c392fe000000ull},
+    {0x89fb5307f6bf8ce2ull, 0xc1cf363ef0000001ull, 0xe5d914dd8bff9429ull, 0x2cf18725fc000000ull},
+    {0x830b7b3358a5d67eull, 0xa49e6c7de0000001ull, 0x24e6dd9de9d51960ull, 0xfe230e4bf8000000ull},
+    {0xfd8a51da91a69fe1ull, 0xcd3cd8fbc0000001ull, 0x7641328320f1f6fcull, 0x8d461c97f0000000ull},
+    {0x901a48b642b90b55ull, 0xaa79b1f780000001ull, 0x8b038003a682fee3ull, 0x5e8c392fe0000000ull},
+    {0x118cdefdf32144f3ull, 0x94f363ef00000001ull, 0xf0855afe5b82416full, 0xcd18725fc0000000ull},
+    {0x0a88c0a91cff4308ull, 0x29e6c7de00000001ull, 0xfcd399e4d0f59183ull, 0xda30e4bf80000000ull},
+    {0x433bef4314f16a94ull, 0x53cd8fbc00000001ull, 0xd74683c909af5d98ull, 0xb461c97f00000000ull},
+    {0xc294b02995ae6738ull, 0xa79b1f7800000001ull, 0x98e84a87b26fa575ull, 0x68c392fe00000000ull},
+    {0x913575e0da8b16b1ull, 0x4f363ef000000001ull, 0x7a2db8a5e122f3faull, 0xd18725fc00000000ull},
+    {0x2f61b9f871cf4e62ull, 0x9e6c7de000000001ull, 0x0d50bda5b3548c35ull, 0xa30e4bf800000000ull},
+    {0x78d26ccbd68320c5ull, 0x3cd8fbc000000001ull, 0x3a7c9cb32ae3a96bull, 0x461c97f000000000ull},
+    {0x8b7ebd037898518aull, 0x79b1f78000000001ull, 0xd4953f0566b196d6ull, 0x8c392fe000000000ull},
+    {0x0b5507b61f78e314ull, 0xf363ef0000000001ull, 0x29169487110c3dadull, 0x18725fc000000000ull},
+    {0x4f884628f812c629ull, 0xe6c7de0000000001ull, 0x5dbd82ff30bcbb5aull, 0x30e4bf8000000000ull},
+    {0xbe896744d4a98c53ull, 0xcd8fbc0000000001ull, 0x48bc6dc29c0a76b4ull, 0x61c97f0000000000ull},
+    {0xdaf63a553b6318a7ull, 0x9b1f780000000001ull, 0xbe7e7a962258ed68ull, 0xc392fe0000000000ull},
+    {0x2d7a23d8bf06314full, 0x363ef00000000001ull, 0xf113716fedc1dad1ull, 0x8725fc0000000000ull},
+    {0x392b046a9f0c629eull, 0x6c7de00000000001ull, 0xb280d3ee7fc3b5a3ull, 0x0e4bf80000000000ull},
+    {0xeb30fbb9c218c53cull, 0xd8fbc00000000001ull, 0xa6696c1790876b46ull, 0x1c97f00000000000ull},
+    {0xb9cdc30594318a79ull, 0xb1f7800000000001ull, 0x5271e919650ed68cull, 0x392fe00000000000ull},
+    {0x014ab453686314f3ull, 0x63ef000000000001ull, 0xbb6015dbda1dad18ull, 0x725fc00000000000ull},
+    {0x395221c7d0c629e6ull, 0xc7de000000000001ull, 0xd0b13a5bf43b5a30ull, 0xe4bf800000000000ull},
+    {0x4d972813a18c53cdull, 0x8fbc000000000001ull, 0x0926af48e876b461ull, 0xc97f000000000000ull},
+    {0x06f9e2374318a79bull, 0x1f78000000000001ull, 0xb15e48d5d0ed68c3ull, 0x92fe000000000000ull},
+    {0xbd220cae86314f36ull, 0x3ef0000000000001ull, 0xdf003abba1dad187ull, 0x25fc000000000000ull},
+    {0x36fd3a5d0c629e6cull, 0x7de0000000000001ull, 0xaf0f19b743b5a30eull, 0x4bf8000000000000ull},
+    {0x60def8ba18c53cd8ull, 0xfbc0000000000001ull, 0x2258c46e876b461cull, 0x97f0000000000000ull},
+    {0x8d500174318a79b1ull, 0xf780000000000001ull, 0x559bccdd0ed68c39ull, 0x2fe0000000000000ull},
+    {0x48e842e86314f363ull, 0xef00000000000001ull, 0xeee0a9ba1dad1872ull, 0x5fc0000000000000ull},
+    {0x4af185d0c629e6c7ull, 0xde00000000000001ull, 0xec6593743b5a30e4ull, 0xbf80000000000000ull},
+    {0x7a670ba18c53cd8full, 0xbc00000000000001ull, 0x135c26e876b461c9ull, 0x7f00000000000000ull},
+    {0x86de174318a79b1full, 0x7800000000000001ull, 0x10fc4dd0ed68c392ull, 0xfe00000000000000ull},
+    {0x55fc2e86314f363eull, 0xf000000000000001ull, 0xcb089ba1dad18725ull, 0xfc00000000000000ull},
+    {0xccf85d0c629e6c7dull, 0xe000000000000001ull, 0x3a513743b5a30e4bull, 0xf800000000000000ull},
+    {0x1df0ba18c53cd8fbull, 0xc000000000000001ull, 0x05a26e876b461c97ull, 0xf000000000000000ull},
+    {0x4be174318a79b1f7ull, 0x8000000000000001ull, 0x4f44dd0ed68c392full, 0xe000000000000000ull},
+    {0xd7c2e86314f363efull, 0x0000000000000001ull, 0xae89ba1dad18725full, 0xc000000000000000ull},
+    {0xaf85d0c629e6c7deull, 0x0000000000000001ull, 0x9d13743b5a30e4bfull, 0x8000000000000000ull},
+};
+
+#endif /* RCRE_RNG_PCG_TABLE_H */
+
+/* --- Sobol' Direction Numbers (H1) --- */
+#ifndef RCRE_RNG_SOBOL_TABLE_H
+#define RCRE_RNG_SOBOL_TABLE_H
+/* Generated: Sobol' direction numbers (new Joe-Kuo set, d = 1..20), 64-bit fixed-point
+   words: word_j = v_{k,j} * 2^64 (exact). Bit-exact reference: scipy 1.18.1
+   qmc.Sobol(scramble=False); conformance stream in tests/rng_fixtures/. */
+static const uint64_t RCRE_SOBOL_V[21][20] = {
+    /* d= 1 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0x6000000000000000ull, 0x3000000000000000ull, 0x1800000000000000ull, 0x0c00000000000000ull, 0x0600000000000000ull, 0x0300000000000000ull, 0x0180000000000000ull, 0x00c0000000000000ull, 0x0060000000000000ull, 0x0030000000000000ull, 0x0018000000000000ull, 0x000c000000000000ull, 0x0006000000000000ull, 0x0003000000000000ull, 0x0001800000000000ull, 0x0000c00000000000ull, 0x0000600000000000ull, 0x0000300000000000ull },
+    /* d= 2 */ { 0x8000000000000000ull, 0x4000000000000000ull, 0x6000000000000000ull, 0x5000000000000000ull, 0x7800000000000000ull, 0x4400000000000000ull, 0x6600000000000000ull, 0x5500000000000000ull, 0x7f80000000000000ull, 0x4040000000000000ull, 0x6060000000000000ull, 0x5050000000000000ull, 0x7878000000000000ull, 0x4444000000000000ull, 0x6666000000000000ull, 0x5555000000000000ull, 0x7fff800000000000ull, 0x4000400000000000ull, 0x6000600000000000ull, 0x5000500000000000ull },
+    /* d= 3 */ { 0x8000000000000000ull, 0x4000000000000000ull, 0xa000000000000000ull, 0xf000000000000000ull, 0x7800000000000000ull, 0xb400000000000000ull, 0xd200000000000000ull, 0x4b00000000000000ull, 0xad80000000000000ull, 0xf440000000000000ull, 0x72a0000000000000ull, 0xbbf0000000000000ull, 0xd5f8000000000000ull, 0x40f4000000000000ull, 0xa072000000000000ull, 0xf0bb000000000000ull, 0x78d5800000000000ull, 0xb440400000000000ull, 0xd2a0a00000000000ull, 0x4bf0f00000000000ull },
+    /* d= 4 */ { 0x8000000000000000ull, 0x4000000000000000ull, 0xe000000000000000ull, 0x7000000000000000ull, 0xa800000000000000ull, 0x8c00000000000000ull, 0xd600000000000000ull, 0x3100000000000000ull, 0x4b80000000000000ull, 0xfdc0000000000000ull, 0x7ca0000000000000ull, 0xbf30000000000000ull, 0x9ed8000000000000ull, 0xcc04000000000000ull, 0x360e000000000000ull, 0x4107000000000000ull, 0xe38a800000000000ull, 0x71c8c00000000000ull, 0xaaad600000000000ull, 0x8e33100000000000ull },
+    /* d= 5 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0x6000000000000000ull, 0x9000000000000000ull, 0x4800000000000000ull, 0x2400000000000000ull, 0xa600000000000000ull, 0xe700000000000000ull, 0xc780000000000000ull, 0x7540000000000000ull, 0x8ea0000000000000ull, 0x51d0000000000000ull, 0x2a38000000000000ull, 0xb54c000000000000ull, 0xeea6000000000000ull, 0xc1d9000000000000ull, 0x623c800000000000ull, 0x914e400000000000ull, 0x48ac600000000000ull, 0x26d7700000000000ull },
+    /* d= 6 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0x2000000000000000ull, 0x5000000000000000ull, 0xf800000000000000ull, 0xec00000000000000ull, 0x7200000000000000ull, 0xad00000000000000ull, 0x1b80000000000000ull, 0x90c0000000000000ull, 0xd820000000000000ull, 0xbc50000000000000ull, 0x8af8000000000000ull, 0x41ec000000000000ull, 0x69f2000000000000ull, 0x3d6d000000000000ull, 0xc3bb800000000000ull, 0x2c00c00000000000ull, 0x5200200000000000ull, 0xfd00500000000000ull },
+    /* d= 7 */ { 0x8000000000000000ull, 0x4000000000000000ull, 0x6000000000000000ull, 0x7000000000000000ull, 0x8800000000000000ull, 0xcc00000000000000ull, 0xaa00000000000000ull, 0xdd00000000000000ull, 0x5d80000000000000ull, 0x9d40000000000000ull, 0x3de0000000000000ull, 0xed30000000000000ull, 0xb568000000000000ull, 0x21fc000000000000ull, 0x1fc2000000000000ull, 0xfc21000000000000ull, 0x421f800000000000ull, 0x61fc400000000000ull, 0x7fc2600000000000ull, 0x8c21700000000000ull },
+    /* d= 8 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0xe000000000000000ull, 0xf000000000000000ull, 0xd800000000000000ull, 0xac00000000000000ull, 0x3600000000000000ull, 0x3f00000000000000ull, 0x5b80000000000000ull, 0xe8c0000000000000ull, 0x9660000000000000ull, 0x6c30000000000000ull, 0xd638000000000000ull, 0xcf3c000000000000ull, 0x83b6000000000000ull, 0x44eb000000000000ull, 0xa06d800000000000ull, 0x533fc00000000000ull, 0x8daee00000000000ull, 0x27c6300000000000ull },
+    /* d= 9 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0xe000000000000000ull, 0xf000000000000000ull, 0x7800000000000000ull, 0xfc00000000000000ull, 0xbe00000000000000ull, 0x1b00000000000000ull, 0x4980000000000000ull, 0x60c0000000000000ull, 0xb260000000000000ull, 0xdb30000000000000ull, 0xa9b8000000000000ull, 0x90fc000000000000ull, 0xca7e000000000000ull, 0x270f000000000000ull, 0x1797800000000000ull, 0x8bfac00000000000ull, 0x83ec600000000000ull, 0x47d7300000000000ull },
+    /* d=10 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0xa000000000000000ull, 0x5000000000000000ull, 0x2800000000000000ull, 0x0c00000000000000ull, 0x1e00000000000000ull, 0xd100000000000000ull, 0x6880000000000000ull, 0xea40000000000000ull, 0xabe0000000000000ull, 0x4d30000000000000ull, 0xfea8000000000000ull, 0x6754000000000000ull, 0xf56a000000000000ull, 0x7a73000000000000ull, 0x23cf800000000000ull, 0x1110400000000000ull, 0xc8b8200000000000ull, 0xba6d900000000000ull },
+    /* d=11 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0xe000000000000000ull, 0xb000000000000000ull, 0x1800000000000000ull, 0x6400000000000000ull, 0xf200000000000000ull, 0xbd00000000000000ull, 0x7480000000000000ull, 0xfa40000000000000ull, 0xd260000000000000ull, 0xee70000000000000ull, 0xd858000000000000ull, 0x875c000000000000ull, 0x46de000000000000ull, 0xa405000000000000ull, 0x1202800000000000ull, 0x0d1a400000000000ull, 0x6ca7a00000000000ull, 0x9e48d00000000000ull },
+    /* d=12 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0x6000000000000000ull, 0x1000000000000000ull, 0x6800000000000000ull, 0xf400000000000000ull, 0x3a00000000000000ull, 0xbd00000000000000ull, 0xff80000000000000ull, 0xddc0000000000000ull, 0xebe0000000000000ull, 0xb0f0000000000000ull, 0x1c78000000000000ull, 0x8934000000000000ull, 0xa582000000000000ull, 0x70f9000000000000ull, 0x7c74800000000000ull, 0x9922400000000000ull, 0xcda9600000000000ull, 0x84dc300000000000ull },
+    /* d=13 */ { 0x8000000000000000ull, 0x4000000000000000ull, 0x6000000000000000ull, 0xf000000000000000ull, 0xa800000000000000ull, 0x7400000000000000ull, 0x6e00000000000000ull, 0xd100000000000000ull, 0x3c80000000000000ull, 0x2ec0000000000000ull, 0xb4e0000000000000ull, 0xcbd0000000000000ull, 0x8678000000000000ull, 0xc42c000000000000ull, 0xa632000000000000ull, 0x5521000000000000ull, 0xfab1800000000000ull, 0x8be9400000000000ull, 0xe674a00000000000ull, 0x342ff00000000000ull },
+    /* d=14 */ { 0x8000000000000000ull, 0x4000000000000000ull, 0xa000000000000000ull, 0xf000000000000000ull, 0xa800000000000000ull, 0xfc00000000000000ull, 0x8600000000000000ull, 0xe100000000000000ull, 0x5280000000000000ull, 0x5bc0000000000000ull, 0x56a0000000000000ull, 0x79f0000000000000ull, 0x6518000000000000ull, 0xb004000000000000ull, 0x080a000000000000ull, 0x0c0f000000000000ull, 0x2e0a800000000000ull, 0x1d0fc00000000000ull, 0xd488600000000000ull, 0xbace100000000000ull },
+    /* d=15 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0x6000000000000000ull, 0xd000000000000000ull, 0x5800000000000000ull, 0xfc00000000000000ull, 0xce00000000000000ull, 0x0700000000000000ull, 0x8380000000000000ull, 0x4240000000000000ull, 0x21e0000000000000ull, 0xf030000000000000ull, 0xa998000000000000ull, 0x554c000000000000ull, 0x9a66000000000000ull, 0x9e7d000000000000ull, 0x1e7d800000000000ull, 0x5e73c00000000000ull, 0x7e72e00000000000ull, 0x8e71700000000000ull },
+    /* d=16 */ { 0x8000000000000000ull, 0x4000000000000000ull, 0xe000000000000000ull, 0xf000000000000000ull, 0x0800000000000000ull, 0x1c00000000000000ull, 0x8200000000000000ull, 0xc300000000000000ull, 0x2080000000000000ull, 0xd340000000000000ull, 0xdb60000000000000ull, 0xc710000000000000ull, 0x4718000000000000ull, 0x8714000000000000ull, 0xa716000000000000ull, 0x771b000000000000ull, 0xaf16800000000000ull, 0x6b1ac00000000000ull, 0x2d1ea00000000000ull, 0xa816f00000000000ull },
+    /* d=17 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0x6000000000000000ull, 0xd000000000000000ull, 0xc800000000000000ull, 0x2c00000000000000ull, 0xe200000000000000ull, 0x9100000000000000ull, 0xe880000000000000ull, 0xdfc0000000000000ull, 0xdae0000000000000ull, 0x8550000000000000ull, 0x1d58000000000000ull, 0xb95c000000000000ull, 0x575e000000000000ull, 0xd451000000000000ull, 0x95d2800000000000ull, 0xb693c00000000000ull, 0x45bca00000000000ull, 0x7d0ad00000000000ull },
+    /* d=18 */ { 0x8000000000000000ull, 0x4000000000000000ull, 0xe000000000000000ull, 0xd000000000000000ull, 0x9800000000000000ull, 0x0c00000000000000ull, 0x5200000000000000ull, 0x5b00000000000000ull, 0x2c80000000000000ull, 0xa1c0000000000000ull, 0x32a0000000000000ull, 0x4910000000000000ull, 0x9718000000000000ull, 0x5e14000000000000ull, 0x0996000000000000ull, 0x74d9000000000000ull, 0x8fbf800000000000ull, 0x9009c00000000000ull, 0x7802a00000000000ull, 0xdc08700000000000ull },
+    /* d=19 */ { 0x8000000000000000ull, 0xc000000000000000ull, 0xe000000000000000ull, 0xf000000000000000ull, 0xc800000000000000ull, 0x6c00000000000000ull, 0x5a00000000000000ull, 0x1500000000000000ull, 0x5c80000000000000ull, 0x7240000000000000ull, 0x89e0000000000000ull, 0xcc10000000000000ull, 0x0b98000000000000ull, 0x8e5c000000000000ull, 0xaa76000000000000ull, 0xde43000000000000ull, 0x33e2800000000000ull, 0x2919c00000000000ull, 0x9f11200000000000ull, 0x901b900000000000ull },
+    /* d=20 */ { 0x8000000000000000ull, 0x4000000000000000ull, 0x2000000000000000ull, 0x5000000000000000ull, 0x0800000000000000ull, 0x8400000000000000ull, 0xf200000000000000ull, 0x8f00000000000000ull, 0x6080000000000000ull, 0x7040000000000000ull, 0x58a0000000000000ull, 0x8c10000000000000ull, 0x7708000000000000ull, 0x7ce4000000000000ull, 0xee9e000000000000ull, 0x1001000000000000ull, 0x2800800000000000ull, 0xd401400000000000ull, 0xfa00200000000000ull, 0x0b02100000000000ull },
+};
+
+#endif /* RCRE_RNG_SOBOL_TABLE_H */
 
 /* --- Internal Transformer Definitions & Helpers --- */
 /**
@@ -9136,6 +9323,251 @@ float rcre_sf_expit_f32(float x) {
 
 double rcre_sf_norm_cdf_f64(double x) {
     return 0.5 * rcre_sf_erfc_f64(-x / sqrt(2.0));
+}
+
+/* --- Source: rng.c --- */
+/**
+ * @file rng.c
+ * @brief Reproducible random & quasi-random streams (H1, 2.2.0)
+ *
+ * The library's single source of randomness for all stochastic work
+ * (Monte Carlo, sampling, shuffles, stochastic optimizers). Design per
+ * docs/hpc.md:
+ *
+ *  PCG64 — PCG-XSL-RR-128/64 (Melissa O'Neill, pcg-random.org; the
+ *  implementation vendored here is numerically identical to
+ *  numpy/random/src/pcg64/pcg64.h, MIT). 128-bit LCG state with the
+ *  128-bit multiplier 0x2360ed051fc65da4_4385df649fccf645 and output
+ *  rotr64(hi ^ lo, hi >> 58). Counter-based in the PCG sense: the state
+ *  is a pure function of (parts, steps drawn), so a stream is fully
+ *  reproducible from its seed — and `rcre_rng_pcg_skip` fast-forwards
+ *  via a precomputed power-of-two jump table (the LCG jump sum
+ *  (M^n - 1)/(M - 1) mod 2^128 is NOT computable by dividing inside
+ *  128 bits: M - 1 has v2 = 2, and the quotient needs 2 extra bits of
+ *  M^n - 1; the jump table avoids that entirely).
+ *
+ *  Substreams — the slab determinism contract (promoted from e-means):
+ *  worker i of ANY pool size derives its stream from (base, i) via a
+ *  deterministic splitmix-style mix into the increment, so pooled runs
+ *  are bit-identical across pool sizes and machines.
+ *
+ *  Sobol' — new Joe-Kuo direction numbers for d = 1..20, stored as
+ *  64-bit fixed-point words (word_j = v_{k,j} * 2^64, exact). Points:
+ *  x_n = XOR of the words for the set bits of n, scaled by 2^-64.
+ *  Bit-exact conformance against scipy 1.18.1 qmc.Sobol(scramble=False)
+ *  is checked in from two stream chunks (points 0..4095 and
+ *  1000000..1000255, all 20 dims).
+ *
+ *  Halton — radical inverse in bases 2, 3, 5; self-derivable reference
+ *  (no external oracle needed).
+ *
+ *  Every stream is a pure function of its seed — no wall-clock, no
+ *  address-dependence, no platform dependence.
+ */
+
+
+#include <stdint.h>
+#include <string.h>
+
+#include "rng_pcg_table.h"
+#include "rng_sobol_table.h"
+
+/* PCG64 128-bit multiplier (numpy/random/src/pcg64: PCG_DEFAULT_MULTIPLIER_128). */
+static const uint64_t RCRE_RNG_PCG_MULT_H = 2549297995355413924ull; /* 0x2360ed051fc65da4 */
+static const uint64_t RCRE_RNG_PCG_MULT_L = 4865540595714422341ull; /* 0x4385df649fccf645 */
+
+/* ========================================================================= */
+/* PCG64 — PCG-XSL-RR-128/64                                                 */
+/* ========================================================================= */
+
+/* 128-bit multiply/add on the platform's __uint128_t (toolchain floor:
+ * Apple Clang 15+, gcc 13+ — all provide it).
+ *   out = s * M + inc  (mod 2^128), s/M/inc split hi/lo.
+ * Cross terms (hi*lo, lo*hi) contribute at bit offset 64; hi*hi is
+ * >= 2^128 and drops. */
+static inline void rng128_mul_add(uint64_t* sh, uint64_t* sl,
+                                  const uint64_t* mh, const uint64_t* ml,
+                                  const uint64_t* ih, const uint64_t* il) {
+    __uint128_t prod = (__uint128_t)(*sl) * (*ml);
+    prod += ((__uint128_t)(*sl) * (*mh)) << 64;
+    prod += ((__uint128_t)(*sh) * (*ml)) << 64;
+    prod += (((__uint128_t)(*ih)) << 64) | (*il);
+    *sl = (uint64_t)prod;
+    *sh = (uint64_t)(prod >> 64);
+}
+
+void rcre_rng_pcg_init_parts(RCRE_RNG* r,
+                             uint64_t s0, uint64_t s1,
+                             uint64_t s2, uint64_t s3) {
+    /* numpy-compatible seeding: inc = (initseq << 1) | 1 with
+     * initseq = (s2, s3); state = 0 -> step -> + initstate -> step,
+     * initstate = (s0, s1). */
+    r->i_hi = (s2 << 1) | (s3 >> 63);
+    r->i_lo = (s3 << 1) | 1;
+    uint64_t sh = 0, sl = 0;
+    rng128_mul_add(&sh, &sl,
+                   &RCRE_RNG_PCG_MULT_H, &RCRE_RNG_PCG_MULT_L,
+                   &r->i_hi, &r->i_lo);
+    uint64_t t = sl + s1;
+    sh += (t < sl) + s0;
+    sl = t;
+    rng128_mul_add(&sh, &sl,
+                   &RCRE_RNG_PCG_MULT_H, &RCRE_RNG_PCG_MULT_L,
+                   &r->i_hi, &r->i_lo);
+    r->s_hi = sh;
+    r->s_lo = sl;
+}
+
+/* SplitMix64 finalizer (Vigna) — the deterministic mixer for
+ * RCRE-native seeding and substream derivation. */
+static uint64_t rng_splitmix64(uint64_t* z) {
+    *z += 0x9E3779B97F4A7C15ull;
+    uint64_t w = *z;
+    w = (w ^ (w >> 30)) * 0xBF58476D1CE4E5B9ull;
+    w = (w ^ (w >> 27)) * 0x94D049BB133111EBull;
+    return w ^ (w >> 31);
+}
+
+void rcre_rng_pcg_init(RCRE_RNG* r, uint64_t seed) {
+    /* RCRE-native single-seed derivation (deterministic, documented):
+     * two splitmix rounds give the 4 numpy-style parts. Streams are
+     * locked by tests/rng_fixtures (the numpy-compatible entry is
+     * rcre_rng_pcg_init_parts). */
+    uint64_t z = seed;
+    uint64_t a = rng_splitmix64(&z);
+    uint64_t b = rng_splitmix64(&z);
+    uint64_t c = rng_splitmix64(&z);
+    uint64_t d = rng_splitmix64(&z);
+    rcre_rng_pcg_init_parts(r, a, b, c, d);
+}
+
+uint64_t rcre_rng_pcg_next_u64(RCRE_RNG* r) {
+    /* step THEN output (numpy ordering — verified bit-exact). */
+    rng128_mul_add(&r->s_hi, &r->s_lo,
+                   &RCRE_RNG_PCG_MULT_H, &RCRE_RNG_PCG_MULT_L,
+                   &r->i_hi, &r->i_lo);
+    const uint64_t x = r->s_hi ^ r->s_lo;
+    const uint32_t rot = (uint32_t)(r->s_hi >> 58);
+    return (x >> rot) | (x << ((- (int64_t)rot) & 63));
+}
+
+uint32_t rcre_rng_pcg_next_u32(RCRE_RNG* r) {
+    return (uint32_t)(rcre_rng_pcg_next_u64(r) >> 32);
+}
+
+double rcre_rng_pcg_next_f64(RCRE_RNG* r) {
+    /* numpy's uint64_to_double: (u >> 11) * 2^-53 in [0,1), 53 bits. */
+    const uint64_t u = rcre_rng_pcg_next_u64(r);
+    return (double)(u >> 11) * 0x1.0p-53;
+}
+
+float rcre_rng_pcg_next_f32(RCRE_RNG* r) {
+    /* top 24 bits — 24-bit resolution in [0,1). */
+    const uint64_t u = rcre_rng_pcg_next_u64(r);
+    return (float)(u >> 40) * 0x1.0p-24;
+}
+
+void rcre_rng_pcg_substream(const RCRE_RNG* base, uint64_t id, RCRE_RNG* out) {
+    /* Slab determinism contract: the substream is a pure function of
+     * (base increment, id). The id is mixed into the INCREMENT (PCG
+     * substreams differ by increment, sharing the state lineage), so
+     * worker i gets the same stream regardless of how many workers the
+     * pool has — pooled reductions stay bit-identical across machines. */
+    uint64_t z = base->i_hi ^ (id * 0x9E3779B97F4A7C15ull);
+    uint64_t lo = rng_splitmix64(&z);
+    uint64_t hi = rng_splitmix64(&z);
+    out->i_hi = (hi << 1) | (lo >> 63);
+    out->i_lo = (lo << 1) | 1;
+    out->s_hi = base->s_hi;
+    out->s_lo = base->s_lo;
+    /* one step to decorrelate the initial state from the base state */
+    rng128_mul_add(&out->s_hi, &out->s_lo,
+                   &RCRE_RNG_PCG_MULT_H, &RCRE_RNG_PCG_MULT_L,
+                   &out->i_hi, &out->i_lo);
+}
+
+void rcre_rng_pcg_skip(RCRE_RNG* r, uint64_t n) {
+    /* Affine LCG fast-forward: for each set bit b of n,
+     * s <- A_b * s + inc * S_b  (A_b = M^(2^b), S_b = sum_{k<2^b} M^k,
+     * both mod 2^128, precomputed and verified in rng_pcg_table.h). */
+    for (int b = 0; b < 64; ++b) {
+        if (!((n >> b) & 1)) continue;
+        const RCRE_RNG_PCG_Jump* j = &RCRE_RNG_PCG_JUMP[b];
+        /* A_b * s (128x128 -> low 128; cross terms at bit offset 64) */
+        __uint128_t acc = (__uint128_t)j->al * r->s_lo;
+        acc += ((__uint128_t)j->al * r->s_hi) << 64;
+        acc += ((__uint128_t)j->ah * r->s_lo) << 64;
+        /* + inc * S_b */
+        acc += (__uint128_t)j->sl * r->i_lo;
+        acc += ((__uint128_t)j->sl * r->i_hi) << 64;
+        acc += ((__uint128_t)j->sh * r->i_lo) << 64;
+        r->s_lo = (uint64_t)acc;
+        r->s_hi = (uint64_t)(acc >> 64);
+    }
+}
+
+/* ========================================================================= */
+/* Sobol' (d = 1..20)                                                        */
+/* ========================================================================= */
+
+void rcre_qrng_sobol_at(uint64_t n, int d, double* out) {
+    if (d < 1) d = 1;
+    if (d > RCRE_QRNG_SOBOL_DIM) d = RCRE_QRNG_SOBOL_DIM;
+    for (int k = 0; k < d; ++k) {
+        uint64_t acc = 0;
+        uint64_t m = n;
+        int j = 0;
+        while (m) {
+            if (m & 1) acc ^= RCRE_SOBOL_V[k][j];
+            m >>= 1;
+            ++j;
+        }
+        /* acc * 2^-64: exact (acc is an integer < 2^64) */
+        out[k] = (double)acc * 0x1.0p-64;
+    }
+}
+
+void rcre_qrng_sobol_init(RCRE_QRNG* q, int d) {
+    q->n = 0;
+    q->d = (d >= 1 && d <= RCRE_QRNG_SOBOL_DIM) ? d : 1;
+}
+
+void rcre_qrng_sobol_point(RCRE_QRNG* q, double* out) {
+    rcre_qrng_sobol_at(q->n, q->d, out);
+    q->n++;
+}
+
+/* ========================================================================= */
+/* Halton (bases 2, 3, 5)                                                    */
+/* ========================================================================= */
+
+/* radical inverse of n in base b, in [0,1). n >= 1. */
+static double halton_at(uint64_t n, uint32_t b) {
+    double f = 1.0, r = 0.0;
+    while (n) {
+        f /= (double)b;
+        r += f * (double)(n % b);
+        n /= b;
+    }
+    return r;
+}
+
+void rcre_qrng_halton_at(uint64_t n, int k, double* out) {
+    static const uint32_t bases[RCRE_QRNG_HALTON_DIM] = { 2, 3, 5 };
+    if (k < 1) k = 1;
+    if (k > RCRE_QRNG_HALTON_DIM) k = RCRE_QRNG_HALTON_DIM;
+    for (int i = 0; i < k; ++i)
+        out[i] = halton_at(n + 1, bases[i]);   /* n is 0-based: point n+1 */
+}
+
+void rcre_qrng_halton_init(RCRE_QRNG* q, int k) {
+    q->n = 0;
+    q->d = (k >= 1 && k <= RCRE_QRNG_HALTON_DIM) ? k : 1;
+}
+
+void rcre_qrng_halton_point(RCRE_QRNG* q, double* out) {
+    rcre_qrng_halton_at(q->n, q->d, out);
+    q->n++;
 }
 
 /* --- Source: adapt.c --- */

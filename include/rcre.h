@@ -27,7 +27,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 2
-#define RCRE_VERSION_MINOR 1
+#define RCRE_VERSION_MINOR 2
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -1465,6 +1465,87 @@ float  rcre_sf_expit_f32(float x);
  * named op so tests can gate it directly.
  */
 double rcre_sf_norm_cdf_f64(double x);
+
+/* ========================================================================= */
+/* H1 (2.2.0) — Reproducible Random & Quasi-Random Streams                  */
+/* =========================================================================
+ *
+ * Design (docs/hpc.md):
+ *  - PCG64 is the counter-based workhorse: 128-bit LCG state, stream is a
+ *    pure function of its seed; bit-exact conformance with numpy PCG64
+ *    (the MIT-licensed reference) is checked in tests/rng_fixtures/.
+ *  - Substreams follow the slab determinism contract: worker i derives
+ *    its stream from (base, i), so pooled runs are bit-identical across
+ *    pool sizes and machines.
+ *  - Sobol' (d = 1..20, new Joe-Kuo direction numbers) and Halton
+ *    (bases 2,3,5) are the quasi-Monte Carlo paths; both are stateless
+ *    random-access (point n is a pure function of n), which is what
+ *    out-of-core and slab-parallel code needs.
+ */
+
+/* PCG64 state (128-bit state + 128-bit odd increment). */
+typedef struct RCRE_RNG {
+    uint64_t s_hi, s_lo;   /* 128-bit LCG state: hi << 64 | lo */
+    uint64_t i_hi, i_lo;   /* 128-bit increment (odd): hi << 64 | lo */
+} RCRE_RNG;
+
+/**
+ * @brief Seed from four 64-bit parts — numpy-compatible.
+ *
+ * With s0..s3 = SeedSequence(seed).generate_state(4), this produces the
+ * exact state/inc of np.random.PCG64(seed); the raw stream is bit-identical
+ * to random_raw. See tests/rng_fixtures/ for the checked-in oracle.
+ */
+void rcre_rng_pcg_init_parts(RCRE_RNG* r,
+                             uint64_t s0, uint64_t s1,
+                             uint64_t s2, uint64_t s3);
+
+/** @brief Seed from a single 64-bit seed (RCRE-native derivation, splitmix64). */
+void rcre_rng_pcg_init(RCRE_RNG* r, uint64_t seed);
+
+/** @brief Next raw 64-bit output (step + XSL-RR output). */
+uint64_t rcre_rng_pcg_next_u64(RCRE_RNG* r);
+/** @brief Next 32 bits (top word of a raw draw). */
+uint32_t rcre_rng_pcg_next_u32(RCRE_RNG* r);
+/** @brief Next uniform double in [0,1): (u >> 11) * 2^-53 (numpy mapping). */
+double rcre_rng_pcg_next_f64(RCRE_RNG* r);
+/** @brief Next uniform float in [0,1): top 24 bits. */
+float rcre_rng_pcg_next_f32(RCRE_RNG* r);
+
+/**
+ * @brief Deterministic substream for worker `id` of base RNG.
+ *
+ * Slab determinism contract: the substream depends only on (base,
+ * id) — never on pool size or core count — so pooled results are
+ * bit-identical across machines. Distinct ids give statistically
+ * independent streams (chi-square gated in tests).
+ */
+void rcre_rng_pcg_substream(const RCRE_RNG* base, uint64_t id, RCRE_RNG* out);
+
+/** @brief Fast-forward the state by n steps (O(popcount(n)) via the jump table). */
+void rcre_rng_pcg_skip(RCRE_RNG* r, uint64_t n);
+
+/* Quasi-random (low-discrepancy) state — point counters for the
+ * stateless-at API; stateless code should call *_at directly. */
+typedef struct RCRE_QRNG {
+    uint64_t n;   /* number of points already emitted (0-based next index) */
+    int      d;   /* active dimension count (clamped per sequence) */
+} RCRE_QRNG;
+
+#define RCRE_QRNG_SOBOL_DIM  20   /* shipped Joe-Kuo direction numbers */
+#define RCRE_QRNG_HALTON_DIM 3    /* bases 2, 3, 5 */
+
+/** @brief Sobol' point x_n (n >= 0, x_0 = 0), d components, bit-exact
+ *  scipy 1.18.1 qmc.Sobol(scramble=False) for n < 2^20 (shipped depth). */
+void rcre_qrng_sobol_at(uint64_t n, int d, double* out);
+/** @brief Stateful iteration: init, then point() advances n. */
+void rcre_qrng_sobol_init(RCRE_QRNG* q, int d);
+void rcre_qrng_sobol_point(RCRE_QRNG* q, double* out);
+
+/** @brief Halton point (n is 0-based; point n+1), k components. */
+void rcre_qrng_halton_at(uint64_t n, int k, double* out);
+void rcre_qrng_halton_init(RCRE_QRNG* q, int k);
+void rcre_qrng_halton_point(RCRE_QRNG* q, double* out);
 
 /* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */

@@ -32,6 +32,7 @@ C_FILES = [
     SRC_DIR / "core" / "linalg.c",
     SRC_DIR / "core" / "reduce.c",
     SRC_DIR / "core" / "sf.c",
+    SRC_DIR / "core" / "rng.c",
     SRC_DIR / "core" / "adapt.c",
     SRC_DIR / "core" / "threadpool.c",
     SRC_DIR / "core" / "prof.c",
@@ -150,6 +151,8 @@ def main():
     ml_internal = (SRC_DIR / "ml" / "ml_internal.h").read_text(encoding="utf-8")
     em_internal = (SRC_DIR / "ml" / "e_means_internal.h").read_text(encoding="utf-8")
     rng_internal = (SRC_DIR / "core" / "rcre_rng.h").read_text(encoding="utf-8")
+    pcg_table = (SRC_DIR / "core" / "rng_pcg_table.h").read_text(encoding="utf-8")
+    sobol_table = (SRC_DIR / "core" / "rng_sobol_table.h").read_text(encoding="utf-8")
     transformer_internal = (SRC_DIR / "transformer" / "transformer_internal.h").read_text(encoding="utf-8")
 
     out_lines = []
@@ -173,6 +176,12 @@ def main():
     out_lines.append("")
     out_lines.append("/* --- Internal Random Number Generation --- */")
     out_lines.append(clean_file_content(rng_internal))
+    out_lines.append("")
+    out_lines.append("/* --- PCG64 Skip-Ahead Jump Table (H1) --- */")
+    out_lines.append(clean_file_content(pcg_table))
+    out_lines.append("")
+    out_lines.append("/* --- Sobol' Direction Numbers (H1) --- */")
+    out_lines.append(clean_file_content(sobol_table))
     out_lines.append("")
     out_lines.append("/* --- Internal Transformer Definitions & Helpers --- */")
     out_lines.append(clean_file_content(transformer_internal))
