@@ -599,7 +599,47 @@ static void test_io_dlpack_and_arrow_zero_copy_bridges(void) {
     ASSERT_NULL(schema.release);
     ASSERT_NULL(arr.release);
 
-    /* 3. Zero-Copy GPT Model .safetensors Save, Bind & KV-Cache Parity */
+    /* 3. DLPack & Arrow Half-Precision (F16 & BF16) Bridges */
+    size_t shape16[1] = { 8 };
+    RCRE_Tensor t_f16 = rcre_tensor_create(shape16, 1, RCRE_DTYPE_F16, RCRE_LAYOUT_TABULAR, arena);
+    RCRE_DLTensor dl_f16 = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_to_dlpack(&t_f16, arena, &dl_f16));
+    ASSERT_UINT_EQ(RCRE_DL_FLOAT, dl_f16.dtype_code);
+    ASSERT_UINT_EQ(16, dl_f16.dtype_bits);
+    RCRE_Tensor imp_f16 = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_from_dlpack(&dl_f16, &imp_f16));
+    ASSERT_INT_EQ(RCRE_DTYPE_F16, imp_f16.dtype);
+
+    RCRE_Tensor t_bf16 = rcre_tensor_create(shape16, 1, RCRE_DTYPE_BF16, RCRE_LAYOUT_TABULAR, arena);
+    RCRE_DLTensor dl_bf16 = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_to_dlpack(&t_bf16, arena, &dl_bf16));
+    ASSERT_UINT_EQ(4, dl_bf16.dtype_code); /* kDLBfloat = 4 */
+    ASSERT_UINT_EQ(16, dl_bf16.dtype_bits);
+    RCRE_Tensor imp_bf16 = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_from_dlpack(&dl_bf16, &imp_bf16));
+    ASSERT_INT_EQ(RCRE_DTYPE_BF16, imp_bf16.dtype);
+
+    RCRE_ArrowSchema schema_f16 = {0};
+    RCRE_ArrowArray  arr_f16    = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_to_arrow(&t_f16, arena, &schema_f16, &arr_f16));
+    ASSERT_STR_EQ("e", schema_f16.format);
+    RCRE_Tensor arrow_f16 = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_from_arrow(&schema_f16, &arr_f16, &arrow_f16));
+    ASSERT_INT_EQ(RCRE_DTYPE_F16, arrow_f16.dtype);
+    schema_f16.release(&schema_f16);
+    arr_f16.release(&arr_f16);
+
+    RCRE_ArrowSchema schema_bf16 = {0};
+    RCRE_ArrowArray  arr_bf16    = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_to_arrow(&t_bf16, arena, &schema_bf16, &arr_bf16));
+    ASSERT_STR_EQ("b", schema_bf16.format);
+    RCRE_Tensor arrow_bf16 = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_from_arrow(&schema_bf16, &arr_bf16, &arrow_bf16));
+    ASSERT_INT_EQ(RCRE_DTYPE_BF16, arrow_bf16.dtype);
+    schema_bf16.release(&schema_bf16);
+    arr_bf16.release(&arr_bf16);
+
+    /* 4. Zero-Copy GPT Model .safetensors Save, Bind & KV-Cache Parity */
     RCRE_GPTConfig gpt_cfg = {
         .vocab_size = 16,
         .seq_len    = 8,
@@ -640,6 +680,321 @@ static void test_io_dlpack_and_arrow_zero_copy_bridges(void) {
     rcre_arena_destroy(arena);
 }
 
+/* ========================================================================= */
+/* 8. Half-Precision (IEEE FP16 & Google BF16) SIMD & Dequantization         */
+/* ========================================================================= */
+
+static void test_io_half_precision_fp16_bf16_simd_and_dequantization(void) {
+    RCRE_Arena* arena = rcre_arena_create(1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+
+    /* 1. Scalar & SIMD round-trip conversions */
+    const size_t N = 1024;
+    float* orig_f32 = (float*)rcre_arena_alloc(arena, N * sizeof(float), 64);
+    uint16_t* fp16_buf = (uint16_t*)rcre_arena_alloc(arena, N * sizeof(uint16_t), 64);
+    uint16_t* bf16_buf = (uint16_t*)rcre_arena_alloc(arena, N * sizeof(uint16_t), 64);
+    float* recon_fp16 = (float*)rcre_arena_alloc(arena, N * sizeof(float), 64);
+    float* recon_bf16 = (float*)rcre_arena_alloc(arena, N * sizeof(float), 64);
+
+    for (size_t i = 0; i < N; ++i) {
+        orig_f32[i] = ((float)i - 512.0f) * 0.125f;
+    }
+    orig_f32[0] = 0.0f;
+    orig_f32[1] = -0.0f;
+    orig_f32[2] = 1.0f;
+    orig_f32[3] = -1.0f;
+    orig_f32[4] = 65504.0f; /* Max finite FP16 */
+    orig_f32[5] = -65504.0f;
+
+    /* Test FP16 conversion */
+    rcre_f32_to_f16(orig_f32, fp16_buf, N);
+    rcre_f16_to_f32(fp16_buf, recon_fp16, N);
+
+    ASSERT_FLOAT_NEAR(0.0f, recon_fp16[0], 0.0f);
+    ASSERT_FLOAT_NEAR(0.0f, recon_fp16[1], 0.0f);
+    ASSERT_TRUE(signbit(recon_fp16[1]) != 0);
+    ASSERT_FLOAT_NEAR(1.0f, recon_fp16[2], 0.0f);
+    ASSERT_FLOAT_NEAR(-1.0f, recon_fp16[3], 0.0f);
+    ASSERT_FLOAT_NEAR(65504.0f, recon_fp16[4], 0.0f);
+    ASSERT_FLOAT_NEAR(-65504.0f, recon_fp16[5], 0.0f);
+
+    for (size_t i = 6; i < N; ++i) {
+        float expected = orig_f32[i];
+        float actual = recon_fp16[i];
+        float diff = fabsf(actual - expected);
+        float tol = fabsf(expected) * 0.002f + 1e-4f;
+        ASSERT_TRUE(diff <= tol);
+    }
+
+    /* Test BF16 conversion */
+    rcre_f32_to_bf16(orig_f32, bf16_buf, N);
+    rcre_bf16_to_f32(bf16_buf, recon_bf16, N);
+
+    ASSERT_FLOAT_NEAR(0.0f, recon_bf16[0], 0.0f);
+    ASSERT_FLOAT_NEAR(0.0f, recon_bf16[1], 0.0f);
+    ASSERT_TRUE(signbit(recon_bf16[1]) != 0);
+    ASSERT_FLOAT_NEAR(1.0f, recon_bf16[2], 0.0f);
+    ASSERT_FLOAT_NEAR(-1.0f, recon_bf16[3], 0.0f);
+
+    for (size_t i = 6; i < N; ++i) {
+        float expected = orig_f32[i];
+        float actual = recon_bf16[i];
+        float diff = fabsf(actual - expected);
+        float tol = fabsf(expected) * 0.01f + 1e-3f; /* BF16 has 7 mantissa bits */
+        ASSERT_TRUE(diff <= tol);
+    }
+
+    /* 2. rcre_tensor_to_f32 tests */
+    size_t shape[2] = { 16, 16 };
+    RCRE_Tensor t_f16 = rcre_tensor_create(shape, 2, RCRE_DTYPE_F16, RCRE_LAYOUT_TABULAR, arena);
+    uint16_t* f16_raw = (uint16_t*)t_f16.data;
+    for (size_t i = 0; i < 256; ++i) {
+        f16_raw[i] = fp16_buf[i];
+    }
+    RCRE_Tensor deq_f16 = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_tensor_to_f32(&t_f16, arena, &deq_f16));
+    ASSERT_INT_EQ(RCRE_DTYPE_F32, deq_f16.dtype);
+    ASSERT_UINT_EQ(2, deq_f16.ndim);
+    ASSERT_UINT_EQ(16, deq_f16.shape[0]);
+    ASSERT_UINT_EQ(16, deq_f16.shape[1]);
+    const float* deq_f16_ptr = rcre_tensor_f32_data(&deq_f16);
+    ASSERT_FLOAT_NEAR(0.0f, deq_f16_ptr[0], 0.0f);
+    ASSERT_FLOAT_NEAR(1.0f, deq_f16_ptr[2], 0.0f);
+
+    RCRE_Tensor t_bf16 = rcre_tensor_create(shape, 2, RCRE_DTYPE_BF16, RCRE_LAYOUT_TABULAR, arena);
+    uint16_t* bf16_raw = (uint16_t*)t_bf16.data;
+    for (size_t i = 0; i < 256; ++i) {
+        bf16_raw[i] = bf16_buf[i];
+    }
+    RCRE_Tensor deq_bf16 = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_tensor_to_f32(&t_bf16, arena, &deq_bf16));
+    ASSERT_INT_EQ(RCRE_DTYPE_F32, deq_bf16.dtype);
+    ASSERT_UINT_EQ(2, deq_bf16.ndim);
+    ASSERT_UINT_EQ(16, deq_bf16.shape[0]);
+    ASSERT_UINT_EQ(16, deq_bf16.shape[1]);
+    const float* deq_bf16_ptr = rcre_tensor_f32_data(&deq_bf16);
+    ASSERT_FLOAT_NEAR(0.0f, deq_bf16_ptr[0], 0.0f);
+    ASSERT_FLOAT_NEAR(1.0f, deq_bf16_ptr[2], 0.0f);
+
+    rcre_arena_destroy(arena);
+}
+
+/* ========================================================================= */
+/* 9. Safetensors FP16/BF16 Storage, Dequantization & Chunk Slicing          */
+/* ========================================================================= */
+
+static void test_io_safetensors_f16_bf16_and_chunked_slicing(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+
+    /* Create F16 and BF16 tensors */
+    size_t f16_shape[2] = { 32, 16 }; /* 512 elements */
+    size_t bf16_shape[2] = { 64, 8 };  /* 512 elements */
+
+    RCRE_Tensor t_f16 = rcre_tensor_create(f16_shape, 2, RCRE_DTYPE_F16, RCRE_LAYOUT_TABULAR, arena);
+    RCRE_Tensor t_bf16 = rcre_tensor_create(bf16_shape, 2, RCRE_DTYPE_BF16, RCRE_LAYOUT_TABULAR, arena);
+
+    float orig_vals[512];
+    for (size_t i = 0; i < 512; ++i) {
+        orig_vals[i] = (float)i * 0.25f + 1.0f;
+    }
+    rcre_f32_to_f16(orig_vals, (uint16_t*)t_f16.data, 512);
+    rcre_f32_to_bf16(orig_vals, (uint16_t*)t_bf16.data, 512);
+
+    const char* names[2] = { "weights.fp16", "weights.bf16" };
+    RCRE_Tensor tensors[2] = { t_f16, t_bf16 };
+
+    const char* st_path = "/tmp/rcre_test_half_prec.safetensors";
+    int rc = rcre_io_safetensors_save(st_path, names, tensors, 2, arena);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+
+    /* Open archive */
+    RCRE_SafeTensorsArchive arch = {0};
+    rc = rcre_io_safetensors_open(st_path, &arch);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_UINT_EQ(2, arch.num_tensors);
+
+    /* Retrieve tensor views and verify dtypes */
+    RCRE_Tensor v_f16 = {0};
+    rc = rcre_io_safetensors_get_tensor(&arch, "weights.fp16", nullptr, &v_f16);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_INT_EQ(RCRE_DTYPE_F16, v_f16.dtype);
+    ASSERT_UINT_EQ(32, v_f16.shape[0]);
+    ASSERT_UINT_EQ(16, v_f16.shape[1]);
+
+    RCRE_Tensor v_bf16 = {0};
+    rc = rcre_io_safetensors_get_tensor(&arch, "weights.bf16", nullptr, &v_bf16);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_INT_EQ(RCRE_DTYPE_BF16, v_bf16.dtype);
+    ASSERT_UINT_EQ(64, v_bf16.shape[0]);
+    ASSERT_UINT_EQ(8, v_bf16.shape[1]);
+
+    /* Test full dequantization to F32 */
+    RCRE_Tensor out_f16_f32 = {0};
+    rc = rcre_io_safetensors_get_tensor_f32(&arch, "weights.fp16", arena, &out_f16_f32);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_INT_EQ(RCRE_DTYPE_F32, out_f16_f32.dtype);
+    ASSERT_UINT_EQ(32, out_f16_f32.shape[0]);
+    ASSERT_UINT_EQ(16, out_f16_f32.shape[1]);
+    const float* f16_f32_ptr = rcre_tensor_f32_data(&out_f16_f32);
+    ASSERT_FLOAT_NEAR(orig_vals[0], f16_f32_ptr[0], 0.01f);
+    ASSERT_FLOAT_NEAR(orig_vals[100], f16_f32_ptr[100], 0.5f);
+
+    RCRE_Tensor out_bf16_f32 = {0};
+    rc = rcre_io_safetensors_get_tensor_f32(&arch, "weights.bf16", arena, &out_bf16_f32);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_INT_EQ(RCRE_DTYPE_F32, out_bf16_f32.dtype);
+    ASSERT_UINT_EQ(64, out_bf16_f32.shape[0]);
+    ASSERT_UINT_EQ(8, out_bf16_f32.shape[1]);
+    const float* bf16_f32_ptr = rcre_tensor_f32_data(&out_bf16_f32);
+    ASSERT_FLOAT_NEAR(orig_vals[0], bf16_f32_ptr[0], 0.05f);
+    ASSERT_FLOAT_NEAR(orig_vals[100], bf16_f32_ptr[100], 0.5f);
+
+    /* Test chunked row slicing with on-the-fly dequantization */
+    RCRE_Tensor slice = {0};
+    rc = rcre_io_safetensors_get_tensor_slice_f32(&arch, "weights.fp16", 10, 4, arena, &slice);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_INT_EQ(RCRE_DTYPE_F32, slice.dtype);
+    ASSERT_UINT_EQ(4, slice.shape[0]);
+    ASSERT_UINT_EQ(16, slice.shape[1]);
+    const float* slice_ptr = rcre_tensor_f32_data(&slice);
+    for (size_t r = 0; r < 4; ++r) {
+        for (size_t c = 0; c < 16; ++c) {
+            float exp_val = orig_vals[(10 + r) * 16 + c];
+            float act_val = slice_ptr[r * 16 + c];
+            ASSERT_TRUE(fabsf(act_val - exp_val) <= 0.05f);
+        }
+    }
+
+    /* Test boundary and error handling */
+    ASSERT_INT_EQ(RCRE_ERR_INVALID_ARG, rcre_io_safetensors_get_tensor_slice_f32(&arch, "weights.fp16", 30, 5, arena, &slice)); /* 30+5 > 32 */
+    ASSERT_INT_EQ(RCRE_ERR_INVALID_ARG, rcre_io_safetensors_get_tensor_slice_f32(&arch, "non_existent", 0, 1, arena, &slice));
+    ASSERT_INT_EQ(RCRE_ERR_INVALID_ARG, rcre_io_safetensors_get_tensor_slice_f32(&arch, "weights.fp16", 0, 0, arena, &slice));
+
+    rcre_io_safetensors_close(&arch);
+    remove(st_path);
+    rcre_arena_destroy(arena);
+}
+
+/* ========================================================================= */
+/* 10. SIMD 16-Bit Byte-Shuffle & Lossless RCRZ Frame Compression            */
+/* ========================================================================= */
+
+static void test_io_simd_16bit_byte_shuffle_and_rcrz_compression(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+
+    const size_t N = 2048;
+    uint16_t* src = (uint16_t*)rcre_arena_alloc(arena, N * sizeof(uint16_t), 64);
+    uint16_t* shuffled = (uint16_t*)rcre_arena_alloc(arena, N * sizeof(uint16_t), 64);
+    uint16_t* unshuffled = (uint16_t*)rcre_arena_alloc(arena, N * sizeof(uint16_t), 64);
+
+    for (size_t i = 0; i < N; ++i) {
+        src[i] = (uint16_t)(i * 31 + 7);
+    }
+
+    /* 1. 16-bit Byte Shuffle & Unshuffle parity */
+    rcre_io_byte_shuffle_16(src, shuffled, N);
+    rcre_io_byte_unshuffle_16(shuffled, unshuffled, N);
+    ASSERT_MEM_EQ(src, unshuffled, N * sizeof(uint16_t));
+
+    /* 2. RCRZ Compression round-trip for F16 tensor */
+    size_t shape[2] = { 64, 32 }; /* 2048 elements */
+    RCRE_Tensor t_f16 = rcre_tensor_create(shape, 2, RCRE_DTYPE_F16, RCRE_LAYOUT_TABULAR, arena);
+    memcpy(t_f16.data, src, N * sizeof(uint16_t));
+
+    RCRE_Slice frame_f16 = {0};
+    int rc = rcre_io_compress_tensor(&t_f16, arena, &frame_f16);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_NOT_NULL(frame_f16.data);
+    ASSERT_TRUE(frame_f16.len > 64);
+
+    RCRE_Tensor decomp_f16 = {0};
+    rc = rcre_io_decompress_tensor(frame_f16, arena, &decomp_f16);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_INT_EQ(RCRE_DTYPE_F16, decomp_f16.dtype);
+    ASSERT_UINT_EQ(2, decomp_f16.ndim);
+    ASSERT_UINT_EQ(64, decomp_f16.shape[0]);
+    ASSERT_UINT_EQ(32, decomp_f16.shape[1]);
+    ASSERT_MEM_EQ(t_f16.data, decomp_f16.data, N * sizeof(uint16_t));
+
+    /* 3. RCRZ Compression round-trip for BF16 tensor */
+    RCRE_Tensor t_bf16 = rcre_tensor_create(shape, 2, RCRE_DTYPE_BF16, RCRE_LAYOUT_TABULAR, arena);
+    memcpy(t_bf16.data, src, N * sizeof(uint16_t));
+
+    RCRE_Slice frame_bf16 = {0};
+    rc = rcre_io_compress_tensor(&t_bf16, arena, &frame_bf16);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+
+    RCRE_Tensor decomp_bf16 = {0};
+    rc = rcre_io_decompress_tensor(frame_bf16, arena, &decomp_bf16);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_INT_EQ(RCRE_DTYPE_BF16, decomp_bf16.dtype);
+    ASSERT_MEM_EQ(t_bf16.data, decomp_bf16.data, N * sizeof(uint16_t));
+
+    rcre_arena_destroy(arena);
+}
+
+/* ========================================================================= */
+/* 11. Linux io_uring Probe & Double-Buffered Asynchronous Streaming         */
+/* ========================================================================= */
+
+static void test_io_uring_probe_and_async_streaming(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+
+    /* 1. Verify io_uring probing returns a valid boolean */
+    bool has_uring = rcre_io_is_io_uring_available();
+#if defined(__linux__)
+    (void)has_uring; /* May be true or false depending on kernel config */
+#else
+    ASSERT_FALSE(has_uring); /* Non-Linux always returns false */
+#endif
+
+    /* 2. Create test .npy file */
+    const char* path = "/tmp/rcre_test_async_stream.npy";
+    size_t full_shape[2] = { 128, 16 };
+    RCRE_Tensor full_mat = rcre_tensor_create(full_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    float* fptr = rcre_tensor_f32_data(&full_mat);
+    for (size_t i = 0; i < 128 * 16; ++i) {
+        fptr[i] = (float)i;
+    }
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_save_npy(&full_mat, path));
+
+    /* 3. Open stream with batch_rows = 32 */
+    RCRE_TensorStream stream = {0};
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_stream_open_npy(path, 32, arena, &stream));
+    ASSERT_FALSE(stream.async_enabled);
+
+    /* Enable async streaming */
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_stream_enable_async(&stream));
+    ASSERT_TRUE(stream.async_enabled);
+
+    size_t batches_read = 0;
+    size_t rows_read = 0;
+    RCRE_Tensor batch = {0};
+    while (rcre_io_stream_next(&stream, &batch)) {
+        ASSERT_INT_EQ(RCRE_DTYPE_F32, batch.dtype);
+        ASSERT_UINT_EQ(16, batch.shape[1]);
+        const float* bdata = rcre_tensor_f32_data(&batch);
+        ASSERT_FLOAT_NEAR((float)(rows_read * 16), bdata[0], 0.0f);
+        rows_read += batch.shape[0];
+        batches_read++;
+    }
+    ASSERT_UINT_EQ(4, batches_read);
+    ASSERT_UINT_EQ(128, rows_read);
+
+    /* Reset and re-stream */
+    rcre_io_stream_reset(&stream);
+    ASSERT_UINT_EQ(0, stream.current_row);
+    ASSERT_TRUE(rcre_io_stream_next(&stream, &batch));
+    ASSERT_UINT_EQ(32, batch.shape[0]);
+
+    rcre_io_stream_close(&stream);
+    remove(path);
+    rcre_arena_destroy(arena);
+}
+
 int main(void) {
     rcre_hal_init();
     test_suite_begin("RCRE High-Performance Scientific Data I/O Engine (IO-REQ-01 to 06)");
@@ -650,5 +1005,9 @@ int main(void) {
     TEST_RUN(test_io_safetensors_archive_and_adversarial);
     TEST_RUN(test_io_simd_byte_shuffle_compression_and_streamer);
     TEST_RUN(test_io_dlpack_and_arrow_zero_copy_bridges);
+    TEST_RUN(test_io_half_precision_fp16_bf16_simd_and_dequantization);
+    TEST_RUN(test_io_safetensors_f16_bf16_and_chunked_slicing);
+    TEST_RUN(test_io_simd_16bit_byte_shuffle_and_rcrz_compression);
+    TEST_RUN(test_io_uring_probe_and_async_streaming);
     return test_suite_report();
 }

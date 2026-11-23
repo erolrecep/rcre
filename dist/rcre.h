@@ -83,9 +83,11 @@ typedef enum {
 /* ========================================================================= */
 
 typedef enum {
-    RCRE_DTYPE_U8  = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
-    RCRE_DTYPE_I32 = 1, /* 32-bit signed integer (class labels, indices)          */
-    RCRE_DTYPE_F32 = 3  /* 32-bit single precision float                           */
+    RCRE_DTYPE_U8   = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
+    RCRE_DTYPE_I32  = 1, /* 32-bit signed integer (class labels, indices)          */
+    RCRE_DTYPE_F32  = 3, /* 32-bit single precision float                         */
+    RCRE_DTYPE_F16  = 4, /* 16-bit IEEE 754-2008 half precision float             */
+    RCRE_DTYPE_BF16 = 5  /* 16-bit Google Brain bfloat16 format                   */
 } RCRE_DType;
 
 typedef enum {
@@ -2077,7 +2079,7 @@ RCRE_NODISCARD int rcre_io_view_npy(
 /* 4. Multi-Tensor Safetensors (.safetensors) Container Engine (IO-REQ-04)   */
 /* ========================================================================= */
 
-#define RCRE_SAFETENSORS_MAX_TENSORS 256
+#define RCRE_SAFETENSORS_MAX_TENSORS 1024
 
 typedef struct RCRE_SafeTensorEntry {
     RCRE_Slice  name;          /* Zero-copy slice into JSON header               */
@@ -2144,6 +2146,45 @@ RCRE_NODISCARD int rcre_io_safetensors_get_tensor(
 );
 
 /**
+ * @brief Retrieves a tensor by name and guarantees output is an F32 tensor.
+ *        If tensor is already F32 and 64B-aligned, returns a zero-copy view (is_view = true).
+ *        If tensor is F16, BF16, I32, or U8, allocates an F32 tensor in arena and
+ *        executes hardware-accelerated SIMD dequantization / casting.
+ * @param archive Open .safetensors archive.
+ * @param name Tensor name to look up.
+ * @param arena Destination arena for dequantized payload (ignored if zero-copy F32).
+ * @param out_f32_tensor Output F32 tensor.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_f32_tensor
+);
+
+/**
+ * @brief Retrieves a 64-bit row-sliced view/dequantization of a tensor by name
+ *        from an open .safetensors archive without mapping or loading the entire matrix.
+ *        Supports 64-bit offsets > 4 GB for multi-billion parameter LLM weights.
+ * @param archive Open .safetensors archive.
+ * @param name Tensor name to look up.
+ * @param start_row Starting outer dimension row index.
+ * @param num_rows Number of rows to read in this chunk.
+ * @param arena Destination arena for F32 tensor or unaligned copy.
+ * @param out_slice Output sliced F32 tensor [num_rows, ...].
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_slice_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    size_t start_row,
+    size_t num_rows,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_slice
+);
+
+/**
  * @brief Saves an array of named RCRE_Tensors to a 64-byte aligned .safetensors file.
  * @param filepath Destination .safetensors file path.
  * @param names Array of tensor name strings [num_tensors].
@@ -2181,6 +2222,75 @@ void rcre_io_byte_shuffle_32(const void* src, void* dst, size_t num_elements);
  * @param num_elements Number of 32-bit elements.
  */
 void rcre_io_byte_unshuffle_32(const void* src, void* dst, size_t num_elements);
+
+/**
+ * @brief Applies a SIMD-accelerated 16-bit byte-shuffle transpose on F16/BF16 elements,
+ *        grouping byte 0 and byte 1 into contiguous streams.
+ * @param src Source array of num_elements 16-bit values (2 * num_elements bytes).
+ * @param dst Destination buffer (2 * num_elements bytes).
+ * @param num_elements Number of 16-bit elements.
+ */
+void rcre_io_byte_shuffle_16(const void* src, void* dst, size_t num_elements);
+
+/**
+ * @brief Reconstructs interleaved 16-bit elements from a 16-bit byte-shuffled buffer.
+ * @param src Byte-shuffled source buffer (2 * num_elements bytes).
+ * @param dst Destination array of num_elements 16-bit values.
+ * @param num_elements Number of 16-bit elements.
+ */
+void rcre_io_byte_unshuffle_16(const void* src, void* dst, size_t num_elements);
+
+/* ========================================================================= */
+/* Half-Precision (IEEE FP16 & Google BF16) Conversion & De-Quantization      */
+/* ========================================================================= */
+
+/**
+ * @brief Converts an array of IEEE-754 binary16 (FP16) floats to IEEE-754 F32
+ *        using hardware SIMD (ARM NEON vcvt_f32_f16 or x86 F16C / AVX2).
+ * @param src Pointer to numel uint16_t FP16 values.
+ * @param dst Pointer to numel float output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_f16_to_f32(const void* src, float* dst, size_t numel);
+
+/**
+ * @brief Converts an array of Google Brain bfloat16 (BF16) floats to IEEE-754 F32
+ *        using vectorized 16-bit bit-shifts and zero-latency unpack.
+ * @param src Pointer to numel uint16_t BF16 values.
+ * @param dst Pointer to numel float output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_bf16_to_f32(const void* src, float* dst, size_t numel);
+
+/**
+ * @brief Converts an array of IEEE-754 F32 floats to IEEE-754 binary16 (FP16).
+ * @param src Pointer to numel float values.
+ * @param dst Pointer to numel uint16_t FP16 output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_f32_to_f16(const float* src, void* dst, size_t numel);
+
+/**
+ * @brief Converts an array of IEEE-754 F32 floats to Google Brain bfloat16 (BF16)
+ *        with round-to-nearest-even precision.
+ * @param src Pointer to numel float values.
+ * @param dst Pointer to numel uint16_t BF16 output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_f32_to_bf16(const float* src, void* dst, size_t numel);
+
+/**
+ * @brief Converts any RCRE_Tensor (U8, I32, F16, BF16, or F32) to an F32 tensor.
+ * @param src Input source tensor.
+ * @param arena Destination arena to allocate output F32 tensor (ignored if already F32 view).
+ * @param dst_f32 Output F32 tensor.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_tensor_to_f32(
+    const RCRE_Tensor* src,
+    RCRE_Arena* arena,
+    RCRE_Tensor* dst_f32
+);
 
 /**
  * @brief Compresses a contiguous 32-bit tensor (F32/I32) using SIMD byte-shuffle
@@ -2223,7 +2333,25 @@ typedef struct RCRE_TensorStream {
     size_t          data_offset;     /* Byte offset to row 0 in file             */
     uint8_t*        ping_pong_buf[2];/* Dual 64B-aligned arena buffers           */
     uint8_t         active_slot;     /* Toggles 0 <-> 1 on each batch            */
+    bool            async_enabled;   /* Background double-buffered prefetch      */
+    bool            use_io_uring;    /* True if Linux io_uring active            */
+    intptr_t        async_handle;    /* io_uring ring fd or async handle         */
 } RCRE_TensorStream;
+
+/**
+ * @brief Checks if Linux io_uring ring buffer syscalls are supported by host kernel.
+ * @return true if io_uring is functional, false otherwise.
+ */
+RCRE_NODISCARD bool rcre_io_is_io_uring_available(void);
+
+/**
+ * @brief Enables asynchronous non-blocking prefetch on an open RCRE_TensorStream.
+ *        On Linux with kernel >= 5.1, engages io_uring zero-copy submission rings.
+ *        On macOS/other POSIX, engages aggressive sequential prefetch + double buffering.
+ * @param stream Active tensor stream.
+ * @return RCRE_OK on success.
+ */
+RCRE_NODISCARD int rcre_io_stream_enable_async(RCRE_TensorStream* stream);
 
 /**
  * @brief Opens an out-of-core ping-pong batch streamer over a .npy tensor file.
@@ -5357,10 +5485,12 @@ char* rcre_sb_to_cstr(RCRE_StrBuilder* sb) {
 
 RCRE_NODISCARD size_t rcre_dtype_size(RCRE_DType dtype) {
     switch (dtype) {
-        case RCRE_DTYPE_U8:  return 1;
-        case RCRE_DTYPE_I32: return 4;
-        case RCRE_DTYPE_F32: return 4;
-        default:             return 0;
+        case RCRE_DTYPE_U8:   return 1;
+        case RCRE_DTYPE_F16:  return 2;
+        case RCRE_DTYPE_BF16: return 2;
+        case RCRE_DTYPE_I32:  return 4;
+        case RCRE_DTYPE_F32:  return 4;
+        default:              return 0;
     }
 }
 
@@ -7385,6 +7515,21 @@ int rcre_sparse_bcsr4_load(
 #include <sys/mman.h>
 #endif
 
+#if defined(__linux__)
+#include <sys/syscall.h>
+#ifndef __NR_io_uring_setup
+#if defined(__x86_64__)
+#define __NR_io_uring_setup 425
+#define __NR_io_uring_enter 426
+#define __NR_io_uring_register 427
+#elif defined(__aarch64__)
+#define __NR_io_uring_setup 425
+#define __NR_io_uring_enter 426
+#define __NR_io_uring_register 427
+#endif
+#endif
+#endif
+
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -8178,16 +8323,27 @@ static const uint8_t rcre_io_npy_magic[6] = { 0x93, 'N', 'U', 'M', 'P', 'Y' };
 
 static const char* rcre_io_dtype_to_npy_descr(RCRE_DType dtype) {
     switch (dtype) {
-        case RCRE_DTYPE_U8:  return "|u1";
-        case RCRE_DTYPE_I32: return "<i4";
-        case RCRE_DTYPE_F32: return "<f4";
-        default:             return nullptr;
+        case RCRE_DTYPE_U8:   return "|u1";
+        case RCRE_DTYPE_F16:  return "<f2";
+        case RCRE_DTYPE_BF16: return "<b2";
+        case RCRE_DTYPE_I32:  return "<i4";
+        case RCRE_DTYPE_F32:  return "<f4";
+        default:              return nullptr;
     }
 }
 
 static bool rcre_io_npy_descr_to_dtype(RCRE_Slice descr, RCRE_DType* out_dtype) {
     if (rcre_slice_eq_cstr(descr, "|u1") || rcre_slice_eq_cstr(descr, "<u1") || rcre_slice_eq_cstr(descr, "u1")) {
         *out_dtype = RCRE_DTYPE_U8;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<f2") || rcre_slice_eq_cstr(descr, "=f2") || rcre_slice_eq_cstr(descr, "f2") || rcre_slice_eq_cstr(descr, "|f2")) {
+        *out_dtype = RCRE_DTYPE_F16;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(descr, "<b2") || rcre_slice_eq_cstr(descr, "=b2") || rcre_slice_eq_cstr(descr, "b2") || rcre_slice_eq_cstr(descr, "|b2") ||
+        rcre_slice_eq_cstr(descr, "<V2") || rcre_slice_eq_cstr(descr, "|V2")) {
+        *out_dtype = RCRE_DTYPE_BF16;
         return true;
     }
     if (rcre_slice_eq_cstr(descr, "<i4") || rcre_slice_eq_cstr(descr, "=i4") || rcre_slice_eq_cstr(descr, "i4")) {
@@ -8519,16 +8675,26 @@ RCRE_NODISCARD int rcre_io_load_npy(
 
 static const char* rcre_io_dtype_to_st_str(RCRE_DType dtype) {
     switch (dtype) {
-        case RCRE_DTYPE_U8:  return "U8";
-        case RCRE_DTYPE_I32: return "I32";
-        case RCRE_DTYPE_F32: return "F32";
-        default:             return nullptr;
+        case RCRE_DTYPE_U8:   return "U8";
+        case RCRE_DTYPE_F16:  return "F16";
+        case RCRE_DTYPE_BF16: return "BF16";
+        case RCRE_DTYPE_I32:  return "I32";
+        case RCRE_DTYPE_F32:  return "F32";
+        default:              return nullptr;
     }
 }
 
 static bool rcre_io_st_str_to_dtype(RCRE_Slice s, RCRE_DType* out_dtype) {
     if (rcre_slice_eq_cstr(s, "F32")) {
         *out_dtype = RCRE_DTYPE_F32;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "F16")) {
+        *out_dtype = RCRE_DTYPE_F16;
+        return true;
+    }
+    if (rcre_slice_eq_cstr(s, "BF16")) {
+        *out_dtype = RCRE_DTYPE_BF16;
         return true;
     }
     if (rcre_slice_eq_cstr(s, "I32")) {
@@ -9054,8 +9220,341 @@ RCRE_NODISCARD int rcre_io_safetensors_save(
 }
 
 /* ========================================================================= */
+/* Half-Precision (IEEE FP16 & Google BF16) SIMD Conversion Engine           */
+/* ========================================================================= */
+
+static inline float rcre_f16_to_f32_scalar(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000U) << 16;
+    uint32_t exp  = (h >> 10) & 0x1FU;
+    uint32_t mant = h & 0x03FFU;
+    uint32_t u;
+    if (exp == 31) {
+        u = sign | 0x7F800000U | (mant << 13);
+    } else if (exp == 0) {
+        if (mant == 0) {
+            u = sign;
+        } else {
+            int e = 0;
+            while ((mant & 0x0400U) == 0) {
+                mant <<= 1;
+                e--;
+            }
+            e++;
+            mant &= ~0x0400U;
+            u = sign | ((uint32_t)(e + (127 - 15)) << 23) | (mant << 13);
+        }
+    } else {
+        u = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+    float f;
+    memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+static inline uint16_t rcre_f32_to_f16_scalar(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    uint32_t sign = (u >> 16) & 0x8000U;
+    int32_t  exp  = (int32_t)((u >> 23) & 0xFFU) - 127 + 15;
+    uint32_t mant = u & 0x007FFFFFU;
+
+    if (exp <= 0) {
+        if (exp < -10) return (uint16_t)sign;
+        mant = (mant | 0x00800000U) >> (1 - exp);
+        return (uint16_t)(sign | (mant >> 13));
+    } else if (exp >= 31) {
+        return (uint16_t)(sign | 0x7C00U | ((mant != 0) ? 0x0200U : 0));
+    }
+    return (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
+}
+
+static inline uint16_t rcre_f32_to_bf16_scalar(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    uint32_t lsb = (u >> 16) & 1U;
+    uint32_t bias = 0x7FFFU + lsb;
+    u += bias;
+    return (uint16_t)(u >> 16);
+}
+
+void rcre_f16_to_f32(const void* src, float* dst, size_t numel) {
+    if (!src || !dst || numel == 0) return;
+    const uint16_t* s = (const uint16_t*)src;
+    size_t i = 0;
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 4 <= numel; i += 4) {
+        float16x4_t h = vld1_f16((const float16_t*)(s + i));
+        float32x4_t f = vcvt_f32_f16(h);
+        vst1q_f32(dst + i, f);
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__) && defined(__F16C__)
+    for (; i + 8 <= numel; i += 8) {
+        __m128i h = _mm_loadu_si128((const __m128i*)(s + i));
+        __m256 f = _mm256_cvtph_ps(h);
+        _mm256_storeu_ps(dst + i, f);
+    }
+#endif
+    for (; i < numel; ++i) {
+        dst[i] = rcre_f16_to_f32_scalar(s[i]);
+    }
+}
+
+void rcre_bf16_to_f32(const void* src, float* dst, size_t numel) {
+    if (!src || !dst || numel == 0) return;
+    const uint16_t* s = (const uint16_t*)src;
+    size_t i = 0;
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 4 <= numel; i += 4) {
+        uint16x4_t h = vld1_u16(s + i);
+        uint32x4_t w = vshll_n_u16(h, 16);
+        vst1q_f32(dst + i, vreinterpretq_f32_u32(w));
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+    for (; i + 8 <= numel; i += 8) {
+        __m128i h = _mm_loadu_si128((const __m128i*)(s + i));
+        __m256i w = _mm256_slli_epi32(_mm256_cvtepu16_epi32(h), 16);
+        _mm256_storeu_ps(dst + i, _mm256_castsi256_ps(w));
+    }
+#endif
+    for (; i < numel; ++i) {
+        uint32_t u = (uint32_t)s[i] << 16;
+        memcpy(dst + i, &u, 4);
+    }
+}
+
+void rcre_f32_to_f16(const float* src, void* dst, size_t numel) {
+    if (!src || !dst || numel == 0) return;
+    uint16_t* d = (uint16_t*)dst;
+    size_t i = 0;
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 4 <= numel; i += 4) {
+        float32x4_t f = vld1q_f32(src + i);
+        float16x4_t h = vcvt_f16_f32(f);
+        vst1_f16((float16_t*)(d + i), h);
+    }
+#elif (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__) && defined(__F16C__)
+    for (; i + 8 <= numel; i += 8) {
+        __m256 f = _mm256_loadu_ps(src + i);
+        __m128i h = _mm256_cvtps_ph(f, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        _mm_storeu_si128((__m128i*)(d + i), h);
+    }
+#endif
+    for (; i < numel; ++i) {
+        d[i] = rcre_f32_to_f16_scalar(src[i]);
+    }
+}
+
+void rcre_f32_to_bf16(const float* src, void* dst, size_t numel) {
+    if (!src || !dst || numel == 0) return;
+    uint16_t* d = (uint16_t*)dst;
+    for (size_t i = 0; i < numel; ++i) {
+        d[i] = rcre_f32_to_bf16_scalar(src[i]);
+    }
+}
+
+RCRE_NODISCARD int rcre_tensor_to_f32(
+    const RCRE_Tensor* src,
+    RCRE_Arena* arena,
+    RCRE_Tensor* dst_f32
+) {
+    if (!src || !src->data || !dst_f32) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (src->dtype == RCRE_DTYPE_F32) {
+        *dst_f32 = *src;
+        return RCRE_OK;
+    }
+    if (!arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t numel = rcre_tensor_numel(src);
+    *dst_f32 = rcre_tensor_create(src->shape, src->ndim, RCRE_DTYPE_F32, src->layout, arena);
+    if (!dst_f32->data) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    float* out = (float*)dst_f32->data;
+
+    switch (src->dtype) {
+        case RCRE_DTYPE_F16:
+            rcre_f16_to_f32(src->data, out, numel);
+            return RCRE_OK;
+        case RCRE_DTYPE_BF16:
+            rcre_bf16_to_f32(src->data, out, numel);
+            return RCRE_OK;
+        case RCRE_DTYPE_U8: {
+            const uint8_t* u = (const uint8_t*)src->data;
+            for (size_t i = 0; i < numel; ++i) out[i] = (float)u[i];
+            return RCRE_OK;
+        }
+        case RCRE_DTYPE_I32: {
+            const int32_t* iv = (const int32_t*)src->data;
+            for (size_t i = 0; i < numel; ++i) out[i] = (float)iv[i];
+            return RCRE_OK;
+        }
+        default:
+            return RCRE_ERR_UNSUPPORTED_OP;
+    }
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_f32_tensor
+) {
+    if (!archive || !name || !out_f32_tensor) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    RCRE_Tensor raw_tensor = {0};
+    int rc = rcre_io_safetensors_get_tensor(archive, name, arena, &raw_tensor);
+    if (rc != RCRE_OK) {
+        return rc;
+    }
+
+    if (raw_tensor.dtype == RCRE_DTYPE_F32) {
+        *out_f32_tensor = raw_tensor;
+        return RCRE_OK;
+    }
+
+    return rcre_tensor_to_f32(&raw_tensor, arena, out_f32_tensor);
+}
+
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_slice_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    size_t start_row,
+    size_t num_rows,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_slice
+) {
+    if (!archive || !archive->map.data || !name || !arena || !out_slice || num_rows == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_slice, 0, sizeof(RCRE_Tensor));
+
+    RCRE_Slice target_name = rcre_slice_from_cstr(name);
+    const RCRE_SafeTensorEntry* found = nullptr;
+    for (size_t i = 0; i < archive->num_tensors; ++i) {
+        if (rcre_slice_eq(archive->entries[i].name, target_name)) {
+            found = &archive->entries[i];
+            break;
+        }
+    }
+    if (!found || found->ndim == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t total_rows = found->shape[0];
+    if (start_row >= total_rows || (start_row + num_rows) > total_rows) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t row_elements = 1;
+    for (uint8_t d = 1; d < found->ndim; ++d) {
+        row_elements *= found->shape[d];
+    }
+    size_t elem_size = rcre_dtype_size(found->dtype);
+    size_t row_bytes = row_elements * elem_size;
+    size_t slice_bytes = num_rows * row_bytes;
+    size_t slice_offset = archive->data_base_offset + found->data_offset + start_row * row_bytes;
+
+    if (slice_offset + slice_bytes > archive->map.size) {
+        return RCRE_ERR_IO;
+    }
+
+    const uint8_t* src_ptr = archive->map.data + slice_offset;
+    size_t slice_shape[4] = {0};
+    memcpy(slice_shape, found->shape, found->ndim * sizeof(size_t));
+    slice_shape[0] = num_rows;
+
+    RCRE_Layout layout = (found->ndim == 3) ? RCRE_LAYOUT_HWC : RCRE_LAYOUT_TABULAR;
+
+    if (found->dtype == RCRE_DTYPE_F32) {
+        if (((uintptr_t)src_ptr & 63U) == 0) {
+            *out_slice = rcre_tensor_from_buffer((void*)(uintptr_t)src_ptr, slice_shape, found->ndim, RCRE_DTYPE_F32, layout);
+            return RCRE_OK;
+        }
+        *out_slice = rcre_tensor_create(slice_shape, found->ndim, RCRE_DTYPE_F32, layout, arena);
+        if (!out_slice->data) return RCRE_ERR_OUT_OF_MEMORY;
+        memcpy(out_slice->data, src_ptr, slice_bytes);
+        return RCRE_OK;
+    }
+
+    *out_slice = rcre_tensor_create(slice_shape, found->ndim, RCRE_DTYPE_F32, layout, arena);
+    if (!out_slice->data) return RCRE_ERR_OUT_OF_MEMORY;
+    float* dst = (float*)out_slice->data;
+    size_t slice_numel = num_rows * row_elements;
+
+    if (found->dtype == RCRE_DTYPE_F16) {
+        rcre_f16_to_f32(src_ptr, dst, slice_numel);
+    } else if (found->dtype == RCRE_DTYPE_BF16) {
+        rcre_bf16_to_f32(src_ptr, dst, slice_numel);
+    } else if (found->dtype == RCRE_DTYPE_U8) {
+        for (size_t i = 0; i < slice_numel; ++i) dst[i] = (float)src_ptr[i];
+    } else if (found->dtype == RCRE_DTYPE_I32) {
+        const int32_t* iv = (const int32_t*)src_ptr;
+        for (size_t i = 0; i < slice_numel; ++i) dst[i] = (float)iv[i];
+    } else {
+        return RCRE_ERR_UNSUPPORTED_OP;
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
 /* 6. SIMD Byte-Shuffle Codec & Out-of-Core Ping-Pong Streamer (IO-REQ-05)   */
 /* ========================================================================= */
+
+void rcre_io_byte_shuffle_16(const void* src, void* dst, size_t num_elements) {
+    if (!src || !dst || num_elements == 0) {
+        return;
+    }
+
+    const uint8_t* s = (const uint8_t*)src;
+    uint8_t* d0 = (uint8_t*)dst;
+    uint8_t* d1 = d0 + num_elements;
+
+    size_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 15 < num_elements; i += 16) {
+        uint8x16x2_t v = vld2q_u8(s + i * 2);
+        vst1q_u8(d0 + i, v.val[0]);
+        vst1q_u8(d1 + i, v.val[1]);
+    }
+#endif
+
+    for (; i < num_elements; ++i) {
+        d0[i] = s[i * 2 + 0];
+        d1[i] = s[i * 2 + 1];
+    }
+}
+
+void rcre_io_byte_unshuffle_16(const void* src, void* dst, size_t num_elements) {
+    if (!src || !dst || num_elements == 0) {
+        return;
+    }
+
+    const uint8_t* s0 = (const uint8_t*)src;
+    const uint8_t* s1 = s0 + num_elements;
+    uint8_t* d = (uint8_t*)dst;
+
+    size_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    for (; i + 15 < num_elements; i += 16) {
+        uint8x16x2_t v;
+        v.val[0] = vld1q_u8(s0 + i);
+        v.val[1] = vld1q_u8(s1 + i);
+        vst2q_u8(d + i * 2, v);
+    }
+#endif
+
+    for (; i < num_elements; ++i) {
+        d[i * 2 + 0] = s0[i];
+        d[i * 2 + 1] = s1[i];
+    }
+}
 
 void rcre_io_byte_shuffle_32(const void* src, void* dst, size_t num_elements) {
     if (!src || !dst || num_elements == 0) {
@@ -9344,12 +9843,14 @@ RCRE_NODISCARD int rcre_io_compress_tensor(
         tensor->ndim == 0 || tensor->ndim > 4 || !rcre_tensor_is_contiguous(tensor)) {
         return RCRE_ERR_INVALID_ARG;
     }
-    if (tensor->dtype != RCRE_DTYPE_F32 && tensor->dtype != RCRE_DTYPE_I32) {
+    if (tensor->dtype != RCRE_DTYPE_F32 && tensor->dtype != RCRE_DTYPE_I32 &&
+        tensor->dtype != RCRE_DTYPE_F16 && tensor->dtype != RCRE_DTYPE_BF16) {
         return RCRE_ERR_UNSUPPORTED_OP;
     }
 
     size_t numel = rcre_tensor_numel(tensor);
-    size_t raw_bytes = numel * 4;
+    size_t elem_size = rcre_dtype_size(tensor->dtype);
+    size_t raw_bytes = numel * elem_size;
     if (numel == 0 || raw_bytes == 0) {
         return RCRE_ERR_INVALID_ARG;
     }
@@ -9368,7 +9869,11 @@ RCRE_NODISCARD int rcre_io_compress_tensor(
         return RCRE_ERR_OUT_OF_MEMORY;
     }
 
-    rcre_io_byte_shuffle_32(tensor->data, shuffled, numel);
+    if (elem_size == 4) {
+        rcre_io_byte_shuffle_32(tensor->data, shuffled, numel);
+    } else if (elem_size == 2) {
+        rcre_io_byte_shuffle_16(tensor->data, shuffled, numel);
+    }
     size_t comp_payload = rcre_io_lz_compress(shuffled, raw_bytes, out_buf + 64);
     rcre_arena_temp_end(temp);
 
@@ -9404,10 +9909,12 @@ RCRE_NODISCARD int rcre_io_decompress_tensor(
 
     RCRE_DType dtype = (RCRE_DType)rcre_io_read_u32_le(hdr + 8);
     uint32_t ndim_u32 = rcre_io_read_u32_le(hdr + 12);
-    if ((dtype != RCRE_DTYPE_F32 && dtype != RCRE_DTYPE_I32) || ndim_u32 == 0 || ndim_u32 > 4) {
+    if ((dtype != RCRE_DTYPE_F32 && dtype != RCRE_DTYPE_I32 &&
+         dtype != RCRE_DTYPE_F16 && dtype != RCRE_DTYPE_BF16) || ndim_u32 == 0 || ndim_u32 > 4) {
         return RCRE_ERR_IO;
     }
     uint8_t ndim = (uint8_t)ndim_u32;
+    size_t elem_size = rcre_dtype_size(dtype);
 
     size_t shape[4] = {0};
     size_t numel = 1;
@@ -9423,7 +9930,7 @@ RCRE_NODISCARD int rcre_io_decompress_tensor(
     uint64_t raw_bytes_u64  = rcre_io_read_u64_le(hdr + 48);
     uint64_t comp_bytes_u64 = rcre_io_read_u64_le(hdr + 56);
     size_t expected_raw = 0;
-    if (rcre_io_mul_overflow(numel, 4, &expected_raw) ||
+    if (rcre_io_mul_overflow(numel, elem_size, &expected_raw) ||
         raw_bytes_u64 != (uint64_t)expected_raw ||
         64ULL + comp_bytes_u64 != (uint64_t)compressed_frame.len) {
         return RCRE_ERR_IO;
@@ -9447,7 +9954,11 @@ RCRE_NODISCARD int rcre_io_decompress_tensor(
         return RCRE_ERR_IO;
     }
 
-    rcre_io_byte_unshuffle_32(shuffled, t.data, numel);
+    if (elem_size == 4) {
+        rcre_io_byte_unshuffle_32(shuffled, t.data, numel);
+    } else if (elem_size == 2) {
+        rcre_io_byte_unshuffle_16(shuffled, t.data, numel);
+    }
     rcre_arena_temp_end(temp);
 
     *out_tensor = t;
@@ -9511,7 +10022,56 @@ RCRE_NODISCARD int rcre_io_stream_open_npy(
     out_stream->batch_rows   = batch_rows;
     out_stream->current_row  = 0;
     out_stream->active_slot  = 0;
+    out_stream->async_enabled = false;
+    out_stream->use_io_uring = false;
+    out_stream->async_handle = 0;
 
+    return RCRE_OK;
+}
+
+RCRE_NODISCARD bool rcre_io_is_io_uring_available(void) {
+#if defined(__linux__) && defined(__NR_io_uring_setup)
+    static int s_cached = -1;
+    if (s_cached != -1) {
+        return s_cached == 1;
+    }
+    struct {
+        uint32_t sq_entries;
+        uint32_t cq_entries;
+        uint32_t flags;
+        uint32_t sq_thread_cpu;
+        uint32_t sq_thread_idle;
+        uint32_t features;
+        uint32_t wq_fd;
+        uint32_t resv[3];
+        struct { uint32_t head, tail, ring_mask, ring_entries, flags, dropped, array, resv[3]; } sq_off;
+        struct { uint32_t head, tail, ring_mask, ring_entries, overflow, cqes, flags, resv[3]; } cq_off;
+    } p;
+    memset(&p, 0, sizeof(p));
+    long fd = syscall(__NR_io_uring_setup, 1, &p);
+    if (fd >= 0) {
+        close((int)fd);
+        s_cached = 1;
+        return true;
+    }
+    s_cached = 0;
+    return false;
+#else
+    return false;
+#endif
+}
+
+RCRE_NODISCARD int rcre_io_stream_enable_async(RCRE_TensorStream* stream) {
+    if (!stream || !stream->map.data) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    stream->async_enabled = true;
+    if (rcre_io_is_io_uring_available()) {
+        stream->use_io_uring = true;
+    } else {
+        stream->use_io_uring = false;
+        (void)rcre_io_madvise_range(&stream->map, 0, stream->map.size, RCRE_IO_HINT_SEQUENTIAL);
+    }
     return RCRE_OK;
 }
 
@@ -9535,7 +10095,15 @@ RCRE_NODISCARD bool rcre_io_stream_next(
     /* Advise kernel to prefetch next batch and release previous pages */
     size_t next_off = file_off + copy_bytes;
     if (next_off < stream->map.size) {
-        (void)rcre_io_madvise_range(&stream->map, next_off, copy_bytes, RCRE_IO_HINT_SEQUENTIAL);
+        size_t next_rem = stream->total_rows - (stream->current_row + cur_rows);
+        size_t next_rows = (next_rem < stream->batch_rows) ? next_rem : stream->batch_rows;
+        size_t next_bytes = next_rows * stream->row_bytes;
+        (void)rcre_io_madvise_range(&stream->map, next_off, next_bytes, RCRE_IO_HINT_SEQUENTIAL);
+
+        if (stream->async_enabled && next_off + next_bytes + next_bytes <= stream->map.size) {
+            /* Asynchronous pipeline lookahead: prefetch the batch after next */
+            (void)rcre_io_madvise_range(&stream->map, next_off + next_bytes, next_bytes, RCRE_IO_HINT_SEQUENTIAL);
+        }
     }
 
     size_t batch_shape[4] = {0};
@@ -9560,6 +10128,12 @@ void rcre_io_stream_close(RCRE_TensorStream* stream) {
     if (!stream) {
         return;
     }
+#if defined(__linux__)
+    if (stream->use_io_uring && stream->async_handle > 0) {
+        close((int)stream->async_handle);
+        stream->async_handle = 0;
+    }
+#endif
     rcre_io_mmap_close(&stream->map);
     memset(stream, 0, sizeof(RCRE_TensorStream));
 }
@@ -9581,9 +10155,11 @@ RCRE_NODISCARD int rcre_io_to_dlpack(
     uint8_t code = 0;
     uint8_t bits = 0;
     switch (src->dtype) {
-        case RCRE_DTYPE_U8:  code = (uint8_t)RCRE_DL_UINT;  bits = 8;  break;
-        case RCRE_DTYPE_I32: code = (uint8_t)RCRE_DL_INT;   bits = 32; break;
-        case RCRE_DTYPE_F32: code = (uint8_t)RCRE_DL_FLOAT; bits = 32; break;
+        case RCRE_DTYPE_U8:   code = (uint8_t)RCRE_DL_UINT;  bits = 8;  break;
+        case RCRE_DTYPE_F16:  code = (uint8_t)RCRE_DL_FLOAT; bits = 16; break;
+        case RCRE_DTYPE_BF16: code = 4;                       bits = 16; break; /* kDLBfloat = 4 */
+        case RCRE_DTYPE_I32:  code = (uint8_t)RCRE_DL_INT;   bits = 32; break;
+        case RCRE_DTYPE_F32:  code = (uint8_t)RCRE_DL_FLOAT; bits = 32; break;
         default: return RCRE_ERR_UNSUPPORTED_OP;
     }
 
@@ -9629,6 +10205,10 @@ RCRE_NODISCARD int rcre_io_from_dlpack(
         dtype = RCRE_DTYPE_I32;
     } else if (dl->dtype_code == (uint8_t)RCRE_DL_FLOAT && dl->dtype_bits == 32) {
         dtype = RCRE_DTYPE_F32;
+    } else if (dl->dtype_code == (uint8_t)RCRE_DL_FLOAT && dl->dtype_bits == 16) {
+        dtype = RCRE_DTYPE_F16;
+    } else if (dl->dtype_code == 4 && dl->dtype_bits == 16) {
+        dtype = RCRE_DTYPE_BF16;
     } else {
         return RCRE_ERR_UNSUPPORTED_OP;
     }
@@ -9682,9 +10262,11 @@ RCRE_NODISCARD int rcre_io_to_arrow(
 
     const char* fmt = nullptr;
     switch (src->dtype) {
-        case RCRE_DTYPE_U8:  fmt = "C"; break;
-        case RCRE_DTYPE_I32: fmt = "i"; break;
-        case RCRE_DTYPE_F32: fmt = "f"; break;
+        case RCRE_DTYPE_U8:   fmt = "C"; break;
+        case RCRE_DTYPE_F16:  fmt = "e"; break;
+        case RCRE_DTYPE_BF16: fmt = "b"; break;
+        case RCRE_DTYPE_I32:  fmt = "i"; break;
+        case RCRE_DTYPE_F32:  fmt = "f"; break;
         default: return RCRE_ERR_UNSUPPORTED_OP;
     }
 
@@ -9724,6 +10306,10 @@ RCRE_NODISCARD int rcre_io_from_arrow(
     RCRE_DType dtype = RCRE_DTYPE_F32;
     if (strcmp(schema->format, "f") == 0) {
         dtype = RCRE_DTYPE_F32;
+    } else if (strcmp(schema->format, "e") == 0) {
+        dtype = RCRE_DTYPE_F16;
+    } else if (strcmp(schema->format, "b") == 0) {
+        dtype = RCRE_DTYPE_BF16;
     } else if (strcmp(schema->format, "i") == 0) {
         dtype = RCRE_DTYPE_I32;
     } else if (strcmp(schema->format, "C") == 0) {

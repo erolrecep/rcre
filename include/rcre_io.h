@@ -201,7 +201,7 @@ RCRE_NODISCARD int rcre_io_view_npy(
 /* 4. Multi-Tensor Safetensors (.safetensors) Container Engine (IO-REQ-04)   */
 /* ========================================================================= */
 
-#define RCRE_SAFETENSORS_MAX_TENSORS 256
+#define RCRE_SAFETENSORS_MAX_TENSORS 1024
 
 typedef struct RCRE_SafeTensorEntry {
     RCRE_Slice  name;          /* Zero-copy slice into JSON header               */
@@ -268,6 +268,45 @@ RCRE_NODISCARD int rcre_io_safetensors_get_tensor(
 );
 
 /**
+ * @brief Retrieves a tensor by name and guarantees output is an F32 tensor.
+ *        If tensor is already F32 and 64B-aligned, returns a zero-copy view (is_view = true).
+ *        If tensor is F16, BF16, I32, or U8, allocates an F32 tensor in arena and
+ *        executes hardware-accelerated SIMD dequantization / casting.
+ * @param archive Open .safetensors archive.
+ * @param name Tensor name to look up.
+ * @param arena Destination arena for dequantized payload (ignored if zero-copy F32).
+ * @param out_f32_tensor Output F32 tensor.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_f32_tensor
+);
+
+/**
+ * @brief Retrieves a 64-bit row-sliced view/dequantization of a tensor by name
+ *        from an open .safetensors archive without mapping or loading the entire matrix.
+ *        Supports 64-bit offsets > 4 GB for multi-billion parameter LLM weights.
+ * @param archive Open .safetensors archive.
+ * @param name Tensor name to look up.
+ * @param start_row Starting outer dimension row index.
+ * @param num_rows Number of rows to read in this chunk.
+ * @param arena Destination arena for F32 tensor or unaligned copy.
+ * @param out_slice Output sliced F32 tensor [num_rows, ...].
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_io_safetensors_get_tensor_slice_f32(
+    const RCRE_SafeTensorsArchive* archive,
+    const char* name,
+    size_t start_row,
+    size_t num_rows,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_slice
+);
+
+/**
  * @brief Saves an array of named RCRE_Tensors to a 64-byte aligned .safetensors file.
  * @param filepath Destination .safetensors file path.
  * @param names Array of tensor name strings [num_tensors].
@@ -305,6 +344,75 @@ void rcre_io_byte_shuffle_32(const void* src, void* dst, size_t num_elements);
  * @param num_elements Number of 32-bit elements.
  */
 void rcre_io_byte_unshuffle_32(const void* src, void* dst, size_t num_elements);
+
+/**
+ * @brief Applies a SIMD-accelerated 16-bit byte-shuffle transpose on F16/BF16 elements,
+ *        grouping byte 0 and byte 1 into contiguous streams.
+ * @param src Source array of num_elements 16-bit values (2 * num_elements bytes).
+ * @param dst Destination buffer (2 * num_elements bytes).
+ * @param num_elements Number of 16-bit elements.
+ */
+void rcre_io_byte_shuffle_16(const void* src, void* dst, size_t num_elements);
+
+/**
+ * @brief Reconstructs interleaved 16-bit elements from a 16-bit byte-shuffled buffer.
+ * @param src Byte-shuffled source buffer (2 * num_elements bytes).
+ * @param dst Destination array of num_elements 16-bit values.
+ * @param num_elements Number of 16-bit elements.
+ */
+void rcre_io_byte_unshuffle_16(const void* src, void* dst, size_t num_elements);
+
+/* ========================================================================= */
+/* Half-Precision (IEEE FP16 & Google BF16) Conversion & De-Quantization      */
+/* ========================================================================= */
+
+/**
+ * @brief Converts an array of IEEE-754 binary16 (FP16) floats to IEEE-754 F32
+ *        using hardware SIMD (ARM NEON vcvt_f32_f16 or x86 F16C / AVX2).
+ * @param src Pointer to numel uint16_t FP16 values.
+ * @param dst Pointer to numel float output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_f16_to_f32(const void* src, float* dst, size_t numel);
+
+/**
+ * @brief Converts an array of Google Brain bfloat16 (BF16) floats to IEEE-754 F32
+ *        using vectorized 16-bit bit-shifts and zero-latency unpack.
+ * @param src Pointer to numel uint16_t BF16 values.
+ * @param dst Pointer to numel float output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_bf16_to_f32(const void* src, float* dst, size_t numel);
+
+/**
+ * @brief Converts an array of IEEE-754 F32 floats to IEEE-754 binary16 (FP16).
+ * @param src Pointer to numel float values.
+ * @param dst Pointer to numel uint16_t FP16 output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_f32_to_f16(const float* src, void* dst, size_t numel);
+
+/**
+ * @brief Converts an array of IEEE-754 F32 floats to Google Brain bfloat16 (BF16)
+ *        with round-to-nearest-even precision.
+ * @param src Pointer to numel float values.
+ * @param dst Pointer to numel uint16_t BF16 output buffer.
+ * @param numel Number of elements to convert.
+ */
+void rcre_f32_to_bf16(const float* src, void* dst, size_t numel);
+
+/**
+ * @brief Converts any RCRE_Tensor (U8, I32, F16, BF16, or F32) to an F32 tensor.
+ * @param src Input source tensor.
+ * @param arena Destination arena to allocate output F32 tensor (ignored if already F32 view).
+ * @param dst_f32 Output F32 tensor.
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_tensor_to_f32(
+    const RCRE_Tensor* src,
+    RCRE_Arena* arena,
+    RCRE_Tensor* dst_f32
+);
 
 /**
  * @brief Compresses a contiguous 32-bit tensor (F32/I32) using SIMD byte-shuffle
@@ -347,7 +455,25 @@ typedef struct RCRE_TensorStream {
     size_t          data_offset;     /* Byte offset to row 0 in file             */
     uint8_t*        ping_pong_buf[2];/* Dual 64B-aligned arena buffers           */
     uint8_t         active_slot;     /* Toggles 0 <-> 1 on each batch            */
+    bool            async_enabled;   /* Background double-buffered prefetch      */
+    bool            use_io_uring;    /* True if Linux io_uring active            */
+    intptr_t        async_handle;    /* io_uring ring fd or async handle         */
 } RCRE_TensorStream;
+
+/**
+ * @brief Checks if Linux io_uring ring buffer syscalls are supported by host kernel.
+ * @return true if io_uring is functional, false otherwise.
+ */
+RCRE_NODISCARD bool rcre_io_is_io_uring_available(void);
+
+/**
+ * @brief Enables asynchronous non-blocking prefetch on an open RCRE_TensorStream.
+ *        On Linux with kernel >= 5.1, engages io_uring zero-copy submission rings.
+ *        On macOS/other POSIX, engages aggressive sequential prefetch + double buffering.
+ * @param stream Active tensor stream.
+ * @return RCRE_OK on success.
+ */
+RCRE_NODISCARD int rcre_io_stream_enable_async(RCRE_TensorStream* stream);
 
 /**
  * @brief Opens an out-of-core ping-pong batch streamer over a .npy tensor file.

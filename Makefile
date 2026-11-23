@@ -311,7 +311,7 @@ bin/bench_hal: benchmarks/bench_hal.c $(LIB)
 
 bin/bench_io: benchmarks/bench_io.c $(LIB)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $< -Llib -lrcre -lm -lpthread -o $@
+	$(CC) $(CFLAGS) $< $(LIB) $(CAM_LDFLAGS) -lm -lpthread -o $@
 
 bench: bin/bench_hal
 	@bin/bench_hal

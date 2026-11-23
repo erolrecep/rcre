@@ -364,6 +364,44 @@ static void bench_abi_bridges(void) {
     rcre_arena_destroy(arena);
 }
 
+static void bench_half_precision_dequantization(void) {
+    printf("\n📊 [6/6] Half-Precision SIMD De-Quantization Throughput (16M Elements)\n");
+    RCRE_Arena* arena = rcre_arena_create(128 * 1024 * 1024);
+    const size_t N = 16 * 1024 * 1024; /* 16M elements: 32 MB input + 64 MB output */
+    uint16_t* fp16_buf = (uint16_t*)rcre_arena_alloc(arena, N * sizeof(uint16_t), 64);
+    uint16_t* bf16_buf = (uint16_t*)rcre_arena_alloc(arena, N * sizeof(uint16_t), 64);
+    float* f32_dst = (float*)rcre_arena_alloc(arena, N * sizeof(float), 64);
+
+    for (size_t i = 0; i < N; ++i) {
+        fp16_buf[i] = (uint16_t)(i & 0xFFFF);
+        bf16_buf[i] = (uint16_t)(i & 0xFFFF);
+    }
+
+    const int ITERS = 10;
+    double t0 = bench_now_sec();
+    for (int it = 0; it < ITERS; ++it) {
+        rcre_f16_to_f32(fp16_buf, f32_dst, N);
+    }
+    double dt_f16 = (bench_now_sec() - t0) / ITERS;
+    double bw_f16 = ((double)N * sizeof(float) + (double)N * sizeof(uint16_t)) / (dt_f16 * 1e9);
+    double mps_f16 = ((double)N / 1e6) / dt_f16;
+
+    t0 = bench_now_sec();
+    for (int it = 0; it < ITERS; ++it) {
+        rcre_bf16_to_f32(bf16_buf, f32_dst, N);
+    }
+    double dt_bf16 = (bench_now_sec() - t0) / ITERS;
+    double bw_bf16 = ((double)N * sizeof(float) + (double)N * sizeof(uint16_t)) / (dt_bf16 * 1e9);
+    double mps_bf16 = ((double)N / 1e6) / dt_bf16;
+
+    printf("   • IEEE FP16 -> FP32 SIMD Dequant:  %6.2f ms | %6.1f M elem/s | %6.2f GB/s\n",
+           dt_f16 * 1e3, mps_f16, bw_f16);
+    printf("   • Google BF16 -> FP32 SIMD Dequant: %6.2f ms | %6.1f M elem/s | %6.2f GB/s\n",
+           dt_bf16 * 1e3, mps_bf16, bw_bf16);
+
+    rcre_arena_destroy(arena);
+}
+
 int main(void) {
     rcre_hal_init();
     RCRE_CpuTopology topo = rcre_cpu_get_topology();
@@ -381,6 +419,7 @@ int main(void) {
     bench_binary_containers();
     bench_shuffle_and_compression();
     bench_abi_bridges();
+    bench_half_precision_dequantization();
 
     printf("\n======================================================================\n");
     printf("🏁 All Scientific I/O Bandwidth Benchmarks Completed!\n");

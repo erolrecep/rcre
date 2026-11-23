@@ -78,9 +78,11 @@ typedef enum {
 /* ========================================================================= */
 
 typedef enum {
-    RCRE_DTYPE_U8  = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
-    RCRE_DTYPE_I32 = 1, /* 32-bit signed integer (class labels, indices)          */
-    RCRE_DTYPE_F32 = 3  /* 32-bit single precision float                           */
+    RCRE_DTYPE_U8   = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
+    RCRE_DTYPE_I32  = 1, /* 32-bit signed integer (class labels, indices)          */
+    RCRE_DTYPE_F32  = 3, /* 32-bit single precision float                         */
+    RCRE_DTYPE_F16  = 4, /* 16-bit IEEE 754-2008 half precision float             */
+    RCRE_DTYPE_BF16 = 5  /* 16-bit Google Brain bfloat16 format                   */
 } RCRE_DType;
 
 typedef enum {
