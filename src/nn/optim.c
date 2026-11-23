@@ -90,6 +90,7 @@ RCRE_TensorOptim* rcre_tensor_optim_lion_create(RCRE_Arena* arena, RCRE_Tensor**
 
     RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
     if (!opt) return nullptr;
+    memset(opt, 0, sizeof(*opt));
     opt->type = RCRE_OPTIM_LION;
     opt->params = params;
     opt->num_params = num_params;
@@ -117,6 +118,7 @@ RCRE_TensorOptim* rcre_tensor_optim_adafactor_create(RCRE_Arena* arena, RCRE_Ten
 
     RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
     if (!opt) return nullptr;
+    memset(opt, 0, sizeof(*opt));
     opt->type = RCRE_OPTIM_ADAFACTOR;
     opt->params = params;
     opt->num_params = num_params;

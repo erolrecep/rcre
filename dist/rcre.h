@@ -9333,7 +9333,16 @@ int rcre_sparse_bcsr4_spmv(
             uint32_t bc = A->block_col_indices[b];
             const float* x_ptr = &x[bc * 4];
             const float* w = &A->block_values[b * 16];
-            float32x4_t vx = vld1q_f32(x_ptr);
+            float32x4_t vx;
+            if ((size_t)bc * 4 + 4 <= A->cols) {
+                vx = vld1q_f32(x_ptr);
+            } else {
+                float xt[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                for (size_t c = 0; c < 4 && (size_t)bc * 4 + c < A->cols; ++c) {
+                    xt[c] = x_ptr[c];
+                }
+                vx = vld1q_f32(xt);
+            }
 
             float32x4_t r0 = vld1q_f32(w + 0);
             float32x4_t r1 = vld1q_f32(w + 4);
@@ -9366,7 +9375,10 @@ int rcre_sparse_bcsr4_spmv(
             const float* x_ptr = &x[bc * 4];
             const float* w = &A->block_values[b * 16];
 
-            float x0 = x_ptr[0], x1 = x_ptr[1], x2 = x_ptr[2], x3 = x_ptr[3];
+            float x0 = ((size_t)bc * 4 + 0 < A->cols) ? x_ptr[0] : 0.0f;
+            float x1 = ((size_t)bc * 4 + 1 < A->cols) ? x_ptr[1] : 0.0f;
+            float x2 = ((size_t)bc * 4 + 2 < A->cols) ? x_ptr[2] : 0.0f;
+            float x3 = ((size_t)bc * 4 + 3 < A->cols) ? x_ptr[3] : 0.0f;
 
             y0 += w[0]*x0 + w[1]*x1 + w[2]*x2 + w[3]*x3;
             y1 += w[4]*x0 + w[5]*x1 + w[6]*x2 + w[7]*x3;
@@ -23952,6 +23964,7 @@ RCRE_TensorOptim* rcre_tensor_optim_lion_create(RCRE_Arena* arena, RCRE_Tensor**
 
     RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
     if (!opt) return nullptr;
+    memset(opt, 0, sizeof(*opt));
     opt->type = RCRE_OPTIM_LION;
     opt->params = params;
     opt->num_params = num_params;
@@ -23979,6 +23992,7 @@ RCRE_TensorOptim* rcre_tensor_optim_adafactor_create(RCRE_Arena* arena, RCRE_Ten
 
     RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
     if (!opt) return nullptr;
+    memset(opt, 0, sizeof(*opt));
     opt->type = RCRE_OPTIM_ADAFACTOR;
     opt->params = params;
     opt->num_params = num_params;
