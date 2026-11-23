@@ -454,4 +454,128 @@ void rcre_neon_gemm_i8(size_t M, size_t N, size_t K,
     }
 }
 
+/* H0 (2.1.0): F64 cells — NEON 128-bit double-precision (2-wide)           */
+/* =========================================================================
+ * aarch64 NEON's 128-bit double vector is float64x2_t (2 doubles per
+ * register — unlike the 4-wide F32 case). Element-wise ops (dot/axpy/
+ * scale/sum) use the q- intrinsics directly; GEMM uses a 4x2 micro-kernel
+ * (4 rows x 2 cols per k-step) with the same 64/64/64 blocking as the F32
+ * driver. Determinism: k-outer accumulation order matches the scalar
+ * baseline; cross-ISA parity is tolerance-gated (docs/hpc.md).
+ * ========================================================================= */
+
+static void neon_gemm64_microkernel_4x2(size_t K,
+                                        const double* A, size_t lda,
+                                        const double* B, size_t ldb,
+                                        double* C, size_t ldc) {
+    float64x2_t acc[4];
+    for (size_t i = 0; i < 4; ++i) acc[i] = vld1q_f64(&C[i * ldc]);
+    for (size_t k = 0; k < K; ++k) {
+        float64x2_t b = vld1q_f64(&B[k * ldb]);      /* B[k, 0..1] */
+        for (size_t i = 0; i < 4; ++i)
+            acc[i] = vfmaq_n_f64(acc[i], b, A[i * lda + k]);
+    }
+    for (size_t i = 0; i < 4; ++i) vst1q_f64(&C[i * ldc], acc[i]);
+}
+
+void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                        const double* A, size_t lda, const double* B, size_t ldb,
+                        double beta, double* C, size_t ldc) {
+    if (beta != 1.0) {
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] = (beta == 0.0) ? 0.0 : C[i * ldc + j] * beta;
+    }
+    if (alpha == 0.0 || M == 0 || N == 0 || K == 0) return;
+
+    const size_t MB = 64, NB = 64, KB = 64;
+    for (size_t ii = 0; ii < M; ii += MB) {
+        size_t i_end = (ii + MB < M) ? ii + MB : M;
+        for (size_t jj = 0; jj < N; jj += NB) {
+            size_t j_end = (jj + NB < N) ? jj + NB : N;
+            for (size_t kk = 0; kk < K; kk += KB) {
+                size_t k_end = (kk + KB < K) ? kk + KB : K;
+                size_t i = ii;
+                for (; i + 3 < i_end; i += 4) {
+                    size_t j = jj;
+                    for (; j + 1 < j_end; j += 2)
+                        neon_gemm64_microkernel_4x2(k_end - kk,
+                                                    &A[i * lda + kk], lda,
+                                                    &B[kk * ldb + j], ldb,
+                                                    &C[i * ldc + j], ldc);
+                    for (; j < j_end; ++j)
+                        for (size_t r = 0; r < 4; ++r) {
+                            double acc = 0.0;
+                            for (size_t k = kk; k < k_end; ++k)
+                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                            C[(i + r) * ldc + j] += acc;
+                        }
+                }
+                for (; i < i_end; ++i)
+                    for (size_t j = jj; j < j_end; ++j) {
+                        double acc = 0.0;
+                        for (size_t k = kk; k < k_end; ++k)
+                            acc += A[i * lda + k] * B[k * ldb + j];
+                        C[i * ldc + j] += acc;
+                    }
+            }
+        }
+    }
+    if (alpha != 1.0)
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] *= alpha;
+}
+
+double rcre_neon_dot_f64(const double* x, const double* y, size_t n) {
+    float64x2_t acc = vdupq_n_f64(0.0);
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2)
+        acc = vfmaq_f64(acc, vld1q_f64(&x[i]), vld1q_f64(&y[i]));
+    double s = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
+    for (; i < n; ++i) s += x[i] * y[i];
+    return s;
+}
+
+void rcre_neon_axpy_f64(size_t n, double alpha, const double* x, double* y) {
+    float64x2_t va = vdupq_n_f64(alpha);
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2)
+        vst1q_f64(&y[i], vmlaq_f64(vld1q_f64(&y[i]), va, vld1q_f64(&x[i])));
+    for (; i < n; ++i) y[i] += alpha * x[i];
+}
+
+void rcre_neon_gemv_f64(size_t M, size_t N, double alpha,
+                        const double* A, size_t lda, const double* x,
+                        double beta, double* y) {
+    for (size_t i = 0; i < M; ++i) {
+        float64x2_t acc = vdupq_n_f64(0.0);
+        const double* row = A + i * lda;
+        size_t j = 0;
+        for (; j + 2 <= N; j += 2)
+            acc = vfmaq_f64(acc, vld1q_f64(&row[j]), vld1q_f64(&x[j]));
+        double s = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
+        for (; j < N; ++j) s += row[j] * x[j];
+        y[i] = (beta == 0.0) ? alpha * s : beta * y[i] + alpha * s;
+    }
+}
+
+void rcre_neon_scale_f64(size_t n, double alpha, double* x) {
+    float64x2_t va = vdupq_n_f64(alpha);
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2)
+        vst1q_f64(&x[i], vmulq_f64(vld1q_f64(&x[i]), va));
+    for (; i < n; ++i) x[i] *= alpha;
+}
+
+double rcre_neon_sum_f64(const double* x, size_t n) {
+    float64x2_t acc = vdupq_n_f64(0.0);
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2)
+        acc = vaddq_f64(acc, vld1q_f64(&x[i]));
+    double s = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
+    for (; i < n; ++i) s += x[i];
+    return s;
+}
+
 #endif /* __ARM_NEON || __aarch64__ */

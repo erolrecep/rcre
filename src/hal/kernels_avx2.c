@@ -430,6 +430,150 @@ void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
 
 #if defined(RCRE_NEED_POP_AVX2)
   #if RCRE_NEED_POP_AVX2 == 2
+/* H0 (2.1.0): F64 cells — AVX2 256-bit / 4-wide doubles                     */
+/* =========================================================================
+ * Same 4x4 micro-kernel shape as NEON; __m256d holds 4 doubles. _mm256_fmadd_pd
+ * (FMA3) for the micro-kernel, mul+add for the vectorless tail. Determinism:
+ * same k-outer order as the scalar baseline; gated at ISA-parity tolerance.
+ * ========================================================================= */
+
+static void avx2_gemm64_microkernel_4x4(size_t K,
+                                        const double* A, size_t lda,
+                                        const double* B, size_t ldb,
+                                        double* C, size_t ldc) {
+    __m256d acc[4];
+    for (size_t i = 0; i < 4; ++i) acc[i] = _mm256_load_pd(&C[i * ldc]);
+    for (size_t k = 0; k < K; ++k) {
+        __m256d b0 = _mm256_load_pd(&B[k * ldb + 0]);
+        __m256d b1 = _mm256_load_pd(&B[k * ldb + 1]);
+        __m256d b2 = _mm256_load_pd(&B[k * ldb + 2]);
+        __m256d b3 = _mm256_load_pd(&B[k * ldb + 3]);
+        for (size_t i = 0; i < 4; ++i) {
+            const double a = A[i * lda + k];
+            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b0, acc[i]);
+            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b1, acc[i]);
+            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b2, acc[i]);
+            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b3, acc[i]);
+        }
+    }
+    for (size_t i = 0; i < 4; ++i) _mm256_store_pd(&C[i * ldc], acc[i]);
+}
+
+void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                        const double* A, size_t lda, const double* B, size_t ldb,
+                        double beta, double* C, size_t ldc) {
+    if (beta != 1.0) {
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] = (beta == 0.0) ? 0.0 : C[i * ldc + j] * beta;
+    }
+    if (alpha == 0.0 || M == 0 || N == 0 || K == 0) return;
+
+    const size_t MB = 64, NB = 64, KB = 64;
+    for (size_t ii = 0; ii < M; ii += MB) {
+        size_t i_end = (ii + MB < M) ? ii + MB : M;
+        for (size_t jj = 0; jj < N; jj += NB) {
+            size_t j_end = (jj + NB < N) ? jj + NB : N;
+            for (size_t kk = 0; kk < K; kk += KB) {
+                size_t k_end = (kk + KB < K) ? kk + KB : K;
+                size_t i = ii;
+                for (; i + 3 < i_end; i += 4) {
+                    size_t j = jj;
+                    for (; j + 3 < j_end; j += 4)
+                        avx2_gemm64_microkernel_4x4(k_end - kk,
+                                                    &A[i * lda + kk], lda,
+                                                    &B[kk * ldb + j], ldb,
+                                                    &C[i * ldc + j], ldc);
+                    for (; j < j_end; ++j)
+                        for (size_t r = 0; r < 4; ++r) {
+                            double acc = 0.0;
+                            for (size_t k = kk; k < k_end; ++k)
+                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                            C[(i + r) * ldc + j] += acc;
+                        }
+                }
+                for (; i < i_end; ++i)
+                    for (size_t j = jj; j < j_end; ++j) {
+                        double acc = 0.0;
+                        for (size_t k = kk; k < k_end; ++k)
+                            acc += A[i * lda + k] * B[k * ldb + j];
+                        C[i * ldc + j] += acc;
+                    }
+            }
+        }
+    }
+    if (alpha != 1.0)
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] *= alpha;
+}
+
+double rcre_avx2_dot_f64(const double* x, const double* y, size_t n) {
+    __m256d acc = _mm256_setzero_pd();
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        acc = _mm256_fmadd_pd(_mm256_load_pd(&x[i]), _mm256_load_pd(&y[i]), acc);
+    double t[4];
+    _mm256_store_pd(t, acc);
+    double s = t[0] + t[1] + t[2] + t[3];
+    for (; i < n; ++i) s += x[i] * y[i];
+    return s;
+}
+
+void rcre_avx2_axpy_f64(size_t n, double alpha, const double* x, double* y) {
+    __m256d va = _mm256_set1_pd(alpha);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        _mm256_store_pd(&y[i], _mm256_fmadd_pd(va, _mm256_load_pd(&x[i]),
+                                               _mm256_load_pd(&y[i])));
+    for (; i < n; ++i) y[i] += alpha * x[i];
+}
+
+void rcre_avx2_gemv_f64(size_t M, size_t N, double alpha,
+                        const double* A, size_t lda, const double* x,
+                        double beta, double* y) {
+    for (size_t i = 0; i < M; ++i) {
+        __m256d acc = _mm256_setzero_pd();
+        const double* row = A + i * lda;
+        size_t j = 0;
+        for (; j + 4 <= N; j += 4)
+            acc = _mm256_fmadd_pd(_mm256_load_pd(&row[j]), _mm256_load_pd(&x[j]), acc);
+        double t[4];
+        _mm256_store_pd(t, acc);
+        double s = t[0] + t[1] + t[2] + t[3];
+        for (; j < N; ++j) s += row[j] * x[j];
+        y[i] = (beta == 0.0) ? alpha * s : beta * y[i] + alpha * s;
+    }
+}
+
+void rcre_avx2_scale_f64(size_t n, double alpha, double* x) {
+    __m256d va = _mm256_set1_pd(alpha);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        _mm256_store_pd(&x[i], _mm256_mul_pd(_mm256_load_pd(&x[i]), va));
+    for (; i < n; ++i) x[i] *= alpha;
+}
+
+double rcre_avx2_sum_f64(const double* x, size_t n) {
+    __m256d acc = _mm256_setzero_pd();
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        acc = _mm256_add_pd(acc, _mm256_load_pd(&x[i]));
+    double t[4];
+    _mm256_store_pd(t, acc);
+    double s = t[0] + t[1] + t[2] + t[3];
+    for (; i < n; ++i) s += x[i];
+    return s;
+}
+
+#if !defined(__AVX2__)
+  #if defined(__clang__)
+    #pragma clang attribute pop
+  #elif defined(__GNUC__)
+    #pragma GCC pop_options
+  #endif
+#endif
+
     #pragma clang attribute pop
   #elif RCRE_NEED_POP_AVX2 == 1
     #pragma GCC pop_options

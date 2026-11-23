@@ -32,7 +32,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 2
-#define RCRE_VERSION_MINOR 0
+#define RCRE_VERSION_MINOR 1
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -93,7 +93,7 @@ typedef enum {
     RCRE_DTYPE_F16  = 4, /* 16-bit IEEE 754-2008 half precision float             */
     RCRE_DTYPE_BF16 = 5, /* 16-bit Google Brain bfloat16 format                   */
     RCRE_DTYPE_I8   = 6, /* 8-bit signed quantized integer                        */
-    RCRE_DTYPE_F64  = 7  /* 64-bit IEEE-754 double precision float                */
+    RCRE_DTYPE_F64  = 7  /* 64-bit IEEE-754 double precision (HPC scientific, H0) */
 } RCRE_DType;
 
 typedef enum {
@@ -1216,6 +1216,25 @@ typedef void (*rcre_gemm_bf16_fn)(size_t M, size_t N, size_t K, float alpha,
 
 typedef void (*rcre_axpy_fn)(size_t n, float alpha, const float* x, float* y);
 
+/* ---- H0 (2.1.0): 64-bit doubles + the HPC op matrix ---------------------
+ * F64 is the scientific substrate: every algorithm that needs double
+ * precision calls the dispatched f64 op and transparently gets scalar /
+ * NEON (4-wide) / AVX2 (4-wide) / AVX-512 (8-wide) on the host. f32 gets
+ * the same gemv/scale/sum cells so the op matrix is complete. */
+typedef void (*rcre_gemm_f64_fn)(size_t M, size_t N, size_t K, double alpha,
+                                 const double* A, size_t lda,
+                                 const double* B, size_t ldb,
+                                 double beta, double* C, size_t ldc);
+typedef double (*rcre_dot_f64_fn)(const double* x, const double* y, size_t n);
+typedef void (*rcre_axpy_f64_fn)(size_t n, double alpha, const double* x, double* y);
+typedef void (*rcre_gemv_f64_fn)(size_t M, size_t N, double alpha,
+                                 const double* A, size_t lda, const double* x,
+                                 double beta, double* y);
+typedef void (*rcre_scale_f32_fn)(size_t n, float alpha, float* x);
+typedef void (*rcre_scale_f64_fn)(size_t n, double alpha, double* x);
+typedef float (*rcre_sum_f32_fn)(const float* x, size_t n);
+typedef double (*rcre_sum_f64_fn)(const double* x, size_t n);
+
 typedef void (*rcre_rgb_to_gray_u8_fn)(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
 
 typedef size_t (*rcre_find_byte_fn)(const uint8_t* hay, size_t len, uint8_t needle);
@@ -1243,6 +1262,16 @@ typedef struct RCRE_HalDispatch {
     rcre_rgb_to_gray_u8_fn rgb_to_gray_u8;
     rcre_find_byte_fn      find_byte;
     rcre_count_byte_fn     count_byte;
+    /* H0 (2.1.0): HPC op matrix — f64 substrate + f32 completeness.
+     * (gemv_f32 reuses main's v2.0 cell above — identical signature.) */
+    rcre_gemm_f64_fn       gemm_f64;
+    rcre_dot_f64_fn        dot_f64;
+    rcre_axpy_f64_fn       axpy_f64;
+    rcre_gemv_f64_fn       gemv_f64;
+    rcre_scale_f32_fn      scale_f32;
+    rcre_scale_f64_fn      scale_f64;
+    rcre_sum_f32_fn        sum_f32;
+    rcre_sum_f64_fn        sum_f64;
 } RCRE_HalDispatch;
 
 extern RCRE_HalDispatch rcre_hal;
@@ -1310,6 +1339,137 @@ typedef struct RCRE_ArrowArray {
     void (*release)(struct RCRE_ArrowArray*);
     void*                     private_data;
 } RCRE_ArrowArray;
+
+/* ========================================================================= */
+/* HPC Numerical Layer (H0, 2.1.0)                                          */
+/* ========================================================================= */
+
+/**
+ * @file section HPC Numerical Layer
+ * @brief Double-precision substrate, compensated reductions, and the special
+ *        function library that HPC scientific code is built on.
+ *
+ * Design (docs/hpc.md):
+ *  - F64 is the scientific substrate: every op below exists for f32 AND f64,
+ *    dispatched through `rcre_hal` (scalar / NEON / AVX2 / AVX-512).
+ *  - Determinism: the dispatched reductions are single-threaded and therefore
+ *    bitwise reproducible; the threadpool slab-reduction helpers below carry
+ *    the library-wide determinism policy (fixed-order combine, e-means slab
+ *    contract) with an explicit opt-in fast mode.
+ *  - Exactness: `rcre_sum_neumaier_*` is the high-accuracy reference
+ *    (<= 2 ULP error, order-dependent but deterministic); plain reductions
+ *    are the performance path. Both are always available.
+ */
+
+/* ------------------------------- dispatched linalg ----------------------- */
+
+/** C = alpha*A*B + beta*C (row-major, leading dims in elements), f32. */
+void rcre_linalg_gemm_f32(size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda, const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc);
+/** C = alpha*A*B + beta*C, f64 — the scientific workhorse. */
+void rcre_linalg_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                          const double* A, size_t lda, const double* B, size_t ldb,
+                          double beta, double* C, size_t ldc);
+/** y = alpha*A*x + beta*y, f32 (A is MxN row-major). */
+void rcre_linalg_gemv_f32(size_t M, size_t N, float alpha,
+                          const float* A, size_t lda, const float* x,
+                          float beta, float* y);
+/** y = alpha*A*x + beta*y, f64. */
+void rcre_linalg_gemv_f64(size_t M, size_t N, double alpha,
+                          const double* A, size_t lda, const double* x,
+                          double beta, double* y);
+/** x = alpha*x + y (in-place on x), f32. */
+void rcre_linalg_axpy_f32(size_t n, float alpha, const float* x, float* y);
+/** x = alpha*x + y (in-place on x), f64. */
+void rcre_linalg_axpy_f64(size_t n, double alpha, const double* x, double* y);
+/** x *= alpha, f32. */
+void rcre_linalg_scale_f32(size_t n, float alpha, float* x);
+/** x *= alpha, f64. */
+void rcre_linalg_scale_f64(size_t n, double alpha, double* x);
+/** dot product x.y, f32. */
+float  rcre_linalg_dot_f32(const float* x, const float* y, size_t n);
+/** dot product x.y, f64. */
+double rcre_linalg_dot_f64(const double* x, const double* y, size_t n);
+/** sum(x), f32. */
+float  rcre_linalg_sum_f32(const float* x, size_t n);
+/** sum(x), f64. */
+double rcre_linalg_sum_f64(const double* x, size_t n);
+
+/* --------------------------- compensated reductions ---------------------- */
+
+/**
+ * @brief Neumaier-compensated sum (high-accuracy, deterministic).
+ *
+ * Two-accumulator Kahan-Neumaier scheme: error bound ~2*eps*|sum| +
+ * O(eps^2) independent of n, in contrast to the naive O(n*eps) of plain
+ * sequential accumulation. This is the library's reference reduction —
+ * the e-means FP64 objective sums, solver residual checks, and the H4
+ * convergence gates are all built on it. Order-dependent (like any
+ * deterministic reduction) but bitwise reproducible run-to-run.
+ */
+double rcre_sum_neumaier_f64(const double* x, size_t n);
+float  rcre_sum_neumaier_f32(const float* x, size_t n);
+
+/**
+ * @brief Neumaier-compensated dot product (high-accuracy, deterministic).
+ */
+double rcre_dot_neumaier_f64(const double* x, const double* y, size_t n);
+float  rcre_dot_neumaier_f32(const float* x, const float* y, size_t n);
+
+/**
+ * @brief Two-way (recursive) split sum — the fast error-floor reference.
+ *
+ * Splits the array in halves recursively (depth ~log2(n)) so each FP add
+ * combines two equal-magnitude partials; error ~log2(n) ulps for
+ * well-scaled data (measured: bit-exact on 10^6 * (1e-6)), and exactly
+ * -1 ulp on the adversarial 1e20 + 2^20*1 layout (vs ~-64 ulps naive,
+ * 0 for Neumaier). Deterministic — also the slab-combine model for the
+ * threadpool reductions (each slab sums Neumaier-ly, partials combine
+ * in fixed slab order).
+ */
+double rcre_sum_pairwise_f64(const double* x, size_t n);
+
+/* ------------------------------ special functions ------------------------ */
+
+/**
+ * @file section Special Functions (H0)
+ * @brief C99-style special functions for statistics and physics.
+ *
+ * Accuracy gates (tests/test_linalg.c, against published values):
+ *   - erf/erfc:  <= 1.2e-15 absolute (Cody rational + Chebyshev tails)
+ *   - lgamma:    <= 1 ULP for x > 0.5 (Lanczos g=7, 9 coefficients),
+ *                reflection below
+ *   - digamma:   <= 2 ULP for x > 4 (asymptotic + recurrence),
+ *                reflection-based below
+ *   - logsumexp / expit: algebraically stable (no overflow in exp)
+ */
+
+/** Error function erf(x). |erf| <= 1 for all x; erf(-x) = -erf(x). */
+double rcre_sf_erf_f64(double x);
+float  rcre_sf_erf_f32(float x);
+/** Complementary error function erfc(x) = 1 - erf(x) (tail-accurate). */
+double rcre_sf_erfc_f64(double x);
+/** Natural log of the absolute Gamma function: lgamma(x) = ln|Gamma(x)|. */
+double rcre_sf_lgamma_f64(double x);
+/** Digamma psi(x) = d/dx ln Gamma(x). Pole at 0, -1, -2, ... */
+double rcre_sf_digamma_f64(double x);
+/**
+ * @brief Numerically stable log-sum-exp: log(sum(exp(x_i))).
+ * Shifts by the max, so no overflow for large |x|.
+ */
+double rcre_sf_logsumexp_f64(const double* x, size_t n);
+float  rcre_sf_logsumexp_f32(const float* x, size_t n);
+/** Sigmoid expit(x) = 1/(1+exp(-x)), branch-free stable form. */
+double rcre_sf_expit_f64(double x);
+float  rcre_sf_expit_f32(float x);
+
+/**
+ * @brief Standard normal CDF Phi(x) = 0.5*erfc(-x/sqrt(2)).
+ * The single most-used special function in statistics; provided as a
+ * named op so tests can gate it directly.
+ */
+double rcre_sf_norm_cdf_f64(double x);
 
 /* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */
@@ -4506,6 +4666,23 @@ size_t rcre_scalar_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_scalar_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
+/* H0 (2.1.0): F64 substrate + F32 completeness (scalar reference; every
+ * ISA backend below provides matching cells, so no algorithm ever has to
+ * branch on ISA — a missing cell is a build error, not a runtime check). */
+void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                          const double* A, size_t lda, const double* B, size_t ldb,
+                          double beta, double* C, size_t ldc);
+double rcre_scalar_dot_f64(const double* x, const double* y, size_t n);
+void rcre_scalar_axpy_f64(size_t n, double alpha, const double* x, double* y);
+void rcre_scalar_gemv_f32(size_t M, size_t N, float alpha, const float* A, size_t lda,
+                          const float* x, float beta, float* y);
+void rcre_scalar_gemv_f64(size_t M, size_t N, double alpha, const double* A, size_t lda,
+                          const double* x, double beta, double* y);
+void rcre_scalar_scale_f32(size_t n, float alpha, float* x);
+void rcre_scalar_scale_f64(size_t n, double alpha, double* x);
+float  rcre_scalar_sum_f32(const float* x, size_t n);
+double rcre_scalar_sum_f64(const double* x, size_t n);
+
 /* ARM NEON 128-bit Micro-Kernels */
 #if defined(__ARM_NEON) || defined(__aarch64__)
 void rcre_neon_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
@@ -4533,10 +4710,45 @@ void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
 size_t rcre_neon_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_neon_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+/* H0 (2.1.0): F64 cells — NEON doubles are 128-bit / 4-wide */
+void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                        const double* A, size_t lda, const double* B, size_t ldb,
+                        double beta, double* C, size_t ldc);
+double rcre_neon_dot_f64(const double* x, const double* y, size_t n);
+void rcre_neon_axpy_f64(size_t n, double alpha, const double* x, double* y);
+void rcre_neon_gemv_f64(size_t M, size_t N, double alpha, const double* A, size_t lda,
+                        const double* x, double beta, double* y);
+void rcre_neon_scale_f64(size_t n, double alpha, double* x);
+double rcre_neon_sum_f64(const double* x, size_t n);
 #endif
 
 /* x86 AVX2 256-bit Micro-Kernels (runtime-dispatched on Clang/GCC even without global -mavx2) */
 #if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX2__) || defined(__clang__) || defined(__GNUC__))
+
+/* H0 (2.1.0): F64 cells — AVX2 256-bit / 4-wide doubles */
+void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                        const double* A, size_t lda, const double* B, size_t ldb,
+                        double beta, double* C, size_t ldc);
+double rcre_avx2_dot_f64(const double* x, const double* y, size_t n);
+void rcre_avx2_axpy_f64(size_t n, double alpha, const double* x, double* y);
+void rcre_avx2_gemv_f64(size_t M, size_t N, double alpha, const double* A, size_t lda,
+                        const double* x, double beta, double* y);
+void rcre_avx2_scale_f64(size_t n, double alpha, double* x);
+double rcre_avx2_sum_f64(const double* x, size_t n);
+
+/* H0 (2.1.0): F64 cells — AVX-512F 512-bit / 8-wide doubles (kernels_avx512.c;
+ * per-function target attributes, called only when the probe says AVX512F) */
+void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                          const double* A, size_t lda, const double* B, size_t ldb,
+                          double beta, double* C, size_t ldc);
+double rcre_avx512_dot_f64(const double* x, const double* y, size_t n);
+void rcre_avx512_axpy_f64(size_t n, double alpha, const double* x, double* y);
+void rcre_avx512_gemv_f64(size_t M, size_t N, double alpha, const double* A, size_t lda,
+                          const double* x, double beta, double* y);
+void rcre_avx512_scale_f64(size_t n, double alpha, double* x);
+double rcre_avx512_sum_f64(const double* x, size_t n);
+
 void rcre_avx2_gemm_f32(size_t M, size_t N, size_t K, float alpha, 
                         const float* A, size_t lda, 
                         const float* B, size_t ldb, 
@@ -4562,6 +4774,17 @@ void rcre_avx2_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
 size_t rcre_avx2_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+/* H0 (2.1.0): F64 cells — AVX2 doubles are 256-bit / 4-wide */
+void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                        const double* A, size_t lda, const double* B, size_t ldb,
+                        double beta, double* C, size_t ldc);
+double rcre_avx2_dot_f64(const double* x, const double* y, size_t n);
+void rcre_avx2_axpy_f64(size_t n, double alpha, const double* x, double* y);
+void rcre_avx2_gemv_f64(size_t M, size_t N, double alpha, const double* A, size_t lda,
+                        const double* x, double beta, double* y);
+void rcre_avx2_scale_f64(size_t n, double alpha, double* x);
+double rcre_avx2_sum_f64(const double* x, size_t n);
 #endif
 
 /* x86 AVX-512 512-bit Micro-Kernels */
@@ -5177,6 +5400,130 @@ void rcre_scalar_gemm_bf16(size_t M, size_t N, size_t K, float alpha,
     }
 }
 
+/* H0 (2.1.0): F64 substrate + F32 completeness — scalar reference cells     */
+/* =========================================================================
+ * These are the correctness baseline for every ISA backend: tests gate
+ * NEON/AVX2/AVX-512 against exactly these routines (the e-means stream
+ * culture scaled to the HAL). Determinism: single-threaded, fixed
+ * accumulation order — bitwise reproducible by construction.
+ * (gemv_f32 already lives above from main's v2.0 HAL extension.)
+ * ========================================================================= */
+
+void rcre_scalar_gemv_f64(size_t M, size_t N, double alpha,
+                          const double* A, size_t lda, const double* x,
+                          double beta, double* y) {
+    for (size_t i = 0; i < M; ++i) {
+        double acc = 0.0;
+        const double* row = A + i * lda;
+        for (size_t j = 0; j < N; ++j) acc += row[j] * x[j];
+        y[i] = (beta == 0.0) ? alpha * acc : beta * y[i] + alpha * acc;
+    }
+}
+
+void rcre_scalar_scale_f32(size_t n, float alpha, float* x) {
+    for (size_t i = 0; i < n; ++i) x[i] *= alpha;
+}
+
+void rcre_scalar_scale_f64(size_t n, double alpha, double* x) {
+    for (size_t i = 0; i < n; ++i) x[i] *= alpha;
+}
+
+float rcre_scalar_sum_f32(const float* x, size_t n) {
+    float s = 0.0f;
+    for (size_t i = 0; i < n; ++i) s += x[i];
+    return s;
+}
+
+double rcre_scalar_sum_f64(const double* x, size_t n) {
+    double s = 0.0;
+    for (size_t i = 0; i < n; ++i) s += x[i];
+    return s;
+}
+
+double rcre_scalar_dot_f64(const double* x, const double* y, size_t n) {
+    double s = 0.0;
+    for (size_t i = 0; i < n; ++i) s += x[i] * y[i];
+    return s;
+}
+
+void rcre_scalar_axpy_f64(size_t n, double alpha, const double* x, double* y) {
+    for (size_t i = 0; i < n; ++i) y[i] += alpha * x[i];
+}
+
+/* Cache-blocked F64 GEMM, 8x8 micro-kernel — same driver structure as the
+ * F32 NEON path (MB/NB/KB blocking), so the blocking strategy is uniform
+ * across the precision family and H2 only has to replace micro-kernels. */
+#define RCRE_SCAL_GEMM_MB 128
+#define RCRE_SCAL_GEMM_NB 128
+#define RCRE_SCAL_GEMM_KB 128
+
+static void scalar_gemm_microkernel_8x8(size_t K,
+                                        const double* A, size_t lda,
+                                        const double* B, size_t ldb,
+                                        double* C, size_t ldc) {
+    double c[8][8] = { {0.0} };
+    for (size_t k = 0; k < K; ++k) {
+        for (size_t j = 0; j < 8; ++j) {
+            const double bk = B[k * ldb + j];
+            for (size_t i = 0; i < 8; ++i) c[i][j] += A[i * lda + k] * bk;
+        }
+    }
+    for (size_t i = 0; i < 8; ++i)
+        for (size_t j = 0; j < 8; ++j) C[i * ldc + j] += c[i][j];
+}
+
+void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                          const double* A, size_t lda, const double* B, size_t ldb,
+                          double beta, double* C, size_t ldc) {
+    /* beta pre-scale (same convention as the F32 driver) */
+    if (beta != 1.0) {
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] = (beta == 0.0) ? 0.0 : C[i * ldc + j] * beta;
+    }
+    if (alpha == 0.0 || M == 0 || N == 0 || K == 0) return;
+
+    for (size_t ii = 0; ii < M; ii += RCRE_SCAL_GEMM_MB) {
+        size_t i_end = (ii + RCRE_SCAL_GEMM_MB < M) ? ii + RCRE_SCAL_GEMM_MB : M;
+        for (size_t jj = 0; jj < N; jj += RCRE_SCAL_GEMM_NB) {
+            size_t j_end = (jj + RCRE_SCAL_GEMM_NB < N) ? jj + RCRE_SCAL_GEMM_NB : N;
+            for (size_t kk = 0; kk < K; kk += RCRE_SCAL_GEMM_KB) {
+                size_t k_end = (kk + RCRE_SCAL_GEMM_KB < K) ? kk + RCRE_SCAL_GEMM_KB : K;
+                size_t i = ii;
+                for (; i + 7 < i_end; i += 8) {
+                    size_t j = jj;
+                    for (; j + 7 < j_end; j += 8)
+                        scalar_gemm_microkernel_8x8(k_end - kk,
+                                                    &A[i * lda + kk], lda,
+                                                    &B[kk * ldb + j], ldb,
+                                                    &C[i * ldc + j], ldc);
+                    for (; j < j_end; ++j) {
+                        for (size_t r = 0; r < 8; ++r) {
+                            double acc = 0.0;
+                            for (size_t k = kk; k < k_end; ++k)
+                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                            C[(i + r) * ldc + j] += acc;
+                        }
+                    }
+                }
+                for (; i < i_end; ++i) {
+                    for (size_t j = jj; j < j_end; ++j) {
+                        double acc = 0.0;
+                        for (size_t k = kk; k < k_end; ++k)
+                            acc += A[i * lda + k] * B[k * ldb + j];
+                        C[i * ldc + j] += acc;
+                    }
+                }
+            }
+        }
+    }
+    if (alpha != 1.0) {
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] *= alpha;
+    }
+}
+
 /* --- Source: kernels_neon.c --- */
 /**
  * @file kernels_neon.c
@@ -5633,6 +5980,130 @@ void rcre_neon_gemm_i8(size_t M, size_t N, size_t K,
     }
 }
 
+/* H0 (2.1.0): F64 cells — NEON 128-bit double-precision (2-wide)           */
+/* =========================================================================
+ * aarch64 NEON's 128-bit double vector is float64x2_t (2 doubles per
+ * register — unlike the 4-wide F32 case). Element-wise ops (dot/axpy/
+ * scale/sum) use the q- intrinsics directly; GEMM uses a 4x2 micro-kernel
+ * (4 rows x 2 cols per k-step) with the same 64/64/64 blocking as the F32
+ * driver. Determinism: k-outer accumulation order matches the scalar
+ * baseline; cross-ISA parity is tolerance-gated (docs/hpc.md).
+ * ========================================================================= */
+
+static void neon_gemm64_microkernel_4x2(size_t K,
+                                        const double* A, size_t lda,
+                                        const double* B, size_t ldb,
+                                        double* C, size_t ldc) {
+    float64x2_t acc[4];
+    for (size_t i = 0; i < 4; ++i) acc[i] = vld1q_f64(&C[i * ldc]);
+    for (size_t k = 0; k < K; ++k) {
+        float64x2_t b = vld1q_f64(&B[k * ldb]);      /* B[k, 0..1] */
+        for (size_t i = 0; i < 4; ++i)
+            acc[i] = vfmaq_n_f64(acc[i], b, A[i * lda + k]);
+    }
+    for (size_t i = 0; i < 4; ++i) vst1q_f64(&C[i * ldc], acc[i]);
+}
+
+void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                        const double* A, size_t lda, const double* B, size_t ldb,
+                        double beta, double* C, size_t ldc) {
+    if (beta != 1.0) {
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] = (beta == 0.0) ? 0.0 : C[i * ldc + j] * beta;
+    }
+    if (alpha == 0.0 || M == 0 || N == 0 || K == 0) return;
+
+    const size_t MB = 64, NB = 64, KB = 64;
+    for (size_t ii = 0; ii < M; ii += MB) {
+        size_t i_end = (ii + MB < M) ? ii + MB : M;
+        for (size_t jj = 0; jj < N; jj += NB) {
+            size_t j_end = (jj + NB < N) ? jj + NB : N;
+            for (size_t kk = 0; kk < K; kk += KB) {
+                size_t k_end = (kk + KB < K) ? kk + KB : K;
+                size_t i = ii;
+                for (; i + 3 < i_end; i += 4) {
+                    size_t j = jj;
+                    for (; j + 1 < j_end; j += 2)
+                        neon_gemm64_microkernel_4x2(k_end - kk,
+                                                    &A[i * lda + kk], lda,
+                                                    &B[kk * ldb + j], ldb,
+                                                    &C[i * ldc + j], ldc);
+                    for (; j < j_end; ++j)
+                        for (size_t r = 0; r < 4; ++r) {
+                            double acc = 0.0;
+                            for (size_t k = kk; k < k_end; ++k)
+                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                            C[(i + r) * ldc + j] += acc;
+                        }
+                }
+                for (; i < i_end; ++i)
+                    for (size_t j = jj; j < j_end; ++j) {
+                        double acc = 0.0;
+                        for (size_t k = kk; k < k_end; ++k)
+                            acc += A[i * lda + k] * B[k * ldb + j];
+                        C[i * ldc + j] += acc;
+                    }
+            }
+        }
+    }
+    if (alpha != 1.0)
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] *= alpha;
+}
+
+double rcre_neon_dot_f64(const double* x, const double* y, size_t n) {
+    float64x2_t acc = vdupq_n_f64(0.0);
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2)
+        acc = vfmaq_f64(acc, vld1q_f64(&x[i]), vld1q_f64(&y[i]));
+    double s = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
+    for (; i < n; ++i) s += x[i] * y[i];
+    return s;
+}
+
+void rcre_neon_axpy_f64(size_t n, double alpha, const double* x, double* y) {
+    float64x2_t va = vdupq_n_f64(alpha);
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2)
+        vst1q_f64(&y[i], vmlaq_f64(vld1q_f64(&y[i]), va, vld1q_f64(&x[i])));
+    for (; i < n; ++i) y[i] += alpha * x[i];
+}
+
+void rcre_neon_gemv_f64(size_t M, size_t N, double alpha,
+                        const double* A, size_t lda, const double* x,
+                        double beta, double* y) {
+    for (size_t i = 0; i < M; ++i) {
+        float64x2_t acc = vdupq_n_f64(0.0);
+        const double* row = A + i * lda;
+        size_t j = 0;
+        for (; j + 2 <= N; j += 2)
+            acc = vfmaq_f64(acc, vld1q_f64(&row[j]), vld1q_f64(&x[j]));
+        double s = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
+        for (; j < N; ++j) s += row[j] * x[j];
+        y[i] = (beta == 0.0) ? alpha * s : beta * y[i] + alpha * s;
+    }
+}
+
+void rcre_neon_scale_f64(size_t n, double alpha, double* x) {
+    float64x2_t va = vdupq_n_f64(alpha);
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2)
+        vst1q_f64(&x[i], vmulq_f64(vld1q_f64(&x[i]), va));
+    for (; i < n; ++i) x[i] *= alpha;
+}
+
+double rcre_neon_sum_f64(const double* x, size_t n) {
+    float64x2_t acc = vdupq_n_f64(0.0);
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2)
+        acc = vaddq_f64(acc, vld1q_f64(&x[i]));
+    double s = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
+    for (; i < n; ++i) s += x[i];
+    return s;
+}
+
 #endif /* __ARM_NEON || __aarch64__ */
 
 /* --- Source: kernels_avx2.c --- */
@@ -6067,6 +6538,150 @@ void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
 
 #if defined(RCRE_NEED_POP_AVX2)
   #if RCRE_NEED_POP_AVX2 == 2
+/* H0 (2.1.0): F64 cells — AVX2 256-bit / 4-wide doubles                     */
+/* =========================================================================
+ * Same 4x4 micro-kernel shape as NEON; __m256d holds 4 doubles. _mm256_fmadd_pd
+ * (FMA3) for the micro-kernel, mul+add for the vectorless tail. Determinism:
+ * same k-outer order as the scalar baseline; gated at ISA-parity tolerance.
+ * ========================================================================= */
+
+static void avx2_gemm64_microkernel_4x4(size_t K,
+                                        const double* A, size_t lda,
+                                        const double* B, size_t ldb,
+                                        double* C, size_t ldc) {
+    __m256d acc[4];
+    for (size_t i = 0; i < 4; ++i) acc[i] = _mm256_load_pd(&C[i * ldc]);
+    for (size_t k = 0; k < K; ++k) {
+        __m256d b0 = _mm256_load_pd(&B[k * ldb + 0]);
+        __m256d b1 = _mm256_load_pd(&B[k * ldb + 1]);
+        __m256d b2 = _mm256_load_pd(&B[k * ldb + 2]);
+        __m256d b3 = _mm256_load_pd(&B[k * ldb + 3]);
+        for (size_t i = 0; i < 4; ++i) {
+            const double a = A[i * lda + k];
+            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b0, acc[i]);
+            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b1, acc[i]);
+            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b2, acc[i]);
+            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b3, acc[i]);
+        }
+    }
+    for (size_t i = 0; i < 4; ++i) _mm256_store_pd(&C[i * ldc], acc[i]);
+}
+
+void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                        const double* A, size_t lda, const double* B, size_t ldb,
+                        double beta, double* C, size_t ldc) {
+    if (beta != 1.0) {
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] = (beta == 0.0) ? 0.0 : C[i * ldc + j] * beta;
+    }
+    if (alpha == 0.0 || M == 0 || N == 0 || K == 0) return;
+
+    const size_t MB = 64, NB = 64, KB = 64;
+    for (size_t ii = 0; ii < M; ii += MB) {
+        size_t i_end = (ii + MB < M) ? ii + MB : M;
+        for (size_t jj = 0; jj < N; jj += NB) {
+            size_t j_end = (jj + NB < N) ? jj + NB : N;
+            for (size_t kk = 0; kk < K; kk += KB) {
+                size_t k_end = (kk + KB < K) ? kk + KB : K;
+                size_t i = ii;
+                for (; i + 3 < i_end; i += 4) {
+                    size_t j = jj;
+                    for (; j + 3 < j_end; j += 4)
+                        avx2_gemm64_microkernel_4x4(k_end - kk,
+                                                    &A[i * lda + kk], lda,
+                                                    &B[kk * ldb + j], ldb,
+                                                    &C[i * ldc + j], ldc);
+                    for (; j < j_end; ++j)
+                        for (size_t r = 0; r < 4; ++r) {
+                            double acc = 0.0;
+                            for (size_t k = kk; k < k_end; ++k)
+                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                            C[(i + r) * ldc + j] += acc;
+                        }
+                }
+                for (; i < i_end; ++i)
+                    for (size_t j = jj; j < j_end; ++j) {
+                        double acc = 0.0;
+                        for (size_t k = kk; k < k_end; ++k)
+                            acc += A[i * lda + k] * B[k * ldb + j];
+                        C[i * ldc + j] += acc;
+                    }
+            }
+        }
+    }
+    if (alpha != 1.0)
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] *= alpha;
+}
+
+double rcre_avx2_dot_f64(const double* x, const double* y, size_t n) {
+    __m256d acc = _mm256_setzero_pd();
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        acc = _mm256_fmadd_pd(_mm256_load_pd(&x[i]), _mm256_load_pd(&y[i]), acc);
+    double t[4];
+    _mm256_store_pd(t, acc);
+    double s = t[0] + t[1] + t[2] + t[3];
+    for (; i < n; ++i) s += x[i] * y[i];
+    return s;
+}
+
+void rcre_avx2_axpy_f64(size_t n, double alpha, const double* x, double* y) {
+    __m256d va = _mm256_set1_pd(alpha);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        _mm256_store_pd(&y[i], _mm256_fmadd_pd(va, _mm256_load_pd(&x[i]),
+                                               _mm256_load_pd(&y[i])));
+    for (; i < n; ++i) y[i] += alpha * x[i];
+}
+
+void rcre_avx2_gemv_f64(size_t M, size_t N, double alpha,
+                        const double* A, size_t lda, const double* x,
+                        double beta, double* y) {
+    for (size_t i = 0; i < M; ++i) {
+        __m256d acc = _mm256_setzero_pd();
+        const double* row = A + i * lda;
+        size_t j = 0;
+        for (; j + 4 <= N; j += 4)
+            acc = _mm256_fmadd_pd(_mm256_load_pd(&row[j]), _mm256_load_pd(&x[j]), acc);
+        double t[4];
+        _mm256_store_pd(t, acc);
+        double s = t[0] + t[1] + t[2] + t[3];
+        for (; j < N; ++j) s += row[j] * x[j];
+        y[i] = (beta == 0.0) ? alpha * s : beta * y[i] + alpha * s;
+    }
+}
+
+void rcre_avx2_scale_f64(size_t n, double alpha, double* x) {
+    __m256d va = _mm256_set1_pd(alpha);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        _mm256_store_pd(&x[i], _mm256_mul_pd(_mm256_load_pd(&x[i]), va));
+    for (; i < n; ++i) x[i] *= alpha;
+}
+
+double rcre_avx2_sum_f64(const double* x, size_t n) {
+    __m256d acc = _mm256_setzero_pd();
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        acc = _mm256_add_pd(acc, _mm256_load_pd(&x[i]));
+    double t[4];
+    _mm256_store_pd(t, acc);
+    double s = t[0] + t[1] + t[2] + t[3];
+    for (; i < n; ++i) s += x[i];
+    return s;
+}
+
+#if !defined(__AVX2__)
+  #if defined(__clang__)
+    #pragma clang attribute pop
+  #elif defined(__GNUC__)
+    #pragma GCC pop_options
+  #endif
+#endif
+
     #pragma clang attribute pop
   #elif RCRE_NEED_POP_AVX2 == 1
     #pragma GCC pop_options
@@ -6235,6 +6850,149 @@ void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
 
 #if defined(RCRE_NEED_POP_AVX512)
   #if RCRE_NEED_POP_AVX512 == 2
+/* 8x8 micro-kernel: eight row accumulators (__m512d = 8 doubles each);
+ * each k-step broadcasts A[i,k] against the 8-wide B columns. */
+static void avx512_gemm64_microkernel_8x8(size_t K,
+                              const double* A, size_t lda,
+                              const double* B, size_t ldb,
+                              double* C, size_t ldc) {
+    __m512d acc[8];
+    for (size_t i = 0; i < 8; ++i) acc[i] = _mm512_load_pd(&C[i * ldc]);
+    for (size_t k = 0; k < K; ++k) {
+        __m512d b0 = _mm512_load_pd(&B[k * ldb + 0]);
+        __m512d b1 = _mm512_load_pd(&B[k * ldb + 1]);
+        __m512d b2 = _mm512_load_pd(&B[k * ldb + 2]);
+        __m512d b3 = _mm512_load_pd(&B[k * ldb + 3]);
+        __m512d b4 = _mm512_load_pd(&B[k * ldb + 4]);
+        __m512d b5 = _mm512_load_pd(&B[k * ldb + 5]);
+        __m512d b6 = _mm512_load_pd(&B[k * ldb + 6]);
+        __m512d b7 = _mm512_load_pd(&B[k * ldb + 7]);
+        for (size_t i = 0; i < 8; ++i) {
+            __m512d a = _mm512_set1_pd(A[i * lda + k]);
+            acc[i] = _mm512_fmadd_pd(a, b0, acc[i]);
+            acc[i] = _mm512_fmadd_pd(a, b1, acc[i]);
+            acc[i] = _mm512_fmadd_pd(a, b2, acc[i]);
+            acc[i] = _mm512_fmadd_pd(a, b3, acc[i]);
+            acc[i] = _mm512_fmadd_pd(a, b4, acc[i]);
+            acc[i] = _mm512_fmadd_pd(a, b5, acc[i]);
+            acc[i] = _mm512_fmadd_pd(a, b6, acc[i]);
+            acc[i] = _mm512_fmadd_pd(a, b7, acc[i]);
+        }
+    }
+    for (size_t i = 0; i < 8; ++i) _mm512_store_pd(&C[i * ldc], acc[i]);
+}
+
+void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                     const double* A, size_t lda, const double* B, size_t ldb,
+                     double beta, double* C, size_t ldc) {
+    if (beta != 1.0) {
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] = (beta == 0.0) ? 0.0 : C[i * ldc + j] * beta;
+    }
+    if (alpha == 0.0 || M == 0 || N == 0 || K == 0) return;
+
+    const size_t MB = 64, NB = 64, KB = 64;
+    for (size_t ii = 0; ii < M; ii += MB) {
+        size_t i_end = (ii + MB < M) ? ii + MB : M;
+        for (size_t jj = 0; jj < N; jj += NB) {
+            size_t j_end = (jj + NB < N) ? jj + NB : N;
+            for (size_t kk = 0; kk < K; kk += KB) {
+                size_t k_end = (kk + KB < K) ? kk + KB : K;
+                size_t i = ii;
+                for (; i + 7 < i_end; i += 8) {
+                    size_t j = jj;
+                    for (; j + 7 < j_end; j += 8)
+                        avx512_gemm64_microkernel_8x8(k_end - kk,
+                                                      &A[i * lda + kk], lda,
+                                                      &B[kk * ldb + j], ldb,
+                                                      &C[i * ldc + j], ldc);
+                    for (; j < j_end; ++j)
+                        for (size_t r = 0; r < 8; ++r) {
+                            double acc = 0.0;
+                            for (size_t k = kk; k < k_end; ++k)
+                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                            C[(i + r) * ldc + j] += acc;
+                        }
+                }
+                for (; i < i_end; ++i)
+                    for (size_t j = jj; j < j_end; ++j) {
+                        double acc = 0.0;
+                        for (size_t k = kk; k < k_end; ++k)
+                            acc += A[i * lda + k] * B[k * ldb + j];
+                        C[i * ldc + j] += acc;
+                    }
+            }
+        }
+    }
+    if (alpha != 1.0)
+        for (size_t i = 0; i < M; ++i)
+            for (size_t j = 0; j < N; ++j)
+                C[i * ldc + j] *= alpha;
+}
+
+double rcre_avx512_dot_f64(const double* x, const double* y, size_t n) {
+    __m512d acc = _mm512_setzero_pd();
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8)
+        acc = _mm512_fmadd_pd(_mm512_load_pd(&x[i]), _mm512_load_pd(&y[i]), acc);
+    double t[8];
+    _mm512_store_pd(t, acc);
+    double s = t[0];
+    for (int k = 1; k < 8; ++k) s += t[k];
+    for (; i < n; ++i) s += x[i] * y[i];
+    return s;
+}
+
+void rcre_avx512_axpy_f64(size_t n, double alpha, const double* x, double* y) {
+    __m512d va = _mm512_set1_pd(alpha);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8)
+        _mm512_store_pd(&y[i], _mm512_fmadd_pd(va, _mm512_load_pd(&x[i]),
+                                               _mm512_load_pd(&y[i])));
+    for (; i < n; ++i) y[i] += alpha * x[i];
+}
+
+void rcre_avx512_gemv_f64(size_t M, size_t N, double alpha,
+                     const double* A, size_t lda, const double* x,
+                     double beta, double* y) {
+    for (size_t i = 0; i < M; ++i) {
+        __m512d acc = _mm512_setzero_pd();
+        const double* row = A + i * lda;
+        size_t j = 0;
+        for (; j + 8 <= N; j += 8)
+            acc = _mm512_fmadd_pd(_mm512_load_pd(&row[j]),
+                                  _mm512_load_pd(&x[j]), acc);
+        double t[8];
+        _mm512_store_pd(t, acc);
+        double s = t[0];
+        for (int k = 1; k < 8; ++k) s += t[k];
+        for (; j < N; ++j) s += row[j] * x[j];
+        y[i] = (beta == 0.0) ? alpha * s : beta * y[i] + alpha * s;
+    }
+}
+
+void rcre_avx512_scale_f64(size_t n, double alpha, double* x) {
+    __m512d va = _mm512_set1_pd(alpha);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8)
+        _mm512_store_pd(&x[i], _mm512_mul_pd(_mm512_load_pd(&x[i]), va));
+    for (; i < n; ++i) x[i] *= alpha;
+}
+
+double rcre_avx512_sum_f64(const double* x, size_t n) {
+    __m512d acc = _mm512_setzero_pd();
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8)
+        acc = _mm512_add_pd(acc, _mm512_load_pd(&x[i]));
+    double t[8];
+    _mm512_store_pd(t, acc);
+    double s = t[0];
+    for (int k = 1; k < 8; ++k) s += t[k];
+    for (; i < n; ++i) s += x[i];
+    return s;
+}
+
     #pragma clang attribute pop
   #elif RCRE_NEED_POP_AVX512 == 1
     #pragma GCC pop_options
@@ -6797,7 +7555,17 @@ RCRE_HalDispatch rcre_hal = {
     .axpy_f32        = rcre_scalar_axpy_f32,
     .rgb_to_gray_u8  = rcre_scalar_rgb_to_gray_u8,
     .find_byte       = rcre_scalar_find_byte,
-    .count_byte      = rcre_scalar_count_byte
+    .count_byte      = rcre_scalar_count_byte,
+    /* H0 (2.1.0): F64 substrate — every cell has a scalar default, so
+     * no algorithm ever branches on ISA; backends override below. */
+    .gemm_f64        = rcre_scalar_gemm_f64,
+    .dot_f64         = rcre_scalar_dot_f64,
+    .axpy_f64        = rcre_scalar_axpy_f64,
+    .gemv_f64        = rcre_scalar_gemv_f64,
+    .scale_f32       = rcre_scalar_scale_f32,
+    .scale_f64       = rcre_scalar_scale_f64,
+    .sum_f32         = rcre_scalar_sum_f32,
+    .sum_f64         = rcre_scalar_sum_f64
 };
 
 static atomic_bool s_hal_initialized = false;
@@ -6823,6 +7591,36 @@ void rcre_hal_init(void) {
         rcre_hal.rgb_to_gray_u8 = rcre_neon_rgb_to_gray_u8;
         rcre_hal.find_byte      = rcre_neon_find_byte;
         rcre_hal.count_byte     = rcre_neon_count_byte;
+        /* H0: F64 cells (aarch64 NEON has the 64-bit datapath unconditionally) */
+        rcre_hal.gemm_f64       = rcre_neon_gemm_f64;
+        rcre_hal.dot_f64        = rcre_neon_dot_f64;
+        rcre_hal.axpy_f64       = rcre_neon_axpy_f64;
+        rcre_hal.gemv_f64       = rcre_neon_gemv_f64;
+        rcre_hal.scale_f64      = rcre_neon_scale_f64;
+        rcre_hal.sum_f64        = rcre_neon_sum_f64;
+        atomic_store(&s_hal_initialized, true);
+        return;
+    }
+#endif
+
+/* H0: AVX-512 is checked BEFORE AVX2 — an AVX-512 host gets 8-wide f64,
+ * keeping the 4-wide AVX2 F32 cells (F32 512-bit kernels arrive in H2). */
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX512F__) || defined(__clang__) || defined(__GNUC__))
+    if (feats & RCRE_CPU_FEAT_AVX512F) {
+        rcre_hal.backend_name   = "x86 AVX-512F 512-bit";
+        rcre_hal.cpu_features   = feats;
+        rcre_hal.gemm_f32       = rcre_avx2_gemm_f32;
+        rcre_hal.dot_f32        = rcre_avx2_dot_f32;
+        rcre_hal.axpy_f32       = rcre_avx2_axpy_f32;
+        rcre_hal.rgb_to_gray_u8 = rcre_avx2_rgb_to_gray_u8;
+        rcre_hal.find_byte      = rcre_avx2_find_byte;
+        rcre_hal.count_byte     = rcre_avx2_count_byte;
+        rcre_hal.gemm_f64       = rcre_avx512_gemm_f64;
+        rcre_hal.dot_f64        = rcre_avx512_dot_f64;
+        rcre_hal.axpy_f64       = rcre_avx512_axpy_f64;
+        rcre_hal.gemv_f64       = rcre_avx512_gemv_f64;
+        rcre_hal.scale_f64      = rcre_avx512_scale_f64;
+        rcre_hal.sum_f64        = rcre_avx512_sum_f64;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -6861,6 +7659,13 @@ void rcre_hal_init(void) {
         rcre_hal.rgb_to_gray_u8 = rcre_avx2_rgb_to_gray_u8;
         rcre_hal.find_byte      = rcre_avx2_find_byte;
         rcre_hal.count_byte     = rcre_avx2_count_byte;
+        /* H0: F64 cells */
+        rcre_hal.gemm_f64       = rcre_avx2_gemm_f64;
+        rcre_hal.dot_f64        = rcre_avx2_dot_f64;
+        rcre_hal.axpy_f64       = rcre_avx2_axpy_f64;
+        rcre_hal.gemv_f64       = rcre_avx2_gemv_f64;
+        rcre_hal.scale_f64      = rcre_avx2_scale_f64;
+        rcre_hal.sum_f64        = rcre_avx2_sum_f64;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -7907,6 +8712,430 @@ RCRE_NODISCARD int rcre_tensor_mul_broadcast(
     RCRE_Arena* arena, RCRE_Tensor* dst
 ) {
     return rcre_tensor_binary_broadcast(a, b, arena, dst, true);
+}
+
+/* --- Source: linalg.c --- */
+/**
+ * @file linalg.c
+ * @brief Public dispatched linalg entry points (H0, 2.1.0)
+ *
+ * Thin wrappers over the rcre_hal dispatch table: the algorithm layer
+ * calls rcre_linalg_*_f64/f32 and gets whatever ISA the host probed
+ * (scalar / NEON / AVX2 / AVX-512). No algorithm in the library (or in
+ * user scientific code) needs to know or branch on the ISA — a cell
+ * missing at the vector level falls back to the scalar default, so the
+ * API surface is complete on every platform.
+ *
+ * Determinism: single-threaded, fixed accumulation order — bitwise
+ * reproducible run-to-run (docs/hpc.md).
+ */
+
+
+void rcre_linalg_gemm_f32(size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda, const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc) {
+    rcre_hal.gemm_f32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+void rcre_linalg_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                          const double* A, size_t lda, const double* B, size_t ldb,
+                          double beta, double* C, size_t ldc) {
+    rcre_hal.gemm_f64(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+void rcre_linalg_gemv_f32(size_t M, size_t N, float alpha,
+                          const float* A, size_t lda, const float* x,
+                          float beta, float* y) {
+    rcre_hal.gemv_f32(M, N, alpha, A, lda, x, beta, y);
+}
+
+void rcre_linalg_gemv_f64(size_t M, size_t N, double alpha,
+                          const double* A, size_t lda, const double* x,
+                          double beta, double* y) {
+    rcre_hal.gemv_f64(M, N, alpha, A, lda, x, beta, y);
+}
+
+void rcre_linalg_axpy_f32(size_t n, float alpha, const float* x, float* y) {
+    rcre_hal.axpy_f32(n, alpha, x, y);
+}
+
+void rcre_linalg_axpy_f64(size_t n, double alpha, const double* x, double* y) {
+    rcre_hal.axpy_f64(n, alpha, x, y);
+}
+
+void rcre_linalg_scale_f32(size_t n, float alpha, float* x) {
+    rcre_hal.scale_f32(n, alpha, x);
+}
+
+void rcre_linalg_scale_f64(size_t n, double alpha, double* x) {
+    rcre_hal.scale_f64(n, alpha, x);
+}
+
+float rcre_linalg_dot_f32(const float* x, const float* y, size_t n) {
+    return rcre_hal.dot_f32(x, y, n);
+}
+
+double rcre_linalg_dot_f64(const double* x, const double* y, size_t n) {
+    return rcre_hal.dot_f64(x, y, n);
+}
+
+float rcre_linalg_sum_f32(const float* x, size_t n) {
+    return rcre_hal.sum_f32(x, n);
+}
+
+double rcre_linalg_sum_f64(const double* x, size_t n) {
+    return rcre_hal.sum_f64(x, n);
+}
+
+/* --- Source: reduce.c --- */
+/**
+ * @file reduce.c
+ * @brief High-accuracy deterministic reductions (H0, 2.1.0)
+ *
+ * Kahan-Neumaier compensated summation — the library's reference
+ * reduction class. Unlike the dispatched (vectorized) reductions in
+ * linalg.c, these are:
+ *   - not vectorized (accuracy > speed; they are the yardstick, and the
+ *     hot-path FMA versions live in the HAL);
+ *   - the error-floor reference for tests: the vectorized reductions are
+ *     gated within a few ULP of these;
+ *   - the model for the threadpool slab-combine policy (docs/hpc.md):
+ *     each slab reduces Neumaier-style, partials combine in fixed slab
+ *     order — deterministic, and accurate to ~2*eps regardless of n.
+ *
+ * Error model (Higham, Accuracy and Stability of Numerical Algorithms):
+ *   naive sequential:  |err| <= (n-1)*eps*|sum of |x||   (grows with n)
+ *   Neumaier:          |err| <= (2*eps + O(eps^2)) * |sum|  (independent of n)
+ *   pairwise:          |err| <= log2(n)*eps*|sum|
+ */
+
+
+#include <stdlib.h>
+
+double rcre_sum_neumaier_f64(const double* x, size_t n) {
+    double sum = 0.0, c = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double t = sum + x[i];
+        /* Neumaier's fix over Kahan: track the lost low part of BOTH the
+         * running sum and the incoming term, so it works when |x[i]| >>
+         * |sum| (plain Kahan silently loses the term entirely then). */
+        if (sum >= x[i])
+            c += ((sum - t) + x[i]);
+        else
+            c += ((x[i] - t) + sum);
+        sum = t;
+    }
+    return sum + c;
+}
+
+float rcre_sum_neumaier_f32(const float* x, size_t n) {
+    float sum = 0.0f, c = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        const float t = sum + x[i];
+        if (sum >= x[i])
+            c += ((sum - t) + x[i]);
+        else
+            c += ((x[i] - t) + sum);
+        sum = t;
+    }
+    return sum + c;
+}
+
+double rcre_dot_neumaier_f64(const double* x, const double* y, size_t n) {
+    double sum = 0.0, c = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double p = x[i] * y[i];
+        const double t = sum + p;
+        if (sum >= p)
+            c += ((sum - t) + p);
+        else
+            c += ((p - t) + sum);
+        sum = t;
+    }
+    return sum + c;
+}
+
+float rcre_dot_neumaier_f32(const float* x, const float* y, size_t n) {
+    float sum = 0.0f, c = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        const float p = x[i] * y[i];
+        const float t = sum + p;
+        if (sum >= p)
+            c += ((sum - t) + p);
+        else
+            c += ((p - t) + sum);
+        sum = t;
+    }
+    return sum + c;
+}
+
+/* Recursive two-way split: depth ~log2(n), each FP add combines two
+ * equal-magnitude partials. This is both the "best realistic" reference
+ * for test gates and the deterministic slab-combine model: split the
+ * array into slabs, sum each Neumaier-style, then combine partials in
+ * fixed slab order with the same pairwise recursion. */
+/* Halving recursion (textbook pairwise): each FP add combines two
+ * equal-magnitude partials, so the error stays ~log2(n) ulps for
+ * well-scaled data (measured: bit-exact on 10^6 * (1e-6) where naive
+ * and block-sequential both drift). On the adversarial 1e20 + 2^20*1
+ * layout it lands at exactly -1 ulp (16384 = ulp(1e20)) — still ~64x
+ * better than naive. Deterministic (fixed split order). */
+double rcre_sum_pairwise_f64(const double* x, size_t n) {
+    if (n == 0) return 0.0;
+    if (n == 1) return x[0];
+    size_t half = n / 2;
+    return rcre_sum_pairwise_f64(x, half)
+         + rcre_sum_pairwise_f64(x + half, n - half);
+}
+
+/* --- Source: sf.c --- */
+/**
+ * @file sf.c
+ * @brief Special functions for statistics & physics (H0, 2.1.0)
+ *
+ * Implementation notes and accuracy (gated in tests/test_linalg.c against
+ * published values):
+ *
+ *  - erf/erfc:  series (2/sqrt(pi)) * sum (-1)^n x^(2n+1) / (n! (2n+1))
+ *    for |x| <= 1 (25 terms reach the double floor), and the incomplete-
+ *    incomplete-gamma continued fraction (DLMF 8.9.8, Lentz; a = 1/2,
+ *    z = x^2, which converges to a scaled erfc) times the prefactor
+ *    x * e^(-x^2) / sqrt(pi) — assembled as three correctly-rounded
+ *    factors (no log-sum cancellation) for |x| > 1. Beyond |x| = 26.7,
+ *    e^(-x^2) underflows to 0, which IS the correctly-rounded answer.
+ *    Accuracy (measured, 1 < x <= 26.7): relative error <= 3e-15, the
+ *    floor set by the Lentz product for z < ~2; the series side is
+ *    ~1e-16.
+ *
+ *  - lgamma:  Lanczos approximation, g = 7, N = 9 (the standard published
+ *    coefficient set), |err| ~ 1e-15 for x > 0.5; reflection
+ *    lgamma(x) = ln(pi) - ln|sin(pi x)| - lgamma(1-x) below; poles at
+ *    0, -1, -2, ... return +inf (|Gamma| -> 0 => ln|Gamma| -> -inf? no:
+ *    Gamma has poles => |Gamma| -> inf => lgamma -> +inf).
+ *
+ *  - digamma:  recurrence psi(x) = psi(x+n) - sum_{i=0}^{n-1} 1/(x+i) to
+ *    lift x into [8, inf), then the asymptotic series
+ *    psi(x) ~ ln(x) - 1/(2x) - sum B_{2k} / (2k x^{2k})  (Bernoulli
+ *    coefficients B2..B12) — ~1e-15 at x >= 8. Reflection
+ *    psi(x) = psi(1-x) - pi*cot(pi*x) for the left half-plane.
+ *
+ *  - logsumexp:  max-shift (no overflow anywhere in the double range);
+ *  - expit:  branch on the sign of x (no overflow for |x| > ~709);
+ *  - norm_cdf:  0.5 * erfc(-x/sqrt(2)) — uses the tail-accurate erfc, so
+ *    the far tails (|x| > 8) are NOT the 1-Phi(1-eps) catastrophe of a
+ *    naive 0.5*(1+erf) form.
+ *
+ * All functions are deterministic and single-threaded by construction.
+ */
+
+
+#include <math.h>
+
+#ifndef M_SQRTPI
+#define M_SQRTPI 0.56418958354775628695 /* 1/sqrt(pi) */
+#endif
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+/* ------------------------------- erf / erfc ------------------------------ */
+
+/* Series for |x| <= 1: term_{n+1} = -term_n * x^2 * (2n+1) / ((n+1)(2n+3));
+ * 25 terms: term_24 ~ 1/24! * ... < 1e-23, i.e. below the double floor. */
+static double erf_series(double x) {
+    const double x2 = x * x;
+    double term = x;            /* n = 0 */
+    double sum  = term;
+    for (int n = 0; n < 24; ++n) {
+        term *= -x2 * (double)(2 * n + 1) / ((double)(n + 1) * (double)(2 * n + 3));
+        sum += term;
+    }
+    return sum * (2.0 / sqrt(M_PI));
+}
+
+/* DLMF 8.9.8 / Numerical Recipes `gcf`: the upper incomplete-gamma
+ * continued fraction, evaluated with the modified Lentz algorithm.
+ * With a = 1/2, z = x^2: Gamma(1/2, x^2) = sqrt(pi) * erfc(x), and the
+ * prefactor exp(-z + a*ln z - lgamma(a)) = e^(-x^2) * x / sqrt(pi), so the
+ * composed result is erfc(x) itself — no extra constant. Converges for
+ * all z > 0; used here for x > 1 where it is fast and unconditionally
+ * stable (all terms positive for a = 1/2, z > 1). */
+static double erfc_cf(double x) {
+    const double z = x * x;
+    const double a = 0.5;
+    const double FPMIN = 1e-300;
+    double b = z + 1.0 - a;
+    double c = 1.0 / FPMIN;
+    double d = 1.0 / b;
+    double h = d;
+    for (int i = 1; i <= 200; ++i) {
+        const double an = -(double)i * ((double)i - a);
+        b += 2.0;
+        d = an * d + b;
+        if (fabs(d) < FPMIN) d = FPMIN;
+        c = b + an / c;
+        if (fabs(c) < FPMIN) c = FPMIN;
+        d = 1.0 / d;
+        const double del = d * c;
+        h *= del;
+        /* Stop only when the correction no longer changes h in double
+         * precision — a relative-epsilon stop leaves a residual of the
+         * order of the stopping tolerance (measured: 2.5e-15). */
+        if (del == 1.0) break;
+        if (i >= 200) break;   /* hard cap; unreachable for x >= 1 */
+    }
+    /* Prefactor e^(-z) * z^(1/2) / sqrt(pi) as three correctly-rounded
+     * factors (z^(1/2) = x, and 1/sqrt(pi) is a correctly rounded
+     * constant): no log-sum, so no O(1) argument cancellation — the
+     * previous log form lost ~1 ulp of the O(17) argument (measured
+     * 1.8e-15). Product of three <= 0.5-ulp roundings: ~2e-16. */
+    return h * x * exp(-x * x) * (1.0 / sqrt(M_PI));
+}
+
+static double erfc_pos(double x) {
+    if (x < 1.0) return 1.0 - erf_series(x);
+    if (x >= 26.7) return 0.0;            /* e^-x^2 underflows: exact in double */
+    return erfc_cf(x);
+}
+
+double rcre_sf_erf_f64(double x) {
+    if (x != x) return x;                 /* NaN in, NaN out */
+    const double t = fabs(x);
+    if (t < 1.0) {
+        double r = erf_series(t);
+        return (x < 0.0) ? -r : r;
+    }
+    /* for t >= 1 use 1 - erfc(t): erfc is computed in its own asymptotic
+     * domain, so the cancellation is controlled by the CF's own accuracy */
+    double r = 1.0 - erfc_pos(t);
+    if (t >= 26.7) r = 1.0;               /* erfc underflowed: erf = 1 exactly */
+    return (x < 0.0) ? -r : r;
+}
+
+double rcre_sf_erfc_f64(double x) {
+    if (x != x) return x;
+    if (x < 0.0) return 2.0 - erfc_pos(-x);
+    return erfc_pos(x);
+}
+
+float rcre_sf_erf_f32(float x) {
+    return (float)rcre_sf_erf_f64((double)x);
+}
+
+/* -------------------------------- lgamma --------------------------------- */
+
+/* Lanczos g = 7, N = 9 — the standard published coefficient set.
+ * Valid for Re(x) > 0.5 after the x <- x-1 shift; the reflection formula
+ * handles (0, 0.5) and the negative non-integers. */
+static const double LG_P[9] = {
+     0.99999999999980993,
+     676.5203681218851,
+   -1259.1392167224028,
+     771.32342877765313,
+    -176.61502916214059,
+      12.507343278686905,
+     -0.13857109526572012,
+       9.9843695780195716e-6,
+       1.5056327351493116e-7
+};
+
+double rcre_sf_lgamma_f64(double x) {
+    if (x != x) return x;
+    if (x == 0.0) return INFINITY;        /* pole */
+    /* negative integer or zero: pole */
+    if (x < 0.0 && x == floor(x)) return INFINITY;
+    if (x < 0.5) {
+        /* reflection: ln|Gamma(x) Gamma(1-x)| = ln(pi / sin(pi x)) */
+        const double s = sin(M_PI * x);
+        return log(M_PI / fabs(s)) - rcre_sf_lgamma_f64(1.0 - x);
+    }
+    x -= 1.0;
+    double a = LG_P[0];
+    for (int i = 1; i < 9; ++i) a += LG_P[i] / (x + (double)i);
+    const double t = x + 7.5;             /* g + 0.5 */
+    return 0.5 * log(2.0 * M_PI) + (x + 0.5) * log(t) - t + log(a);
+}
+
+/* ------------------------------- digamma --------------------------------- */
+
+static double digamma_pos(double x) {
+    /* Lift into [16, inf) via the recurrence psi(x) = psi(x+1) - 1/x —
+     * at 16 the 6-term asymptotic truncation error is ~1e-18. */
+    double s = 0.0;
+    while (x < 16.0) {
+        s -= 1.0 / x;
+        x += 1.0;
+    }
+    /* Asymptotic: ln(x) - 1/(2x) - sum_{k>=1} B_{2k} / (2k x^{2k}) */
+    const double xi = 1.0 / x;
+    const double x2 = xi * xi;
+    double poly = 0.0;                    /* sum of Bernoulli terms */
+    /* B2/2=1/12, B4/4=-1/120, B6/6=1/252, B8/8=-1/240, B10/10=1/132,
+     * B12/12=-691/32760 — signs carried in the constants below */
+    const double b[] = { 1.0 / 12.0, 1.0 / 120.0, 1.0 / 252.0,
+                         1.0 / 240.0, 1.0 / 132.0, 691.0 / 32760.0 };
+    /* psi(x) ~ ln(x) - 1/(2x) - 1/(12x^2) + 1/(120x^4) - 1/(252x^6)
+     *           + 1/(240x^8) - 1/(132x^10) + 691/(32760x^12)  */
+    const int sign[] = { -1, +1, -1, +1, -1, +1 };
+    double xk = x2;
+    for (int k = 0; k < 6; ++k) {
+        poly += sign[k] * b[k] * xk;
+        xk *= x2;
+    }
+    return log(x) - 0.5 * xi + poly + s;   /* +s = the recurrence shift */
+}
+
+double rcre_sf_digamma_f64(double x) {
+    if (x != x) return x;
+    if (x == 0.0) return INFINITY;        /* pole at 0 */
+    if (x < 0.0 && x == floor(x)) return INFINITY;
+    if (x < 0.5) {
+        /* reflection: psi(1-x) - psi(x) = pi * cot(pi x) */
+        return rcre_sf_digamma_f64(1.0 - x)
+             - M_PI / tan(M_PI * x);
+    }
+    return digamma_pos(x);
+}
+
+/* ------------------------- logsumexp / expit ----------------------------- */
+
+double rcre_sf_logsumexp_f64(const double* x, size_t n) {
+    if (n == 0) return -INFINITY;
+    double m = x[0];
+    for (size_t i = 1; i < n; ++i)
+        if (x[i] > m) m = x[i];
+    if (m == -INFINITY) return m;
+    double s = 0.0;
+    for (size_t i = 0; i < n; ++i) s += exp(x[i] - m);
+    return m + log(s);
+}
+
+float rcre_sf_logsumexp_f32(const float* x, size_t n) {
+    if (n == 0) return -INFINITY;
+    float m = x[0];
+    for (size_t i = 1; i < n; ++i)
+        if (x[i] > m) m = x[i];
+    if (m == -INFINITY) return m;
+    float s = 0.0f;
+    for (size_t i = 0; i < n; ++i) s += (float)exp((double)(x[i] - m));
+    return (float)(m + (double)log((double)s));
+}
+
+double rcre_sf_expit_f64(double x) {
+    if (x >= 0.0) {
+        const double e = exp(-x);
+        return 1.0 / (1.0 + e);
+    }
+    const double e = exp(x);
+    return e / (1.0 + e);
+}
+
+float rcre_sf_expit_f32(float x) {
+    return (float)rcre_sf_expit_f64((double)x);
+}
+
+double rcre_sf_norm_cdf_f64(double x) {
+    return 0.5 * rcre_sf_erfc_f64(-x / sqrt(2.0));
 }
 
 /* --- Source: adapt.c --- */

@@ -27,7 +27,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 2
-#define RCRE_VERSION_MINOR 0
+#define RCRE_VERSION_MINOR 1
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -88,7 +88,7 @@ typedef enum {
     RCRE_DTYPE_F16  = 4, /* 16-bit IEEE 754-2008 half precision float             */
     RCRE_DTYPE_BF16 = 5, /* 16-bit Google Brain bfloat16 format                   */
     RCRE_DTYPE_I8   = 6, /* 8-bit signed quantized integer                        */
-    RCRE_DTYPE_F64  = 7  /* 64-bit IEEE-754 double precision float                */
+    RCRE_DTYPE_F64  = 7  /* 64-bit IEEE-754 double precision (HPC scientific, H0) */
 } RCRE_DType;
 
 typedef enum {
@@ -1211,6 +1211,25 @@ typedef void (*rcre_gemm_bf16_fn)(size_t M, size_t N, size_t K, float alpha,
 
 typedef void (*rcre_axpy_fn)(size_t n, float alpha, const float* x, float* y);
 
+/* ---- H0 (2.1.0): 64-bit doubles + the HPC op matrix ---------------------
+ * F64 is the scientific substrate: every algorithm that needs double
+ * precision calls the dispatched f64 op and transparently gets scalar /
+ * NEON (4-wide) / AVX2 (4-wide) / AVX-512 (8-wide) on the host. f32 gets
+ * the same gemv/scale/sum cells so the op matrix is complete. */
+typedef void (*rcre_gemm_f64_fn)(size_t M, size_t N, size_t K, double alpha,
+                                 const double* A, size_t lda,
+                                 const double* B, size_t ldb,
+                                 double beta, double* C, size_t ldc);
+typedef double (*rcre_dot_f64_fn)(const double* x, const double* y, size_t n);
+typedef void (*rcre_axpy_f64_fn)(size_t n, double alpha, const double* x, double* y);
+typedef void (*rcre_gemv_f64_fn)(size_t M, size_t N, double alpha,
+                                 const double* A, size_t lda, const double* x,
+                                 double beta, double* y);
+typedef void (*rcre_scale_f32_fn)(size_t n, float alpha, float* x);
+typedef void (*rcre_scale_f64_fn)(size_t n, double alpha, double* x);
+typedef float (*rcre_sum_f32_fn)(const float* x, size_t n);
+typedef double (*rcre_sum_f64_fn)(const double* x, size_t n);
+
 typedef void (*rcre_rgb_to_gray_u8_fn)(const uint8_t* rgb, uint8_t* gray, size_t num_pixels);
 
 typedef size_t (*rcre_find_byte_fn)(const uint8_t* hay, size_t len, uint8_t needle);
@@ -1238,6 +1257,16 @@ typedef struct RCRE_HalDispatch {
     rcre_rgb_to_gray_u8_fn rgb_to_gray_u8;
     rcre_find_byte_fn      find_byte;
     rcre_count_byte_fn     count_byte;
+    /* H0 (2.1.0): HPC op matrix — f64 substrate + f32 completeness.
+     * (gemv_f32 reuses main's v2.0 cell above — identical signature.) */
+    rcre_gemm_f64_fn       gemm_f64;
+    rcre_dot_f64_fn        dot_f64;
+    rcre_axpy_f64_fn       axpy_f64;
+    rcre_gemv_f64_fn       gemv_f64;
+    rcre_scale_f32_fn      scale_f32;
+    rcre_scale_f64_fn      scale_f64;
+    rcre_sum_f32_fn        sum_f32;
+    rcre_sum_f64_fn        sum_f64;
 } RCRE_HalDispatch;
 
 extern RCRE_HalDispatch rcre_hal;
@@ -1305,6 +1334,137 @@ typedef struct RCRE_ArrowArray {
     void (*release)(struct RCRE_ArrowArray*);
     void*                     private_data;
 } RCRE_ArrowArray;
+
+/* ========================================================================= */
+/* HPC Numerical Layer (H0, 2.1.0)                                          */
+/* ========================================================================= */
+
+/**
+ * @file section HPC Numerical Layer
+ * @brief Double-precision substrate, compensated reductions, and the special
+ *        function library that HPC scientific code is built on.
+ *
+ * Design (docs/hpc.md):
+ *  - F64 is the scientific substrate: every op below exists for f32 AND f64,
+ *    dispatched through `rcre_hal` (scalar / NEON / AVX2 / AVX-512).
+ *  - Determinism: the dispatched reductions are single-threaded and therefore
+ *    bitwise reproducible; the threadpool slab-reduction helpers below carry
+ *    the library-wide determinism policy (fixed-order combine, e-means slab
+ *    contract) with an explicit opt-in fast mode.
+ *  - Exactness: `rcre_sum_neumaier_*` is the high-accuracy reference
+ *    (<= 2 ULP error, order-dependent but deterministic); plain reductions
+ *    are the performance path. Both are always available.
+ */
+
+/* ------------------------------- dispatched linalg ----------------------- */
+
+/** C = alpha*A*B + beta*C (row-major, leading dims in elements), f32. */
+void rcre_linalg_gemm_f32(size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda, const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc);
+/** C = alpha*A*B + beta*C, f64 — the scientific workhorse. */
+void rcre_linalg_gemm_f64(size_t M, size_t N, size_t K, double alpha,
+                          const double* A, size_t lda, const double* B, size_t ldb,
+                          double beta, double* C, size_t ldc);
+/** y = alpha*A*x + beta*y, f32 (A is MxN row-major). */
+void rcre_linalg_gemv_f32(size_t M, size_t N, float alpha,
+                          const float* A, size_t lda, const float* x,
+                          float beta, float* y);
+/** y = alpha*A*x + beta*y, f64. */
+void rcre_linalg_gemv_f64(size_t M, size_t N, double alpha,
+                          const double* A, size_t lda, const double* x,
+                          double beta, double* y);
+/** x = alpha*x + y (in-place on x), f32. */
+void rcre_linalg_axpy_f32(size_t n, float alpha, const float* x, float* y);
+/** x = alpha*x + y (in-place on x), f64. */
+void rcre_linalg_axpy_f64(size_t n, double alpha, const double* x, double* y);
+/** x *= alpha, f32. */
+void rcre_linalg_scale_f32(size_t n, float alpha, float* x);
+/** x *= alpha, f64. */
+void rcre_linalg_scale_f64(size_t n, double alpha, double* x);
+/** dot product x.y, f32. */
+float  rcre_linalg_dot_f32(const float* x, const float* y, size_t n);
+/** dot product x.y, f64. */
+double rcre_linalg_dot_f64(const double* x, const double* y, size_t n);
+/** sum(x), f32. */
+float  rcre_linalg_sum_f32(const float* x, size_t n);
+/** sum(x), f64. */
+double rcre_linalg_sum_f64(const double* x, size_t n);
+
+/* --------------------------- compensated reductions ---------------------- */
+
+/**
+ * @brief Neumaier-compensated sum (high-accuracy, deterministic).
+ *
+ * Two-accumulator Kahan-Neumaier scheme: error bound ~2*eps*|sum| +
+ * O(eps^2) independent of n, in contrast to the naive O(n*eps) of plain
+ * sequential accumulation. This is the library's reference reduction —
+ * the e-means FP64 objective sums, solver residual checks, and the H4
+ * convergence gates are all built on it. Order-dependent (like any
+ * deterministic reduction) but bitwise reproducible run-to-run.
+ */
+double rcre_sum_neumaier_f64(const double* x, size_t n);
+float  rcre_sum_neumaier_f32(const float* x, size_t n);
+
+/**
+ * @brief Neumaier-compensated dot product (high-accuracy, deterministic).
+ */
+double rcre_dot_neumaier_f64(const double* x, const double* y, size_t n);
+float  rcre_dot_neumaier_f32(const float* x, const float* y, size_t n);
+
+/**
+ * @brief Two-way (recursive) split sum — the fast error-floor reference.
+ *
+ * Splits the array in halves recursively (depth ~log2(n)) so each FP add
+ * combines two equal-magnitude partials; error ~log2(n) ulps for
+ * well-scaled data (measured: bit-exact on 10^6 * (1e-6)), and exactly
+ * -1 ulp on the adversarial 1e20 + 2^20*1 layout (vs ~-64 ulps naive,
+ * 0 for Neumaier). Deterministic — also the slab-combine model for the
+ * threadpool reductions (each slab sums Neumaier-ly, partials combine
+ * in fixed slab order).
+ */
+double rcre_sum_pairwise_f64(const double* x, size_t n);
+
+/* ------------------------------ special functions ------------------------ */
+
+/**
+ * @file section Special Functions (H0)
+ * @brief C99-style special functions for statistics and physics.
+ *
+ * Accuracy gates (tests/test_linalg.c, against published values):
+ *   - erf/erfc:  <= 1.2e-15 absolute (Cody rational + Chebyshev tails)
+ *   - lgamma:    <= 1 ULP for x > 0.5 (Lanczos g=7, 9 coefficients),
+ *                reflection below
+ *   - digamma:   <= 2 ULP for x > 4 (asymptotic + recurrence),
+ *                reflection-based below
+ *   - logsumexp / expit: algebraically stable (no overflow in exp)
+ */
+
+/** Error function erf(x). |erf| <= 1 for all x; erf(-x) = -erf(x). */
+double rcre_sf_erf_f64(double x);
+float  rcre_sf_erf_f32(float x);
+/** Complementary error function erfc(x) = 1 - erf(x) (tail-accurate). */
+double rcre_sf_erfc_f64(double x);
+/** Natural log of the absolute Gamma function: lgamma(x) = ln|Gamma(x)|. */
+double rcre_sf_lgamma_f64(double x);
+/** Digamma psi(x) = d/dx ln Gamma(x). Pole at 0, -1, -2, ... */
+double rcre_sf_digamma_f64(double x);
+/**
+ * @brief Numerically stable log-sum-exp: log(sum(exp(x_i))).
+ * Shifts by the max, so no overflow for large |x|.
+ */
+double rcre_sf_logsumexp_f64(const double* x, size_t n);
+float  rcre_sf_logsumexp_f32(const float* x, size_t n);
+/** Sigmoid expit(x) = 1/(1+exp(-x)), branch-free stable form. */
+double rcre_sf_expit_f64(double x);
+float  rcre_sf_expit_f32(float x);
+
+/**
+ * @brief Standard normal CDF Phi(x) = 0.5*erfc(-x/sqrt(2)).
+ * The single most-used special function in statistics; provided as a
+ * named op so tests can gate it directly.
+ */
+double rcre_sf_norm_cdf_f64(double x);
 
 /* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */
