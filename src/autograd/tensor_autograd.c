@@ -97,7 +97,7 @@ static bool is_f32(const RCRE_Tensor* t) {
 }
 
 RCRE_Tensor* rcre_tensor_alloc(RCRE_Arena* arena, const size_t* shape, uint8_t ndim) {
-    if (arena == nullptr || ndim == 0 || ndim > 4 || shape == nullptr) return nullptr;
+    if (arena == nullptr || ndim == 0 || ndim > RCRE_MAX_DIMS || shape == nullptr) return nullptr;
 
     RCRE_Tensor* t = (RCRE_Tensor*)rcre_arena_alloc(arena, sizeof(RCRE_Tensor), alignof(RCRE_Tensor));
     if (!t) return nullptr;
@@ -192,7 +192,7 @@ RCRE_Tensor* rcre_tensor_view(RCRE_Arena* arena, const RCRE_Tensor* src) {
 }
 
 RCRE_Tensor* rcre_tensor_reshape_view(RCRE_Arena* arena, const RCRE_Tensor* src, const size_t* new_shape, uint8_t new_ndim) {
-    if (!src || new_ndim == 0 || new_ndim > 4 || !rcre_tensor_is_contiguous(src)) return nullptr;
+    if (!src || new_ndim == 0 || new_ndim > RCRE_MAX_DIMS || !rcre_tensor_is_contiguous(src)) return nullptr;
     size_t new_numel = 1;
     for (size_t i = 0; i < new_ndim; ++i) {
         new_numel *= new_shape[i];
@@ -305,7 +305,9 @@ static RCRE_TensorNode* tape_push_node(RCRE_TensorTape* tape) {
         tape->nodes = new_nodes;
         tape->capacity = new_cap;
     }
-    return &tape->nodes[tape->count++];
+    RCRE_TensorNode* n = &tape->nodes[tape->count++];
+    memset(n, 0, sizeof(*n));
+    return n;
 }
 
 static void backward_matmul(RCRE_TensorNode* node) {
@@ -496,5 +498,207 @@ RCRE_Tensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_Tensor* x) {
     node->inputs[0] = x;
     node->num_inputs = 1;
     node->backward = backward_sigmoid;
+    return out;
+}
+
+static void backward_conv2d(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    RCRE_Tensor* w   = node->inputs[1];
+    size_t stride  = node->aux[0];
+    size_t padding = node->aux[1];
+
+    size_t N = x->shape[0], C_in = x->shape[1], H = x->shape[2], W = x->shape[3];
+    size_t C_out = w->shape[0], kH = w->shape[2], kW = w->shape[3];
+    size_t H_out = out->shape[2], W_out = out->shape[3];
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* wd = rcre_tensor_f32_data(w);
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t co = 0; co < C_out; ++co) {
+            for (size_t ho = 0; ho < H_out; ++ho) {
+                for (size_t wo = 0; wo < W_out; ++wo) {
+                    float g = og[((n * C_out + co) * H_out + ho) * W_out + wo];
+                    if (g == 0.0f) continue;
+                    for (size_t ci = 0; ci < C_in; ++ci) {
+                        for (size_t kh = 0; kh < kH; ++kh) {
+                            ptrdiff_t hi = (ptrdiff_t)(ho * stride + kh) - (ptrdiff_t)padding;
+                            if (hi < 0 || hi >= (ptrdiff_t)H) continue;
+                            for (size_t kw = 0; kw < kW; ++kw) {
+                                ptrdiff_t wi = (ptrdiff_t)(wo * stride + kw) - (ptrdiff_t)padding;
+                                if (wi < 0 || wi >= (ptrdiff_t)W) continue;
+                                size_t x_idx = ((n * C_in + ci) * H + (size_t)hi) * W + (size_t)wi;
+                                size_t w_idx = ((co * C_in + ci) * kH + kh) * kW + kw;
+                                if (x->grad) x->grad[x_idx] += g * wd[w_idx];
+                                if (w->grad) w->grad[w_idx] += g * xd[x_idx];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_conv2d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* weight,
+                                  size_t stride, size_t padding) {
+    if (!tape || !is_f32(x) || !is_f32(weight) || x->ndim != 4 || weight->ndim != 4 ||
+        stride == 0 || x->shape[1] != weight->shape[1]) {
+        return nullptr;
+    }
+    size_t N = x->shape[0], C_in = x->shape[1], H = x->shape[2], W = x->shape[3];
+    size_t C_out = weight->shape[0], kH = weight->shape[2], kW = weight->shape[3];
+    if (H + 2U * padding < kH || W + 2U * padding < kW) return nullptr;
+    size_t H_out = (H + 2U * padding - kH) / stride + 1U;
+    size_t W_out = (W + 2U * padding - kW) / stride + 1U;
+
+    size_t out_shape[4] = { N, C_out, H_out, W_out };
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, out_shape, 4);
+    if (!out) return nullptr;
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* wd = rcre_tensor_f32_data(weight);
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t co = 0; co < C_out; ++co) {
+            for (size_t ho = 0; ho < H_out; ++ho) {
+                for (size_t wo = 0; wo < W_out; ++wo) {
+                    float acc = 0.0f;
+                    for (size_t ci = 0; ci < C_in; ++ci) {
+                        for (size_t kh = 0; kh < kH; ++kh) {
+                            ptrdiff_t hi = (ptrdiff_t)(ho * stride + kh) - (ptrdiff_t)padding;
+                            if (hi < 0 || hi >= (ptrdiff_t)H) continue;
+                            for (size_t kw = 0; kw < kW; ++kw) {
+                                ptrdiff_t wi = (ptrdiff_t)(wo * stride + kw) - (ptrdiff_t)padding;
+                                if (wi < 0 || wi >= (ptrdiff_t)W) continue;
+                                acc += xd[((n * C_in + ci) * H + (size_t)hi) * W + (size_t)wi] *
+                                       wd[((co * C_in + ci) * kH + kh) * kW + kw];
+                            }
+                        }
+                    }
+                    od[((n * C_out + co) * H_out + ho) * W_out + wo] = acc;
+                }
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out        = out;
+    node->inputs[0]  = x;
+    node->inputs[1]  = weight;
+    node->num_inputs = 2;
+    node->aux[0]     = stride;
+    node->aux[1]     = padding;
+    node->backward   = backward_conv2d;
+    return out;
+}
+
+static void backward_attention(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* q   = node->inputs[0];
+    RCRE_Tensor* k   = node->inputs[1];
+    RCRE_Tensor* v   = node->inputs[2];
+
+    size_t T = q->shape[0];
+    size_t D = q->shape[1];
+    float scale = 1.0f / sqrtf((float)D);
+    const float* qd = rcre_tensor_f32_data(q);
+    const float* kd = rcre_tensor_f32_data(k);
+    const float* vd = rcre_tensor_f32_data(v);
+    const float* og = out->grad;
+
+    float* P = (float*)malloc(T * sizeof(float));
+    float* dP = (float*)malloc(T * sizeof(float));
+    if (!P || !dP) { free(P); free(dP); return; }
+
+    for (size_t i = 0; i < T; ++i) {
+        float mx = -1e30f;
+        for (size_t j = 0; j < T; ++j) {
+            float s = 0.0f;
+            for (size_t d = 0; d < D; ++d) s += qd[i * D + d] * kd[j * D + d];
+            P[j] = s * scale;
+            if (P[j] > mx) mx = P[j];
+        }
+        float sum = 0.0f;
+        for (size_t j = 0; j < T; ++j) { P[j] = expf(P[j] - mx); sum += P[j]; }
+        for (size_t j = 0; j < T; ++j) P[j] /= sum;
+
+        /* dV += P^T dO, dP[j] = dot(dO[i], V[j]) */
+        float row_dot = 0.0f;
+        for (size_t j = 0; j < T; ++j) {
+            float dp_ij = 0.0f;
+            for (size_t d = 0; d < D; ++d) {
+                dp_ij += og[i * D + d] * vd[j * D + d];
+                if (v->grad) v->grad[j * D + d] += P[j] * og[i * D + d];
+            }
+            dP[j] = dp_ij;
+            row_dot += P[j] * dp_ij;
+        }
+
+        /* dS[j] = P[j] * (dP[j] - sum_k P[k]*dP[k]) */
+        for (size_t j = 0; j < T; ++j) {
+            float dS = P[j] * (dP[j] - row_dot) * scale;
+            for (size_t d = 0; d < D; ++d) {
+                if (q->grad) q->grad[i * D + d] += dS * kd[j * D + d];
+                if (k->grad) k->grad[j * D + d] += dS * qd[i * D + d];
+            }
+        }
+    }
+
+    free(P);
+    free(dP);
+}
+
+RCRE_Tensor* rcre_autograd_attention(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE_Tensor* k, RCRE_Tensor* v) {
+    if (!tape || !is_f32(q) || !is_f32(k) || !is_f32(v) ||
+        q->ndim != 2 || k->ndim != 2 || v->ndim != 2 ||
+        q->shape[0] != k->shape[0] || q->shape[0] != v->shape[0] ||
+        q->shape[1] != k->shape[1] || q->shape[1] != v->shape[1]) {
+        return nullptr;
+    }
+    size_t T = q->shape[0], D = q->shape[1];
+    RCRE_Tensor* out = rcre_tensor_alloc_2d(tape->arena, T, D);
+    if (!out) return nullptr;
+
+    float* P = (float*)malloc(T * sizeof(float));
+    if (!P) return nullptr;
+
+    const float* qd = rcre_tensor_f32_data(q);
+    const float* kd = rcre_tensor_f32_data(k);
+    const float* vd = rcre_tensor_f32_data(v);
+    float* od = rcre_tensor_f32_data(out);
+    float scale = 1.0f / sqrtf((float)D);
+
+    for (size_t i = 0; i < T; ++i) {
+        float mx = -1e30f;
+        for (size_t j = 0; j < T; ++j) {
+            float s = 0.0f;
+            for (size_t d = 0; d < D; ++d) s += qd[i * D + d] * kd[j * D + d];
+            P[j] = s * scale;
+            if (P[j] > mx) mx = P[j];
+        }
+        float sum = 0.0f;
+        for (size_t j = 0; j < T; ++j) { P[j] = expf(P[j] - mx); sum += P[j]; }
+        for (size_t j = 0; j < T; ++j) P[j] /= sum;
+        for (size_t d = 0; d < D; ++d) {
+            float acc = 0.0f;
+            for (size_t j = 0; j < T; ++j) acc += P[j] * vd[j * D + d];
+            od[i * D + d] = acc;
+        }
+    }
+    free(P);
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out        = out;
+    node->inputs[0]  = q;
+    node->inputs[1]  = k;
+    node->inputs[2]  = v;
+    node->num_inputs = 3;
+    node->backward   = backward_attention;
     return out;
 }

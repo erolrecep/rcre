@@ -129,6 +129,7 @@ struct RCRE_TensorNode {
     RCRE_Tensor*    out;
     RCRE_Tensor*    inputs[3];
     size_t          num_inputs;
+    size_t          aux[4];
     void (*backward)(RCRE_TensorNode* node);
 };
 
@@ -168,6 +169,8 @@ RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_Tensor
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* bias);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_relu(RCRE_TensorTape* tape, RCRE_Tensor* x);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_conv2d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* weight, size_t stride, size_t padding);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_attention(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE_Tensor* k, RCRE_Tensor* v);
 
 /* ========================================================================= */
 /* 4. Loss Functions & Gradients                                             */
@@ -213,7 +216,9 @@ RCRE_NODISCARD RCRE_ScalarVal* rcre_scalar_loss_svm_max_margin(RCRE_GraphCtx* ct
 
 typedef enum : uint8_t {
     RCRE_OPTIM_SGD = 0,
-    RCRE_OPTIM_ADAMW
+    RCRE_OPTIM_ADAMW,
+    RCRE_OPTIM_LION,
+    RCRE_OPTIM_ADAFACTOR
 } RCRE_OptimType;
 
 typedef struct {
@@ -227,17 +232,19 @@ typedef struct {
     float          momentum;
     float**        v_momentum;
 
-    /* AdamW moments */
+    /* AdamW / Lion / Adafactor state */
     float          beta1;
     float          beta2;
     float          eps;
     size_t         step_count;
-    float**        m; /* 1st moment */
-    float**        v; /* 2nd moment */
+    float**        m; /* 1st moment or Adafactor row factor */
+    float**        v; /* 2nd moment or Adafactor col factor */
 } RCRE_TensorOptim;
 
 RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_sgd_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float momentum, float weight_decay);
 RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float beta1, float beta2, float eps, float weight_decay);
+RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_lion_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float beta1, float beta2, float weight_decay);
+RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_adafactor_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float weight_decay);
 /* Both create() calls validate hyperparameters and return NULL on invalid
  * input: lr > 0, eps > 0, 0 <= momentum < 1, 0 <= beta1 < 1, 0 <= beta2 < 1
  * (beta == 1 would divide by zero in the bias correction). */

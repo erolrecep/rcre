@@ -26,8 +26,8 @@ extern "C" {
 /* Version & Compatibility Macros                                            */
 /* ========================================================================= */
 
-#define RCRE_VERSION_MAJOR 1
-#define RCRE_VERSION_MINOR 2
+#define RCRE_VERSION_MAJOR 2
+#define RCRE_VERSION_MINOR 0
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -39,6 +39,9 @@ extern "C" {
     #define RCRE_NODISCARD
   #endif
 #endif
+
+#define RCRE_ABI_VERSION 0x020000U
+RCRE_NODISCARD uint32_t rcre_abi_version(void);
 
 #ifndef constexpr
   #if !defined(__cpp_constexpr) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L)
@@ -80,9 +83,12 @@ typedef enum {
 typedef enum {
     RCRE_DTYPE_U8   = 0, /* 8-bit unsigned integer (image pixels, quantized bins) */
     RCRE_DTYPE_I32  = 1, /* 32-bit signed integer (class labels, indices)          */
+    RCRE_DTYPE_I64  = 2, /* 64-bit signed integer (token IDs, Arrow/NumPy int64)   */
     RCRE_DTYPE_F32  = 3, /* 32-bit single precision float                         */
     RCRE_DTYPE_F16  = 4, /* 16-bit IEEE 754-2008 half precision float             */
-    RCRE_DTYPE_BF16 = 5  /* 16-bit Google Brain bfloat16 format                   */
+    RCRE_DTYPE_BF16 = 5, /* 16-bit Google Brain bfloat16 format                   */
+    RCRE_DTYPE_I8   = 6, /* 8-bit signed quantized integer                        */
+    RCRE_DTYPE_F64  = 7  /* 64-bit IEEE-754 double precision float                */
 } RCRE_DType;
 
 typedef enum {
@@ -122,6 +128,16 @@ typedef struct RCRE_GraphCtx {
  * @return Pointer to newly initialized RCRE_Arena, or NULL on failure.
  */
 RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity);
+
+/**
+ * @brief Initializes a stack/static RCRE_Arena over caller-supplied memory
+ *        (zero heap allocations; ideal for freestanding/embedded targets).
+ * @param arena Caller-owned RCRE_Arena struct to initialize.
+ * @param backing_buffer Pre-allocated memory buffer (64-byte alignment recommended).
+ * @param capacity Byte capacity of backing_buffer.
+ * @return RCRE_OK on success, RCRE_ERR_INVALID_ARG on NULL/zero capacity.
+ */
+RCRE_NODISCARD int rcre_arena_from_buffer(RCRE_Arena* arena, void* backing_buffer, size_t capacity);
 
 /**
  * @brief Allocates an aligned buffer from the linear scratchpad arena.
@@ -227,18 +243,20 @@ RCRE_NODISCARD char* rcre_sb_to_cstr(RCRE_StrBuilder* sb);
 /* Tensor Abstraction & Zero-Copy Views (TNS-REQ-01 to TNS-REQ-05)           */
 /* ========================================================================= */
 
+#define RCRE_MAX_DIMS 8
+
 typedef struct RCRE_Tensor {
-    void*         data;            /* Pointer to element (0, 0, ...)               */
-    float*        grad;            /* Backprop buffer (training); NULL otherwise   */
-    size_t        shape[4];        /* Dimensions (rank 1 to 4)                     */
-    ptrdiff_t     strides[4];      /* Step in elements per dimension               */
-    size_t        numel;           /* Cached element count (set at construction;   */
-                                   /* shape/strides are immutable afterwards)      */
-    uint8_t       ndim;            /* Rank (1 to 4)                                */
+    void*         data;                 /* Pointer to element (0, 0, ...)               */
+    float*        grad;                 /* Backprop buffer (training); NULL otherwise   */
+    size_t        shape[RCRE_MAX_DIMS]; /* Dimensions (rank 1 to 8)                     */
+    ptrdiff_t     strides[RCRE_MAX_DIMS];/* Step in elements per dimension              */
+    size_t        numel;                /* Cached element count (set at construction;   */
+                                        /* shape/strides are immutable afterwards)      */
+    uint8_t       ndim;                 /* Rank (1 to 8)                                */
     RCRE_DType    dtype;
     RCRE_Layout   layout;
-    bool          is_view;         /* true: data owned elsewhere (slice/permute/…) */
-    const char*   label;           /* Optional name (visualization/debug); NULL ok */
+    bool          is_view;              /* true: data owned elsewhere (slice/permute/…) */
+    const char*   label;                /* Optional name (visualization/debug); NULL ok */
 } RCRE_Tensor;
 
 /**
@@ -308,6 +326,41 @@ RCRE_NODISCARD size_t rcre_tensor_nbytes(const RCRE_Tensor* t);
  * @brief Returns byte size of a given RCRE_DType.
  */
 RCRE_NODISCARD size_t rcre_dtype_size(RCRE_DType dtype);
+
+/**
+ * @brief Computes NumPy-compatible broadcast output shape for two tensors.
+ * @return RCRE_OK if shapes are broadcast-compatible, RCRE_ERR_SHAPE_MISMATCH otherwise.
+ */
+RCRE_NODISCARD int rcre_tensor_broadcast_shape(
+    const size_t* shape_a, uint8_t ndim_a,
+    const size_t* shape_b, uint8_t ndim_b,
+    size_t out_shape[RCRE_MAX_DIMS], uint8_t* out_ndim
+);
+
+/**
+ * @brief Creates a zero-copy strided broadcast view (0-stride along expanded axes).
+ */
+RCRE_NODISCARD RCRE_Tensor rcre_tensor_broadcast_to(
+    const RCRE_Tensor* src,
+    const size_t* target_shape,
+    uint8_t target_ndim
+);
+
+/**
+ * @brief Broadcasted elementwise addition: dst = a + b (F32).
+ */
+RCRE_NODISCARD int rcre_tensor_add_broadcast(
+    const RCRE_Tensor* a, const RCRE_Tensor* b,
+    RCRE_Arena* arena, RCRE_Tensor* dst
+);
+
+/**
+ * @brief Broadcasted elementwise multiplication: dst = a * b (F32).
+ */
+RCRE_NODISCARD int rcre_tensor_mul_broadcast(
+    const RCRE_Tensor* a, const RCRE_Tensor* b,
+    RCRE_Arena* arena, RCRE_Tensor* dst
+);
 
 /* ========================================================================= */
 /* Input Recognition & Adaptation Pipeline (ADP-REQ-01 to ADP-REQ-03)        */
@@ -517,6 +570,28 @@ RCRE_NODISCARD int rcre_cv_match_descriptors(const RCRE_CV_Descriptor* a, int na
                                             const RCRE_CV_Descriptor* b, int nb,
                                             float ratio_thresh, RCRE_CV_Match** out_matches,
                                             int* out_count, RCRE_Arena* arena);
+
+typedef struct RCRE_ORBKeypoint {
+    float    x;
+    float    y;
+    float    angle;   /* Dominant orientation in radians [-pi, pi] */
+    uint32_t score;   /* FAST corner score */
+    uint32_t bits[8]; /* 256-bit rotated BRIEF descriptor */
+} RCRE_ORBKeypoint;
+
+/** Detects FAST-9 corners on a grayscale/RGB F32 or U8 image and computes intensity-centroid orientation. */
+RCRE_NODISCARD int rcre_cv_fast_detect(const RCRE_Tensor* gray_f32, float threshold,
+                                       int max_keypoints, RCRE_ORBKeypoint** out_kps,
+                                       int* out_count, RCRE_Arena* arena);
+
+/** Computes 256-bit rotated BRIEF binary descriptors at detected ORB keypoints. */
+RCRE_NODISCARD int rcre_cv_orb_extract(const RCRE_Tensor* gray_f32, RCRE_ORBKeypoint* kps, int count);
+
+/** Matches two sets of ORB binary descriptors using Hamming distance (popcount) + ratio filter. */
+RCRE_NODISCARD int rcre_cv_orb_match(const RCRE_ORBKeypoint* a, int na,
+                                     const RCRE_ORBKeypoint* b, int nb,
+                                     int max_hamming, RCRE_CV_Match** out_matches,
+                                     int* out_count, RCRE_Arena* arena);
 
 /**
  * @brief Draws crosshair markers on an image for detected keypoints.
@@ -778,6 +853,11 @@ RCRE_NODISCARD int rcre_ml_pegasos_svm_fit(const RCRE_Tensor* X, const RCRE_Tens
 RCRE_NODISCARD int rcre_ml_predict_linear(const RCRE_Tensor* X, const RCRE_Tensor* weights, 
                                           RCRE_Tensor* preds);
 
+/** Fits L1+L2 ElasticNet sparse linear model via coordinate descent. */
+RCRE_NODISCARD int rcre_ml_sparse_linear_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
+                                             float l1_reg, float l2_reg, size_t max_iter,
+                                             RCRE_Tensor* weights);
+
 /* ========================================================================= */
 /* Clustering & Dimensionality Reduction (ML-REQ-02)                         */
 /* ========================================================================= */
@@ -1037,6 +1117,28 @@ RCRE_NODISCARD int rcre_ml_gbdt_predict(const RCRE_GBDTModel* model,
                                         const RCRE_Tensor* X, 
                                         RCRE_Tensor* preds);
 
+typedef struct RCRE_RFNode {
+    int32_t feature_idx;
+    float   threshold;
+    int32_t left;
+    int32_t right;
+    float   leaf_prob;
+} RCRE_RFNode;
+
+typedef struct RCRE_RandomForest {
+    RCRE_RFNode* nodes;
+    size_t*      tree_roots;
+    size_t       num_trees;
+    size_t       num_nodes;
+    size_t       num_features;
+    size_t       max_depth;
+} RCRE_RandomForest;
+
+RCRE_NODISCARD int rcre_ml_rf_fit(const RCRE_Tensor* X, const RCRE_Tensor* y,
+                                  size_t num_trees, size_t max_depth, uint64_t seed,
+                                  RCRE_Arena* arena, RCRE_RandomForest* out_rf);
+RCRE_NODISCARD int rcre_ml_rf_predict(const RCRE_RandomForest* rf, const RCRE_Tensor* X, RCRE_Tensor* out_probs);
+
 /* ========================================================================= */
 /* Similarity & Fast Vector Search: HNSW Graph Index (ML-REQ-04)             */
 /* ========================================================================= */
@@ -1079,7 +1181,9 @@ typedef enum {
     RCRE_CPU_FEAT_AVX2        = (1 << 2),
     RCRE_CPU_FEAT_FMA         = (1 << 3),
     RCRE_CPU_FEAT_AVX512F     = (1 << 4),
-    RCRE_CPU_FEAT_WASM_SIMD   = (1 << 5)
+    RCRE_CPU_FEAT_WASM_SIMD   = (1 << 5),
+    RCRE_CPU_FEAT_ARM_SVE2    = (1 << 6),
+    RCRE_CPU_FEAT_ARM_DOTPROD = (1 << 7)
 } RCRE_CpuFeatures;
 
 typedef void (*rcre_gemm_fn)(size_t M, size_t N, size_t K, float alpha, 
@@ -1087,7 +1191,23 @@ typedef void (*rcre_gemm_fn)(size_t M, size_t N, size_t K, float alpha,
                              const float* B, size_t ldb, 
                              float beta, float* C, size_t ldc);
 
+typedef void (*rcre_gemv_fn)(size_t M, size_t K, float alpha,
+                             const float* A, size_t lda,
+                             const float* x, float beta, float* y);
+
 typedef float (*rcre_dot_fn)(const float* x, const float* y, size_t n);
+
+typedef int32_t (*rcre_dot_i8_fn)(const int8_t* x, const int8_t* y, size_t n);
+
+typedef void (*rcre_gemm_i8_fn)(size_t M, size_t N, size_t K,
+                                const int8_t* A, size_t lda,
+                                const int8_t* B, size_t ldb,
+                                int32_t* C, size_t ldc);
+
+typedef void (*rcre_gemm_bf16_fn)(size_t M, size_t N, size_t K, float alpha,
+                                  const uint16_t* A, size_t lda,
+                                  const uint16_t* B, size_t ldb,
+                                  float beta, float* C, size_t ldc);
 
 typedef void (*rcre_axpy_fn)(size_t n, float alpha, const float* x, float* y);
 
@@ -1109,7 +1229,11 @@ typedef struct RCRE_HalDispatch {
     const char*            backend_name;
     uint32_t               cpu_features;
     rcre_gemm_fn           gemm_f32;
+    rcre_gemv_fn           gemv_f32;
     rcre_dot_fn            dot_f32;
+    rcre_dot_i8_fn         dot_i8;
+    rcre_gemm_i8_fn        gemm_i8;
+    rcre_gemm_bf16_fn      gemm_bf16;
     rcre_axpy_fn           axpy_f32;
     rcre_rgb_to_gray_u8_fn rgb_to_gray_u8;
     rcre_find_byte_fn      find_byte;
@@ -1117,6 +1241,16 @@ typedef struct RCRE_HalDispatch {
 } RCRE_HalDispatch;
 
 extern RCRE_HalDispatch rcre_hal;
+
+/**
+ * @brief Opt-in parallel SGEMM partitioned over RCRE_ThreadPool row slabs.
+ *        Falls back to single-threaded rcre_hal.gemm_f32 when pool is NULL or small.
+ */
+void rcre_hal_gemm_f32_mt(RCRE_ThreadPool* pool,
+                          size_t M, size_t N, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* B, size_t ldb,
+                          float beta, float* C, size_t ldc);
 
 /**
  * @brief Probes host hardware and initializes dynamic SIMD dispatch table.
@@ -1144,6 +1278,35 @@ RCRE_CpuTopology rcre_cpu_get_topology(void);
 int rcre_cpu_get_memory_pressure(void);
 
 /* ========================================================================= */
+/* Apache Arrow C Data Interface (Standard Interoperability Structs)         */
+/* ========================================================================= */
+
+typedef struct RCRE_ArrowSchema {
+    const char*                format;      /* "f" = F32, "i" = I32, "C" = U8 */
+    const char*                name;
+    const char*                metadata;
+    int64_t                    flags;
+    int64_t                    n_children;
+    struct RCRE_ArrowSchema**  children;
+    struct RCRE_ArrowSchema*   dictionary;
+    void (*release)(struct RCRE_ArrowSchema*);
+    void*                      private_data;
+} RCRE_ArrowSchema;
+
+typedef struct RCRE_ArrowArray {
+    int64_t                   length;
+    int64_t                   null_count;
+    int64_t                   offset;
+    int64_t                   n_buffers;
+    int64_t                   n_children;
+    const void**              buffers;     /* buffers[0]=validity, buffers[1]=data */
+    struct RCRE_ArrowArray**  children;
+    struct RCRE_ArrowArray*   dictionary;
+    void (*release)(struct RCRE_ArrowArray*);
+    void*                     private_data;
+} RCRE_ArrowArray;
+
+/* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */
 /* ========================================================================= */
 #ifndef RCRE_NO_AUTOGRAD
@@ -1157,11 +1320,62 @@ int rcre_cpu_get_memory_pressure(void);
 #include "rcre_transformer.h"
 #endif
 
+#ifndef RCRE_BUILDING_FROM_SUBHEADER
 /* ========================================================================= */
 /* High-Performance Scientific Data I/O & Zero-Copy Ecosystem Bridges         */
 /* ========================================================================= */
 #ifndef RCRE_NO_IO
 #include "rcre_io.h"
+#endif
+
+/* ========================================================================= */
+/* Modern LLM Architecture, GGUF Reader, Q8_0/Q4_0 Quantization & LoRA       */
+/* ========================================================================= */
+#ifndef RCRE_NO_LLM
+#include "rcre_llm.h"
+#endif
+
+/* ========================================================================= */
+/* Zero-Dependency Image Codecs & Minimal ONNX Protobuf Inference            */
+/* ========================================================================= */
+#ifndef RCRE_NO_CODEC
+#include "rcre_codec.h"
+#endif
+#endif /* !RCRE_BUILDING_FROM_SUBHEADER */
+
+/* ========================================================================= */
+/* High-Performance Columnar DataFrame Engine (rcre_df)                      */
+/* ========================================================================= */
+#ifndef RCRE_NO_DF
+#include "rcre_df.h"
+#endif
+
+/* ========================================================================= */
+/* Exploratory Data Analysis & Statistics (rcre_stat)                        */
+/* ========================================================================= */
+#ifndef RCRE_NO_STAT
+#include "rcre_stat.h"
+#endif
+
+/* ========================================================================= */
+/* Feature Engineering & Data Preprocessing (rcre_prep)                      */
+/* ========================================================================= */
+#ifndef RCRE_NO_PREP
+#include "rcre_prep.h"
+#endif
+
+/* ========================================================================= */
+/* Model Evaluation Metrics & Validation Protocol (rcre_metric)              */
+/* ========================================================================= */
+#ifndef RCRE_NO_METRIC
+#include "rcre_metric.h"
+#endif
+
+/* ========================================================================= */
+/* Data Science Terminal & ASCII Visualizations (rcre_vis_ds)                */
+/* ========================================================================= */
+#ifndef RCRE_NO_VIS_DS
+#include "rcre_vis_ds.h"
 #endif
 
 #ifdef __cplusplus

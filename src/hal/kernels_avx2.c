@@ -371,6 +371,61 @@ size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
     return total;
 }
 
+void rcre_avx2_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y) {
+    for (size_t i = 0; i < M; ++i) {
+        float acc = rcre_avx2_dot_f32(&A[i * lda], x, K);
+        float prev = (beta == 0.0f) ? 0.0f : (y[i] * beta);
+        y[i] = prev + alpha * acc;
+    }
+}
+
+int32_t rcre_avx2_dot_i8(const int8_t* x, const int8_t* y, size_t n) {
+    __m256i acc = _mm256_setzero_si256();
+    size_t i = 0;
+    for (; i + 15 < n; i += 16) {
+        __m128i x8 = _mm_loadu_si128((const __m128i*)&x[i]);
+        __m128i y8 = _mm_loadu_si128((const __m128i*)&y[i]);
+        __m256i x16 = _mm256_cvtepi8_epi16(x8);
+        __m256i y16 = _mm256_cvtepi8_epi16(y8);
+        __m256i prod32 = _mm256_madd_epi16(x16, y16);
+        acc = _mm256_add_epi32(acc, prod32);
+    }
+    int32_t tmp[8];
+    _mm256_storeu_si256((__m256i*)tmp, acc);
+    int32_t sum = tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7];
+    for (; i < n; ++i) {
+        sum += (int32_t)x[i] * (int32_t)y[i];
+    }
+    return sum;
+}
+
+void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
+                       const int8_t* A, size_t lda,
+                       const int8_t* B, size_t ldb,
+                       int32_t* C, size_t ldc) {
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) C[i * ldc + j] = 0;
+    }
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t k = 0; k < K; ++k) {
+            __m256i va = _mm256_set1_epi32((int32_t)A[i * lda + k]);
+            size_t j = 0;
+            for (; j + 7 < N; j += 8) {
+                __m128i b8 = _mm_loadl_epi64((const __m128i*)&B[k * ldb + j]);
+                __m256i vb = _mm256_cvtepi8_epi32(b8);
+                __m256i vc = _mm256_loadu_si256((const __m256i*)&C[i * ldc + j]);
+                vc = _mm256_add_epi32(vc, _mm256_mullo_epi32(va, vb));
+                _mm256_storeu_si256((__m256i*)&C[i * ldc + j], vc);
+            }
+            for (; j < N; ++j) {
+                C[i * ldc + j] += (int32_t)A[i * lda + k] * (int32_t)B[k * ldb + j];
+            }
+        }
+    }
+}
+
 #if !defined(__AVX2__)
   #if defined(__clang__)
     #pragma clang attribute pop

@@ -58,9 +58,16 @@ jobs:
         run: |
           make -C "${{ steps.locate.outputs.rcre_dir }}" test-sanitizers
 
-      - name: Run Hardware Acceleration Benchmark
+      - name: Run Hardware Acceleration & Roofline Benchmarks
         run: |
           make -C "${{ steps.locate.outputs.rcre_dir }}" bench
+          make -C "${{ steps.locate.outputs.rcre_dir }}" bench_roofline
+          RCRE_IO_MIN_CSV_MBPS=100 make -C "${{ steps.locate.outputs.rcre_dir }}" bench_io
+
+      - name: Run Deterministic Fuzz Regression Suite
+        if: matrix.compiler == 'clang'
+        run: |
+          make -C "${{ steps.locate.outputs.rcre_dir }}" test-fuzz
 
       - name: Run Profiler Workload (make profile)
         run: |

@@ -277,4 +277,14 @@ size_t rcre_wasm_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
     return total;
 }
 
+void rcre_wasm_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y) {
+    for (size_t i = 0; i < M; ++i) {
+        float acc = rcre_wasm_dot_f32(&A[i * lda], x, K);
+        float prev = (beta == 0.0f) ? 0.0f : (y[i] * beta);
+        y[i] = prev + alpha * acc;
+    }
+}
+
 #endif /* __wasm_simd128__ */

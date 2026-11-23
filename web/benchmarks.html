@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RCRE v2.0.0 — Empirical Roofline & I/O Benchmarks</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --fg:#e6edf3; --muted:#8b949e; --acc:#58a6ff; --ok:#3fb950; --border:#30363d; }
+  body { margin:0; font-family:ui-sans-serif,system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--fg); padding:2rem; }
+  .wrap { max-width:960px; margin:0 auto; }
+  h1 { margin:0 0 .5rem; font-size:1.85rem; }
+  p.sub { color:var(--muted); margin:0 0 2rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:1rem; margin-bottom:2rem; }
+  .kpi { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1rem 1.25rem; }
+  .kpi .label { color:var(--muted); font-size:.82rem; }
+  .kpi .val { font-size:1.55rem; font-weight:700; color:var(--acc); margin-top:.3rem; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:2rem; }
+  th, td { text-align:left; padding:.75rem 1rem; border-bottom:1px solid var(--border); font-size:.92rem; }
+  th { color:var(--muted); font-weight:600; background:rgba(255,255,255,.02); }
+  .badge { color:var(--ok); font-weight:600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>RCRE v2.0.0 Empirical Benchmarks</h1>
+  <p class="sub">Apple M5 Max (18 Cores: 6P + 12E, 128 GB Unified Memory) · ARM NEON 128-bit + ThreadPool + Apple Metal</p>
+  <div class="grid">
+    <div class="kpi"><div class="label">Parallel SGEMM (512×512)</div><div class="val">315.32 GFLOP/s</div></div>
+    <div class="kpi"><div class="label">Parallel CSV Ingestion</div><div class="val">2.61 GB/s</div></div>
+    <div class="kpi"><div class="label">FP16/BF16 SIMD Dequant</div><div class="val">71.93 GB/s</div></div>
+    <div class="kpi"><div class="label">Zero-Copy Safetensors Lookup</div><div class="val">9.5 ns</div></div>
+  </div>
+  <h2>Roofline Compute Suite (<code>make bench_roofline</code>)</h2>
+  <table>
+    <thead><tr><th>Kernel</th><th>Mode</th><th>Latency</th><th>Throughput</th></tr></thead>
+    <tbody>
+      <tr><td>SGEMM (512×512 F32)</td><td>Single-Thread NEON</td><td>3.88 ms</td><td>69.13 GFLOP/s</td></tr>
+      <tr><td>SGEMM (512×512 F32)</td><td>ThreadPool Slabs</td><td>0.85 ms</td><td class="badge">315.32 GFLOP/s (4.56x)</td></tr>
+      <tr><td>GEMV (4096×4096 F32)</td><td>Memory-Bound</td><td>2.14 ms</td><td>31.38 GB/s (15.68 GFLOP/s)</td></tr>
+      <tr><td>IGEMM (512×512 I8)</td><td>INT8 Quantized</td><td>6.77 ms</td><td>39.62 GIOP/s</td></tr>
+      <tr><td>BGEMM (512×512 BF16)</td><td>Brain Float16</td><td>6.50 ms</td><td>41.29 GFLOP/s</td></tr>
+    </tbody>
+  </table>
+  <h2>Scientific Data I/O Engine (<code>make bench_io</code>)</h2>
+  <table>
+    <thead><tr><th>Benchmark</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>CSV Ingestion (16,384 × 64 F32)</td><td>2.81 ms · 2670.9 MB/s (29.4x vs C89)</td></tr>
+      <tr><td>NumPy (.npy) mmap View (64 MB)</td><td>49.067 µs init (107x faster, 0 MB heap)</td></tr>
+      <tr><td>NEON Byte-Shuffle / Unshuffle</td><td>26.64 GB/s shuffle · 50.81 GB/s unshuffle</td></tr>
+      <tr><td>RCRZ Compression / Decompression</td><td>3.50 GB/s / 2.76 GB/s (254.56x ratio)</td></tr>
+      <tr><td>DLPack v1.0 / Arrow C Data Round-Trip</td><td>12.5 ns · 0 bytes copied</td></tr>
+    </tbody>
+  </table>
+</div>
+</body>
+</html>

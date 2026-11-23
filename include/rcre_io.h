@@ -12,7 +12,11 @@
 #ifndef RCRE_IO_H
 #define RCRE_IO_H
 
+#ifndef RCRE_H
+#define RCRE_BUILDING_FROM_SUBHEADER 1
 #include "rcre.h"
+#undef RCRE_BUILDING_FROM_SUBHEADER
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,6 +37,7 @@ typedef struct RCRE_MappedFile {
     const uint8_t* data;         /* Page-aligned (4KB/16KB) read-only base ptr    */
     size_t         size;         /* Exact file size in bytes                      */
     intptr_t       os_handle;    /* Underlying OS descriptor/handle (-1 if mem)   */
+    intptr_t       map_handle;   /* Secondary OS handle (e.g. Win32 file mapping) */
     RCRE_IOHint    hint;         /* Active kernel paging hint                     */
     bool           is_mapped;    /* True if backed by OS mmap / heap fallback     */
     bool           is_heap_buf;  /* True if fallback heap buffer (non-mmap OS)    */
@@ -124,6 +129,7 @@ typedef struct RCRE_CSVOptions {
     bool             strict_numbers; /* Reject non-numeric tokens if true        */
     size_t           max_rows;       /* 0 = read all rows                        */
     RCRE_ThreadPool* pool;           /* Optional threadpool for parallel parsing */
+    uint8_t          quote_char;     /* e.g. '"' for RFC-4180 quotes, 0 = raw    */
 } RCRE_CSVOptions;
 
 /**
@@ -204,12 +210,12 @@ RCRE_NODISCARD int rcre_io_view_npy(
 #define RCRE_SAFETENSORS_MAX_TENSORS 1024
 
 typedef struct RCRE_SafeTensorEntry {
-    RCRE_Slice  name;          /* Zero-copy slice into JSON header               */
-    RCRE_DType  dtype;         /* U8, I32, or F32                                */
-    uint8_t     ndim;          /* Rank (1 to 4)                                  */
-    size_t      shape[4];      /* Dimensions                                     */
-    size_t      data_offset;   /* Relative byte offset from data section start   */
-    size_t      data_nbytes;   /* Validated byte length of payload               */
+    RCRE_Slice  name;                 /* Zero-copy slice into JSON header               */
+    RCRE_DType  dtype;                /* U8, I8, I32, I64, F16, BF16, F32, or F64       */
+    uint8_t     ndim;                 /* Rank (1 to RCRE_MAX_DIMS)                      */
+    size_t      shape[RCRE_MAX_DIMS]; /* Dimensions                                     */
+    size_t      data_offset;          /* Relative byte offset from data section start   */
+    size_t      data_nbytes;          /* Validated byte length of payload               */
 } RCRE_SafeTensorEntry;
 
 typedef struct RCRE_SafeTensorsArchive {
@@ -446,7 +452,7 @@ typedef struct RCRE_TensorStream {
     RCRE_DType      dtype;
     RCRE_Layout     layout;
     uint8_t         ndim;
-    size_t          full_shape[4];
+    size_t          full_shape[RCRE_MAX_DIMS];
     size_t          row_elements;    /* Product of shape[1..ndim-1]              */
     size_t          row_bytes;       /* row_elements * sizeof(dtype)             */
     size_t          total_rows;      /* full_shape[0]                            */
@@ -458,6 +464,7 @@ typedef struct RCRE_TensorStream {
     bool            async_enabled;   /* Background double-buffered prefetch      */
     bool            use_io_uring;    /* True if Linux io_uring active            */
     intptr_t        async_handle;    /* io_uring ring fd or async handle         */
+    void*           prefetch_ctx;    /* Optional POSIX async prefetch worker     */
 } RCRE_TensorStream;
 
 /**
@@ -566,31 +573,7 @@ RCRE_NODISCARD int rcre_io_from_dlpack(
     RCRE_Tensor* out_view
 );
 
-/* Apache Arrow C Data Interface (ABI-compatible plain C structs) */
-typedef struct RCRE_ArrowSchema {
-    const char*                format;      /* "f" = F32, "i" = I32, "C" = U8 */
-    const char*                name;
-    const char*                metadata;
-    int64_t                    flags;
-    int64_t                    n_children;
-    struct RCRE_ArrowSchema**  children;
-    struct RCRE_ArrowSchema*   dictionary;
-    void (*release)(struct RCRE_ArrowSchema*);
-    void*                      private_data;
-} RCRE_ArrowSchema;
-
-typedef struct RCRE_ArrowArray {
-    int64_t                   length;
-    int64_t                   null_count;
-    int64_t                   offset;
-    int64_t                   n_buffers;
-    int64_t                   n_children;
-    const void**              buffers;     /* buffers[0]=validity, buffers[1]=data */
-    struct RCRE_ArrowArray**  children;
-    struct RCRE_ArrowArray*   dictionary;
-    void (*release)(struct RCRE_ArrowArray*);
-    void*                     private_data;
-} RCRE_ArrowArray;
+/* Apache Arrow C Data Interface structures declared in rcre.h */
 
 /**
  * @brief Exports a contiguous 1D RCRE_Tensor to the Apache Arrow C Data Interface.

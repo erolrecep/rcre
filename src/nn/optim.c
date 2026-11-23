@@ -81,6 +81,75 @@ RCRE_TensorOptim* rcre_tensor_optim_adamw_create(RCRE_Arena* arena, RCRE_Tensor*
     return opt;
 }
 
+RCRE_TensorOptim* rcre_tensor_optim_lion_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float beta1, float beta2, float weight_decay) {
+    if (arena == nullptr || params == nullptr || num_params == 0) return nullptr;
+    if (!(lr > 0.0f) || !(beta1 >= 0.0f && beta1 < 1.0f) || !(beta2 >= 0.0f && beta2 < 1.0f) || !(weight_decay >= 0.0f)) return nullptr;
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!optim_is_f32(params[i])) return nullptr;
+    }
+
+    RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
+    if (!opt) return nullptr;
+    memset(opt, 0, sizeof(*opt));
+    opt->type = RCRE_OPTIM_LION;
+    opt->params = params;
+    opt->num_params = num_params;
+    opt->lr = lr;
+    opt->beta1 = beta1;
+    opt->beta2 = beta2;
+    opt->weight_decay = weight_decay;
+
+    opt->m = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+    if (!opt->m) return nullptr;
+    for (size_t p = 0; p < num_params; ++p) {
+        size_t bytes = params[p]->numel * sizeof(float);
+        opt->m[p] = (float*)rcre_arena_alloc(arena, bytes, 64);
+        if (!opt->m[p]) return nullptr;
+        memset(opt->m[p], 0, bytes);
+    }
+    return opt;
+}
+
+RCRE_TensorOptim* rcre_tensor_optim_adafactor_create(RCRE_Arena* arena, RCRE_Tensor** params, size_t num_params, float lr, float weight_decay) {
+    if (arena == nullptr || params == nullptr || num_params == 0 || !(lr > 0.0f) || !(weight_decay >= 0.0f)) return nullptr;
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!optim_is_f32(params[i])) return nullptr;
+    }
+
+    RCRE_TensorOptim* opt = (RCRE_TensorOptim*)rcre_arena_alloc(arena, sizeof(RCRE_TensorOptim), alignof(RCRE_TensorOptim));
+    if (!opt) return nullptr;
+    memset(opt, 0, sizeof(*opt));
+    opt->type = RCRE_OPTIM_ADAFACTOR;
+    opt->params = params;
+    opt->num_params = num_params;
+    opt->lr = lr;
+    opt->beta2 = 0.8f;
+    opt->eps = 1e-30f;
+    opt->weight_decay = weight_decay;
+
+    opt->m = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+    opt->v = (float**)rcre_arena_alloc(arena, num_params * sizeof(float*), alignof(float*));
+    if (!opt->m || !opt->v) return nullptr;
+    for (size_t p = 0; p < num_params; ++p) {
+        RCRE_Tensor* t = params[p];
+        if (t->ndim >= 2) {
+            size_t rows = t->shape[0];
+            size_t cols = t->numel / rows;
+            opt->m[p] = (float*)rcre_arena_alloc(arena, rows * sizeof(float), 64);
+            opt->v[p] = (float*)rcre_arena_alloc(arena, cols * sizeof(float), 64);
+            if (!opt->m[p] || !opt->v[p]) return nullptr;
+            memset(opt->m[p], 0, rows * sizeof(float));
+            memset(opt->v[p], 0, cols * sizeof(float));
+        } else {
+            opt->m[p] = (float*)rcre_arena_alloc(arena, t->numel * sizeof(float), 64);
+            opt->v[p] = nullptr;
+            if (!opt->m[p]) return nullptr;
+            memset(opt->m[p], 0, t->numel * sizeof(float));
+        }
+    }
+    return opt;
+}
+
 void rcre_tensor_optim_step(RCRE_TensorOptim* opt) {
     if (opt == nullptr) return;
 
@@ -126,6 +195,80 @@ void rcre_tensor_optim_step(RCRE_TensorOptim* opt) {
                 float v_hat = v_arr[i] / bias_corr2;
 
                 td[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+            }
+        }
+    } else if (opt->type == RCRE_OPTIM_LION) {
+        float b1 = opt->beta1;
+        float b2 = opt->beta2;
+        float lr = opt->lr;
+        float wd = opt->weight_decay;
+        for (size_t p = 0; p < opt->num_params; ++p) {
+            RCRE_Tensor* t = opt->params[p];
+            if (!t->grad) continue;
+            float* td = rcre_tensor_f32_data(t);
+            float* m_arr = opt->m[p];
+            for (size_t i = 0; i < t->numel; ++i) {
+                float g = t->grad[i];
+                float c = b1 * m_arr[i] + (1.0f - b1) * g;
+                float sgn = (c > 0.0f) ? 1.0f : ((c < 0.0f) ? -1.0f : 0.0f);
+                td[i] -= lr * (sgn + wd * td[i]);
+                m_arr[i] = b2 * m_arr[i] + (1.0f - b2) * g;
+            }
+        }
+    } else if (opt->type == RCRE_OPTIM_ADAFACTOR) {
+        opt->step_count++;
+        float b2 = 1.0f - powf((float)opt->step_count, -0.8f);
+        if (b2 < 0.0f) b2 = 0.0f;
+        float lr = opt->lr;
+        float wd = opt->weight_decay;
+        for (size_t p = 0; p < opt->num_params; ++p) {
+            RCRE_Tensor* t = opt->params[p];
+            if (!t->grad) continue;
+            float* td = rcre_tensor_f32_data(t);
+            if (t->ndim >= 2) {
+                size_t rows = t->shape[0];
+                size_t cols = t->numel / rows;
+                float* r_fac = opt->m[p];
+                float* c_fac = opt->v[p];
+                for (size_t r = 0; r < rows; ++r) {
+                    float rmean = 0.0f;
+                    for (size_t c = 0; c < cols; ++c) {
+                        float g = t->grad[r * cols + c];
+                        rmean += g * g + 1e-30f;
+                    }
+                    rmean /= (float)cols;
+                    r_fac[r] = b2 * r_fac[r] + (1.0f - b2) * rmean;
+                }
+                for (size_t c = 0; c < cols; ++c) {
+                    float cmean = 0.0f;
+                    for (size_t r = 0; r < rows; ++r) {
+                        float g = t->grad[r * cols + c];
+                        cmean += g * g + 1e-30f;
+                    }
+                    cmean /= (float)rows;
+                    c_fac[c] = b2 * c_fac[c] + (1.0f - b2) * cmean;
+                }
+                float mean_r = 0.0f;
+                for (size_t r = 0; r < rows; ++r) mean_r += r_fac[r];
+                mean_r /= (float)rows;
+                if (mean_r < 1e-30f) mean_r = 1e-30f;
+
+                for (size_t r = 0; r < rows; ++r) {
+                    for (size_t c = 0; c < cols; ++c) {
+                        float v_est = (r_fac[r] * c_fac[c]) / mean_r;
+                        size_t idx = r * cols + c;
+                        td[idx] -= lr * wd * td[idx];
+                        td[idx] -= lr * (t->grad[idx] / sqrtf(v_est + 1e-12f));
+                    }
+                }
+            } else {
+                float* v_arr = opt->m[p];
+                for (size_t i = 0; i < t->numel; ++i) {
+                    float g = t->grad[i];
+                    v_arr[i] = b2 * v_arr[i] + (1.0f - b2) * (g * g + 1e-30f);
+                    td[i] -= lr * wd * td[i];
+                    td[i] -= lr * (g / sqrtf(v_arr[i] + 1e-12f));
+                }
             }
         }
     }

@@ -137,3 +137,67 @@ size_t rcre_scalar_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
     }
     return total;
 }
+
+void rcre_scalar_gemv_f32(size_t M, size_t K, float alpha,
+                          const float* A, size_t lda,
+                          const float* x, float beta, float* y) {
+    for (size_t i = 0; i < M; ++i) {
+        float acc = rcre_scalar_dot_f32(&A[i * lda], x, K);
+        float prev = (beta == 0.0f) ? 0.0f : (y[i] * beta);
+        y[i] = prev + alpha * acc;
+    }
+}
+
+int32_t rcre_scalar_dot_i8(const int8_t* x, const int8_t* y, size_t n) {
+    int32_t sum = 0;
+    for (size_t i = 0; i < n; ++i) {
+        sum += (int32_t)x[i] * (int32_t)y[i];
+    }
+    return sum;
+}
+
+void rcre_scalar_gemm_i8(size_t M, size_t N, size_t K,
+                         const int8_t* A, size_t lda,
+                         const int8_t* B, size_t ldb,
+                         int32_t* C, size_t ldc) {
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            C[i * ldc + j] = 0;
+        }
+    }
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t k = 0; k < K; ++k) {
+            int32_t a_val = (int32_t)A[i * lda + k];
+            for (size_t j = 0; j < N; ++j) {
+                C[i * ldc + j] += a_val * (int32_t)B[k * ldb + j];
+            }
+        }
+    }
+}
+
+static inline float scalar_bf16_to_f32(uint16_t b) {
+    uint32_t u = ((uint32_t)b) << 16;
+    float f = 0.0f;
+    __builtin_memcpy(&f, &u, sizeof(float));
+    return f;
+}
+
+void rcre_scalar_gemm_bf16(size_t M, size_t N, size_t K, float alpha,
+                           const uint16_t* A, size_t lda,
+                           const uint16_t* B, size_t ldb,
+                           float beta, float* C, size_t ldc) {
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            C[i * ldc + j] = (beta == 0.0f) ? 0.0f : (C[i * ldc + j] * beta);
+        }
+    }
+    if (alpha == 0.0f) return;
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t k = 0; k < K; ++k) {
+            float a_val = alpha * scalar_bf16_to_f32(A[i * lda + k]);
+            for (size_t j = 0; j < N; ++j) {
+                C[i * ldc + j] += a_val * scalar_bf16_to_f32(B[k * ldb + j]);
+            }
+        }
+    }
+}

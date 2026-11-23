@@ -360,4 +360,98 @@ size_t rcre_neon_count_byte(const uint8_t* hay, size_t len, uint8_t needle) {
     return total;
 }
 
+void rcre_neon_gemv_f32(size_t M, size_t K, float alpha,
+                        const float* A, size_t lda,
+                        const float* x, float beta, float* y) {
+    size_t i = 0;
+    for (; i + 3 < M; i += 4) {
+        const float* r0 = &A[(i + 0) * lda];
+        const float* r1 = &A[(i + 1) * lda];
+        const float* r2 = &A[(i + 2) * lda];
+        const float* r3 = &A[(i + 3) * lda];
+        float32x4_t acc0 = vdupq_n_f32(0.0f);
+        float32x4_t acc1 = vdupq_n_f32(0.0f);
+        float32x4_t acc2 = vdupq_n_f32(0.0f);
+        float32x4_t acc3 = vdupq_n_f32(0.0f);
+        size_t k = 0;
+        for (; k + 3 < K; k += 4) {
+            float32x4_t xv = vld1q_f32(&x[k]);
+            acc0 = vfmaq_f32(acc0, vld1q_f32(&r0[k]), xv);
+            acc1 = vfmaq_f32(acc1, vld1q_f32(&r1[k]), xv);
+            acc2 = vfmaq_f32(acc2, vld1q_f32(&r2[k]), xv);
+            acc3 = vfmaq_f32(acc3, vld1q_f32(&r3[k]), xv);
+        }
+        float s0 = vaddvq_f32(acc0), s1 = vaddvq_f32(acc1), s2 = vaddvq_f32(acc2), s3 = vaddvq_f32(acc3);
+        for (; k < K; ++k) {
+            float xv = x[k];
+            s0 += r0[k] * xv;
+            s1 += r1[k] * xv;
+            s2 += r2[k] * xv;
+            s3 += r3[k] * xv;
+        }
+        y[i + 0] = (beta == 0.0f ? 0.0f : y[i + 0] * beta) + alpha * s0;
+        y[i + 1] = (beta == 0.0f ? 0.0f : y[i + 1] * beta) + alpha * s1;
+        y[i + 2] = (beta == 0.0f ? 0.0f : y[i + 2] * beta) + alpha * s2;
+        y[i + 3] = (beta == 0.0f ? 0.0f : y[i + 3] * beta) + alpha * s3;
+    }
+    for (; i < M; ++i) {
+        float acc = rcre_neon_dot_f32(&A[i * lda], x, K);
+        y[i] = (beta == 0.0f ? 0.0f : y[i] * beta) + alpha * acc;
+    }
+}
+
+int32_t rcre_neon_dot_i8(const int8_t* x, const int8_t* y, size_t n) {
+    int32x4_t acc = vdupq_n_s32(0);
+    size_t i = 0;
+#if defined(__ARM_FEATURE_DOTPROD)
+    for (; i + 15 < n; i += 16) {
+        acc = vdotq_s32(acc, vld1q_s8(&x[i]), vld1q_s8(&y[i]));
+    }
+#else
+    for (; i + 15 < n; i += 16) {
+        int8x16_t vx = vld1q_s8(&x[i]);
+        int8x16_t vy = vld1q_s8(&y[i]);
+        int16x8_t p_lo = vmull_s8(vget_low_s8(vx), vget_low_s8(vy));
+        int16x8_t p_hi = vmull_s8(vget_high_s8(vx), vget_high_s8(vy));
+        acc = vpadalq_s16(acc, p_lo);
+        acc = vpadalq_s16(acc, p_hi);
+    }
+#endif
+    int32_t sum = vaddvq_s32(acc);
+    for (; i < n; ++i) {
+        sum += (int32_t)x[i] * (int32_t)y[i];
+    }
+    return sum;
+}
+
+void rcre_neon_gemm_i8(size_t M, size_t N, size_t K,
+                       const int8_t* A, size_t lda,
+                       const int8_t* B, size_t ldb,
+                       int32_t* C, size_t ldc) {
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            C[i * ldc + j] = 0;
+        }
+    }
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t k = 0; k < K; ++k) {
+            int16_t a_val = (int16_t)A[i * lda + k];
+            int16x8_t va = vdupq_n_s16(a_val);
+            size_t j = 0;
+            for (; j + 7 < N; j += 8) {
+                int16x8_t vb = vmovl_s8(vld1_s8(&B[k * ldb + j]));
+                int32x4_t c_lo = vld1q_s32(&C[i * ldc + j]);
+                int32x4_t c_hi = vld1q_s32(&C[i * ldc + j + 4]);
+                c_lo = vmlal_s16(c_lo, vget_low_s16(va), vget_low_s16(vb));
+                c_hi = vmlal_s16(c_hi, vget_high_s16(va), vget_high_s16(vb));
+                vst1q_s32(&C[i * ldc + j], c_lo);
+                vst1q_s32(&C[i * ldc + j + 4], c_hi);
+            }
+            for (; j < N; ++j) {
+                C[i * ldc + j] += (int32_t)a_val * (int32_t)B[k * ldb + j];
+            }
+        }
+    }
+}
+
 #endif /* __ARM_NEON || __aarch64__ */

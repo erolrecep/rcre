@@ -20,8 +20,8 @@ pub struct RCRE_Arena {
 pub struct RCRE_Tensor {
     pub data: *mut std::ffi::c_void,
     pub grad: *mut f32,
-    pub shape: [usize; 4],
-    pub strides: [isize; 4],
+    pub shape: [usize; 8],
+    pub strides: [isize; 8],
     pub numel: usize,
     pub ndim: u8,
     pub dtype: u32,
@@ -31,6 +31,7 @@ pub struct RCRE_Tensor {
 }
 
 extern "C" {
+    pub fn rcre_abi_version() -> u32;
     pub fn rcre_arena_create(capacity: usize) -> *mut RCRE_Arena;
     pub fn rcre_arena_reset(arena: *mut RCRE_Arena);
     pub fn rcre_arena_destroy(arena: *mut RCRE_Arena);
@@ -87,6 +88,10 @@ impl Drop for Arena {
             self.raw = std::ptr::null_mut();
         }
     }
+}
+
+pub fn abi_version() -> u32 {
+    unsafe { rcre_abi_version() }
 }
 
 /// Returns the detected host CPU brand string.

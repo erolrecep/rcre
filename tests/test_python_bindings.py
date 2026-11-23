@@ -44,6 +44,27 @@ def test_python_bindings():
         assert arena.offset == 0
         print("  Arena reset verified (offset=0)")
 
+        # 4. Test Data Science Metrics (ROC-AUC & R2)
+        y_true = np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32)
+        y_score = np.array([0.1, 0.4, 0.35, 0.8], dtype=np.float32)
+        auc = rcre.roc_auc_score(y_true, y_score, arena)
+        print(f"  ROC-AUC Score: {auc:.4f}")
+        assert auc >= 0.75
+
+        y_pred = np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32)
+        r2 = rcre.r2_score(y_true, y_pred)
+        print(f"  R2 Score (perfect fit): {r2:.4f}")
+        assert abs(r2 - 1.0) < 1e-5
+
+        # 5. Test Welford Statistics
+        data = np.arange(1, 11, dtype=np.float32)
+        stats = rcre.stat_describe(data, arena)
+        print(f"  Welford Summary -> Mean: {stats['mean']}, Median: {stats['median']}, Min: {stats['min']}, Max: {stats['max']}")
+        assert stats["count"] == 10
+        assert abs(stats["mean"] - 5.5) < 1e-4
+        assert abs(stats["min"] - 1.0) < 1e-4
+        assert abs(stats["max"] - 10.0) < 1e-4
+
     print("==================================================")
     print("  ✓ Python FFI bindings verified successfully!    ")
     print("==================================================")

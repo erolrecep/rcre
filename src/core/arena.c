@@ -6,11 +6,31 @@
  */
 
 #include "rcre.h"
+#ifndef RCRE_FREESTANDING
 #include <stdlib.h>
+#endif
 #include <string.h>
 
 #define RCRE_DEFAULT_ALIGNMENT 64
 
+uint32_t rcre_abi_version(void) {
+    return RCRE_ABI_VERSION;
+}
+
+RCRE_NODISCARD int rcre_arena_from_buffer(RCRE_Arena* arena, void* backing_buffer, size_t capacity) {
+    if (!arena || !backing_buffer || capacity == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    arena->buffer         = (uint8_t*)backing_buffer;
+    arena->capacity       = capacity;
+    arena->offset         = 0;
+    arena->high_watermark = 0;
+    arena->alloc_count    = 0;
+    arena->rewind_count   = 0;
+    return RCRE_OK;
+}
+
+#ifndef RCRE_FREESTANDING
 RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity) {
     if (capacity == 0) {
         return NULL;
@@ -53,6 +73,7 @@ RCRE_NODISCARD RCRE_Arena* rcre_arena_create(size_t capacity) {
 
     return arena;
 }
+#endif /* !RCRE_FREESTANDING */
 
 RCRE_NODISCARD void* rcre_arena_alloc(RCRE_Arena* arena, size_t size, size_t align) {
     if (!arena || !arena->buffer || size == 0) {
@@ -91,6 +112,7 @@ void rcre_arena_reset(RCRE_Arena* arena) {
     }
 }
 
+#ifndef RCRE_FREESTANDING
 void rcre_arena_destroy(RCRE_Arena* arena) {
     if (arena) {
         if (arena->buffer) {
@@ -104,6 +126,7 @@ void rcre_arena_destroy(RCRE_Arena* arena) {
         free(arena);
     }
 }
+#endif /* !RCRE_FREESTANDING */
 
 RCRE_NODISCARD RCRE_ArenaTemp rcre_arena_temp_begin(RCRE_Arena* arena) {
     RCRE_ArenaTemp temp = {
@@ -120,6 +143,7 @@ void rcre_arena_temp_end(RCRE_ArenaTemp temp) {
     }
 }
 
+#ifndef RCRE_FREESTANDING
 RCRE_NODISCARD RCRE_GraphCtx* rcre_graph_ctx_create(size_t persistent_cap, size_t tape_cap) {
     RCRE_GraphCtx* ctx = (RCRE_GraphCtx*)malloc(sizeof(RCRE_GraphCtx));
     if (!ctx) return NULL;
@@ -150,3 +174,4 @@ void rcre_graph_ctx_destroy(RCRE_GraphCtx* ctx) {
         free(ctx);
     }
 }
+#endif /* !RCRE_FREESTANDING */

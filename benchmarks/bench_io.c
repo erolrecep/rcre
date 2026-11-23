@@ -179,6 +179,18 @@ static void bench_csv_ingestion(void) {
            dt_parallel * 1000.0, file_mb / dt_parallel, dt_legacy / dt_parallel,
            (file_mb / 1024.0) / dt_parallel);
 
+    const char* min_env = getenv("RCRE_IO_MIN_CSV_MBPS");
+    if (min_env && min_env[0] != '\0') {
+        double min_mbps = strtod(min_env, nullptr);
+        double parallel_mbps = file_mb / dt_parallel;
+        if (parallel_mbps < min_mbps) {
+            fprintf(stderr, "❌ CSV Throughput Regression Gate Failed: %.1f MB/s < %.1f MB/s\n",
+                    parallel_mbps, min_mbps);
+            exit(2);
+        }
+        printf("   ✅ CI Throughput Gate Passed (%.1f MB/s >= %.1f MB/s)\n", parallel_mbps, min_mbps);
+    }
+
     rcre_threadpool_destroy(pool);
     free(legacy_buf);
     rcre_arena_destroy(arena);
