@@ -1513,6 +1513,260 @@ RCRE_NODISCARD int rcre_linalg_syev_f64(double* A, size_t lda, size_t n,
                                         int compute_vectors, double* w,
                                         double* V, size_t ldv);
 
+/* -------------------- sparse CSR + Krylov solvers (H4, 2.2.0) ----------- */
+
+/**
+ * @brief Compressed sparse row (CSR) matrix view, F64 (H4, 2.2.0).
+ *
+ * A plain C view: row_ptr (rows+1), col_idx (nnz, ascending per row),
+ * values (nnz). The caller owns the three arrays (or gets them from
+ * rcre_csr_f64_from_dense and frees them all together). Row-major
+ * canonical layout; the Krylov and preconditioner APIs treat the
+ * matrix as immutable.
+ */
+typedef struct RCRE_CSR_F64 {
+    size_t rows;
+    size_t cols;
+    size_t nnz;
+    size_t* row_ptr;
+    size_t* col_idx;
+    double* values;
+} RCRE_CSR_F64;
+
+/** Same as RCRE_CSR_F64 with F32 values. */
+typedef struct RCRE_CSR_F32 {
+    size_t rows;
+    size_t cols;
+    size_t nnz;
+    size_t* row_ptr;
+    size_t* col_idx;
+    float* values;
+} RCRE_CSR_F32;
+
+/**
+ * @brief Krylov convergence callback (H4).
+ *
+ * Called after each residual update with the CURRENT iteration count
+ * and the current relative residual (true residual norm over the
+ * reference norm, accumulated in double even on the F32 path).
+ * Returning from the callback cannot abort the solve (documented:
+ * the callback is telemetry only — profiling integration).
+ */
+typedef void (*RCRE_KrylovCallback)(size_t iter, double rel_res, void* user);
+
+/** Preconditioner selection for the Krylov drivers (H4). */
+enum {
+    RCRE_PC_NONE = 0,           /* no preconditioning (pc_data ignored) */
+    RCRE_PC_JACOBI = 1,         /* diagonal: pc_data = inv_diag (n)     */
+    RCRE_PC_WEIGHTED_JACOBI = 2,/* d*Jacobi: pc_data = array w[i] = omega/|A_ii| */
+    RCRE_PC_ILU0 = 3            /* sparse LU, no fill: pc_data = the RCRE_CSR factor */
+};
+
+/**
+ * @brief Dense (row-major) to CSR conversion, F64 (H4).
+ *
+ * Keeps entries with |a| > threshold (threshold = 0 keeps every
+ * nonzero). Allocates row_ptr (rows+1), col_idx (nnz), values (nnz);
+ * on success the caller owns ALL THREE (free each). 0 on success, -1
+ * on NULL output or allocation failure (*nnz out, = 0 on failure).
+ */
+RCRE_NODISCARD int rcre_csr_f64_from_dense(const double* A, size_t rows,
+                                           size_t cols, double threshold,
+                                           size_t** row_ptr,
+                                           size_t** col_idx,
+                                           double** values, size_t* nnz);
+
+/** F32 twin of rcre_csr_f64_from_dense. */
+RCRE_NODISCARD int rcre_csr_f32_from_dense(const float* A, size_t rows,
+                                           size_t cols, float threshold,
+                                           size_t** row_ptr,
+                                           size_t** col_idx,
+                                           float** values, size_t* nnz);
+
+/** @brief SpMV: y = A·x (OVERWRITES y), F64 (H4). */
+void rcre_spmv_f64(const RCRE_CSR_F64* A, const double* x, double* y);
+
+/** F32 twin of rcre_spmv_f64. */
+void rcre_spmv_f32(const RCRE_CSR_F32* A, const float* x, float* y);
+
+/**
+ * @brief Jacobi preconditioner: inv_diag[i] = 1/A[i,i] (H4).
+ * 0 on success, -1 on NULL or a zero diagonal entry.
+ */
+RCRE_NODISCARD int rcre_pc_jacobi_f64(const RCRE_CSR_F64* A, double* inv_diag);
+
+/** F32 twin of rcre_pc_jacobi_f64. */
+RCRE_NODISCARD int rcre_pc_jacobi_f32(const RCRE_CSR_F32* A, float* inv_diag);
+
+/**
+ * @brief Incomplete LU factorization, zero fill (ILU(0)), F64 (H4).
+ *
+ * Factors A = L·U following EXACTLY A's sparsity pattern (unit-
+ * diagonal L implicit). The factor is returned in `fac`: fac->row_ptr
+ * and fac->col_idx are NEW copies of A's pattern, fac->values holds
+ * L (strictly lower) and U (diagonal + upper). A is not modified.
+ * 0 on success (caller owns all three fac arrays), -1 on NULL, a
+ * missing/zero diagonal, or a zero pivot during the sweep.
+ */
+RCRE_NODISCARD int rcre_pc_ilu0_f64(const RCRE_CSR_F64* A, RCRE_CSR_F64* fac);
+
+/** F32 twin of rcre_pc_ilu0_f64. */
+RCRE_NODISCARD int rcre_pc_ilu0_f32(const RCRE_CSR_F32* A, RCRE_CSR_F32* fac);
+
+/**
+ * @brief Apply an ILU(0) preconditioner: z = (L·U)⁻¹·r (H4).
+ * Two sparse triangular solves (forward with unit L, then backward).
+ */
+void rcre_pc_ilu0_solve_f64(const RCRE_CSR_F64* fac, const double* r, double* z);
+
+/** F32 twin of rcre_pc_ilu0_solve_f64. */
+void rcre_pc_ilu0_solve_f32(const RCRE_CSR_F32* fac, const float* r, float* z);
+
+/**
+ * @brief Preconditioned conjugate gradients for SPD A·x = b, F64 (H4).
+ *
+ * x is the initial guess AND the output (x += ... in place). tol is
+ * the target on the TRUE relative residual ||b - A·x|| / ||b||.
+ * max_iter bounds the outer iterations. pc selects the preconditioner
+ * (see RCRE_PC_*); pc_data is the inv_diag buffer or the ILU(0)
+ * factor built by the corresponding rcre_pc_* call. fcg != 0 selects
+ * FCG (apply M⁻¹ to the residual only at the first step; the plain
+ * call is preconditioned CG with M⁻¹ on r every step). cb is optional
+ * telemetry (NULL allowed), called after each iteration with the
+ * current relative residual.
+ *
+ * Returns the number of outer iterations performed (0 when x0
+ * already satisfies tol), -1 when tol was not reached within
+ * max_iter (x still holds the last iterate). Deterministic: fixed
+ * loop order, no threading, bitwise reproducible run-to-run.
+ */
+RCRE_NODISCARD int rcre_krylov_pcg_f64(const RCRE_CSR_F64* A, const double* b,
+                                       double* x, double tol,
+                                       size_t max_iter, int pc,
+                                       const void* pc_data, int fcg,
+                                       RCRE_KrylovCallback cb, void* user);
+
+/** F32 twin of rcre_krylov_pcg_f64 (tol still on the double-accumulated relative residual). */
+RCRE_NODISCARD int rcre_krylov_pcg_f32(const RCRE_CSR_F32* A, const float* b,
+                                       float* x, double tol,
+                                       size_t max_iter, int pc,
+                                       const void* pc_data, int fcg,
+                                       RCRE_KrylovCallback cb, void* user);
+
+/**
+ * @brief BiCGStab for general (non-symmetric) A·x = b, F64 (H4).
+ * Same conventions as rcre_krylov_pcg_f64 (x in/out, tol on the true
+ * relative residual, pc/pc_data, optional telemetry callback).
+ * Returns the number of outer iterations or -1.
+ */
+RCRE_NODISCARD int rcre_krylov_bicgstab_f64(const RCRE_CSR_F64* A,
+                                            const double* b, double* x,
+                                            double tol, size_t max_iter,
+                                            int pc, const void* pc_data,
+                                            RCRE_KrylovCallback cb,
+                                            void* user);
+
+/** F32 twin of rcre_krylov_bicgstab_f64. */
+RCRE_NODISCARD int rcre_krylov_bicgstab_f32(const RCRE_CSR_F32* A,
+                                            const float* b, float* x,
+                                            double tol, size_t max_iter,
+                                            int pc, const void* pc_data,
+                                            RCRE_KrylovCallback cb,
+                                            void* user);
+
+
+/**
+ * @brief Restored GMRES(m) with Householder QR on the Hessenberg,
+ * F64 (H4). Same conventions as rcre_krylov_pcg_f64; m is the inner
+ * restart length (1 <= m < n; use m = n-1 for the full method).
+ * Arnoldi with one MGS re-orthogonalization pass per step (the
+ * measured-orthogonality bar is gated in the tests). Convergence
+ * check uses the Arnoldi residual (exact in exact arithmetic: it
+ * equals the true residual norm) and the final accepted iterate is
+ * re-checked against the true residual before returning success.
+ * Returns the total number of matrix-vector products (sum over all
+ * restart cycles) or -1.
+ */
+RCRE_NODISCARD int rcre_krylov_gmres_f64(const RCRE_CSR_F64* A,
+                                         const double* b, double* x,
+                                         double tol, size_t max_iter,
+                                         size_t m, int pc,
+                                         const void* pc_data,
+                                         RCRE_KrylovCallback cb, void* user);
+
+/** F32 twin of rcre_krylov_gmres_f64. */
+RCRE_NODISCARD int rcre_krylov_gmres_f32(const RCRE_CSR_F32* A,
+                                         const float* b, float* x,
+                                         double tol, size_t max_iter,
+                                         size_t m, int pc,
+                                         const void* pc_data,
+                                         RCRE_KrylovCallback cb,
+                                         void* user);
+
+/**
+ * @brief Classic geometric multigrid V-cycle, 2D Poisson (Dirichlet),
+ *        structured tensor-product grid, F64 (H4).
+ *
+ * One residual-correction V-cycle for the h^2-scaled 5-point Laplacian
+ * (A u)_{i,j} = 4u_{i,j} - u_{i-1,j} - u_{i+1,j} - u_{i,j-1} - u_{i,j+1} on
+ * the interior grid 0..nx-1 x 0..ny-1 with zero boundary values (fold
+ * boundary data into f). Anatomy per level: pre/post red-black
+ * Gauss-Seidel sweeps (pre/post counts); defect r = f - A u; full-weighting
+ * restriction of the defect; bilinear prolongation of the coarse
+ * correction; exact dense (Gaussian) solve at the coarsest level. x is the
+ * approximation, updated in place. Measured behavior (docs/hpc.md):
+ * broadband residuals reach 1e-10 in ~20-60 cycles on 32^2..512^2, while a
+ * pure smoothest-mode error decays slowly (rate -> 1 with n; fixed
+ * 2+2 smoothing is the limit, not a bug) — for smooth-error-dominated
+ * solves use rcre_krylov_pcg + RCRE_PC_ILU0. Returns 1 on success, -1 on
+ * invalid input/alloc failure.
+ */
+RCRE_NODISCARD int rcre_mg_vcycle_poisson2d_f64(size_t nx, size_t ny,
+                                                const double* f, double* x,
+                                                int pre, int post);
+RCRE_NODISCARD int rcre_mg_vcycle_poisson2d_f32(size_t nx, size_t ny,
+                                                const float* f, float* x,
+                                                int pre, int post);
+
+/**
+ * @brief Geometric multigrid FAS cycle, 2D Poisson (Dirichlet), structured
+ *        tensor-product grid, F64 (H4).
+ *
+ * One Full Approximation Scheme cycle for the same grid/stencil as
+ * rcre_mg_vcycle_poisson2d_f64: pre/post red-black Gauss-Seidel sweeps;
+ * defect r = f - A u; exact dense correction at the coarsest level; the
+ * coarse level solves against the full restricted RHS R f starting from
+ * the full-weighting of u, and the fine update is
+ * u += P (u_c_after - u_c_before). FAS corrects against the full RHS at
+ * every level (not just the residual), which changes the smoothest-mode
+ * behavior compared with the V-cycle; both are provided so users can pick
+ * per problem. Returns 1 on success, -1 on invalid input/alloc failure.
+ */
+RCRE_NODISCARD int rcre_mg_fas_poisson2d_f64(size_t nx, size_t ny,
+                                             const double* f, double* x,
+                                             int pre, int post);
+RCRE_NODISCARD int rcre_mg_fas_poisson2d_f32(size_t nx, size_t ny,
+                                             const float* f, float* x,
+                                             int pre, int post);
+
+/**
+ * @brief Repeat V-cycles until the true relative residual ||f - A x||/||f||
+ *        <= tol, F64. Same grid convention as rcre_mg_vcycle_poisson2d_f64.
+ * Cycles use 2 pre + 2 post red-black GS sweeps. Returns the number of
+ * cycles applied, 0 if already converged, -1 on failure (max_cycles is a
+ * hard cap). The callback (telemetry only) receives (cycle, rel_res).
+ */
+RCRE_NODISCARD int rcre_mg_solve_poisson2d_f64(size_t nx, size_t ny,
+                                               const double* f, double* x,
+                                               double tol, int max_cycles,
+                                               RCRE_KrylovCallback cb,
+                                               void* user);
+RCRE_NODISCARD int rcre_mg_solve_poisson2d_f32(size_t nx, size_t ny,
+                                               const float* f, float* x,
+                                               double tol, int max_cycles,
+                                               RCRE_KrylovCallback cb,
+                                               void* user);
+
 /* --------------------------- compensated reductions ---------------------- */
 
 /**

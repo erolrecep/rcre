@@ -452,13 +452,163 @@ the nominal-⅔n³ flop count for an iterative eigen solver is
 misleading (the measured "GFLOP/s" there exceeds peak because the
 active-block GEMM does Σ 2m³ work, not ⅔n³).
 
-## 7. Validation gates (per release)
+## 7. Phase H4 — Iterative Solvers & 2D-Poisson Multigrid (2.2.0)
+
+`src/core/krylov.c` (F64 + F32, one macro-instantiated core) and
+`src/core/multigrid.c`. Deterministic scalar data path: no hidden
+threading, no atomics; a single F64 CSR format (`RCRE_CSR_F64` /
+`RCRE_CSR_F32`) feeds both the Krylov solvers and the ILU(0)
+preconditioner.
+
+### 7.1 Krylov API and return convention
+
+```
+rcre_krylov_pcg_f64(A, b, x, tol, max_iter, pc, pc_data, fcg, cb, user)
+rcre_krylov_bicgstab_f64(A, b, x, tol, max_iter, pc, pc_data, cb, user)
+rcre_krylov_gmres_f64(A, b, x, tol, max_iter, m, pc, pc_data, cb, user)
+```
+
+- `pc` ∈ {`RCRE_PC_NONE, RCRE_PC_JACOBI` (pc_data = 1/diag),
+  `RCRE_PC_WEIGHTED_JACOBI` (pc_data = array w[i] = ω/|A_ii|),
+  `RCRE_PC_ILU0` (pc_data = a fully-filled `RCRE_CSR` factor from
+  `rcre_pc_ilu0_f64`)}. All three are left-preconditioned.
+- **Return**: `0` if x already satisfies tol before iterating;
+  positive count if converged (PCG/FCG/BiCGStab: iteration count;
+  GMRES: `matvecs - 1`); `-1` on breakdown / not converged (x holds the
+  last full iterate). `max_iter` bounds iterations (PCG/FCG/BiCGStab)
+  or matrix-vector products (GMRES).
+- Convergence is monitored on the **true** relative residual
+  `‖b − Ax‖/‖b‖` accumulated in double (never on the recurrence
+  residual).
+- `cb` (iteration, rel_res, user) is **telemetry only**: callbacks never
+  touch the numerics (determinism is callback-independent by
+  construction; asserted in `test_h4`).
+
+Supporting API: `rcre_csr_f64_from_dense` (note: it fills row_ptr /
+col_idx / values / *nnz but does **not** set `A.rows`/`A.cols` — the
+caller owns those fields), `rcre_spmv_f64`, `rcre_pc_jacobi_f64`,
+`rcre_pc_ilu0_f64` + `rcre_pc_ilu0_solve_f64`.
+
+**CSR requirement**: rows must have **ascending** `col_idx` (ILU(0)
+substitution and the SpMV row-walk assume it). For the 2D 5-point
+Poisson the correct row order is `c−n, c−1, c, c+1, c+n` (with boundary
+skips); a lexicographic-incorrect order silently produces wrong ILU(0)
+factors (measured: stagnation, no error).
+
+### 7.2 BiCGStab: implemented, measured-fragile, parity-gated
+
+The shipped form is the original 1983 recurrence on the
+left-preconditioned system with: shadow start **v₀ = r₀** (van der
+Vorst's robust restart), **ω = (s, Bs)/‖Bs‖²** (the least-squares value
+minimizing ‖r − ωt‖), textbook ρ = (r_prev, r₀). This is the best of
+the **12 measured variant combinations** (ω ∈ {(s,t)/(t,t),
+(s,t)/(t,w), (s,t)/(p,t)} × shadow ∈ {0, r₀} × ρ ∈ {new, prev}, each
+run in both C and an independent Python reference on 1D tridiagonal /
+advection-diffusion/Jordan-structured systems):
+
+| variant (all else shipped) | 24¹ tridiag | 64¹ advdiff (P≈4.8) |
+|---|---|---|
+| ω=(s,t)/(t,t), v₀=r₀ (shipped) | diverges | 1-ulp knife-edge (C vs Py disagree) |
+| ω=(s,t)/(t,w), v₀=r₀ | diverges | diverges (C: breakdown rw=0; Py: 1e11) |
+| ω=(s,t)/(p,t), v₀=r₀ | breakdown k≈4 | breakdown |
+| ω=(s,t)/(t,t), v₀=0 | diverges | diverges |
+| ω=(s,t)/(t,w), v₀=0 | slow crawl → diverges | diverges |
+| ω=(s,t)/(p,t), v₀=0 | diverges | diverges |
+
+**Conclusion (measured, not marketing)**: at small/medium n, classic
+BiCGStab has no robust portable configuration on these standard test
+matrices — its residual trajectory is chaotic and sits on 1-ulp
+knife-edges; this is the literature-known fragility, not an
+implementation defect. The H4 test suite therefore gates BiCGStab on
+**trajectory parity** with an independent Python reference (40-step
+fixture, `tests/h4_fixtures/`, gate 1e-12 relative — measured 1e-15),
+proving the C code implements exactly the documented recurrence.
+**GMRES(m) is the robust nonsymmetric path** and carries the
+convergence gates. BiCGStab remains in the API because on large sparse
+problems (where it is normally used) it is O(1) memory per step, while
+restarted GMRES costs O(mn). GMRES(32)+ILU(0) on 2D Poisson: 99 matvecs
+@ 64², 231 @ 128², 660 @ 256², rel err ≤ 5.6e-7.
+
+### 7.3 Multigrid: 2D Poisson, red-black GS, V-cycle default
+
+`rcre_mg_vcycle_poisson2d_{f64,f32}`, `rcre_mg_fas_poisson2d_{f64,f32}`
+(one fixed cycle: `pre`/`post` red-black GS sweeps, 2:1 geometric
+coarsening, dense-pivoted exact coarsest solve for ≤ 256 unknowns) and
+the convenience drivers `rcre_mg_solve_poisson2d_{f64,f32}` (default
+V-cycle, tol/max_cycles, telemetry callback). Stencil: h²-scaled
+5-point, zero Dirichlet (caller folds boundary data into f).
+
+**Measured convergence (honest bars, not O(1) claims)** — the fixed
+2:1 geometric cycle has an **h-dependent smoothest-mode floor** (the
+smoother is local; coarse-grid correction at 2:1 is weak on the
+longest wavelength). Measured relative error after 100 cycles, random
+RHS:
+
+| n² | V-cycle | FAS |
+|---|---|---|
+| 32² | 3.9e-3 | 6.0e-1 |
+| 64² | 2.9e-2 | 6.2e-1 |
+| 128² | 5.9e-1 | 8.5e-1 |
+
+mode-1 (smoothest) after 300 cycles: 32² → 2.99e-7; 64² → 1.8e-2;
+128² → 3.5e-1; 256² → 7.7e-1 (rate ≈ 1.00 for fixed cycles —
+documented as the floor, not hidden). FAS is stable (after a real
+bug: the coarse RHS buffer was reused as the prolongation target
+without zeroing — prolong accumulates with `+=`) but shows the same
+smooth-mode floor; it is kept for its broadband character and as the
+F32/structured reference path.
+
+**Recommendation (measured)**: for smooth-error-dominated Poisson,
+**PCG + ILU(0)** is the O(n)-iteration workhorse: 65 iters @ 64²,
+127 @ 128², 248 @ 256², 556 @ 512², rel err ~1e-10 (see benchmarks
+below). Multigrid shines as a *cycle* (V-cycle @ 256² = 1.2 ms —
+use it as an ILU-quality smoother or for many-RHS / time-stepping
+settings where the per-cycle cost, not the iteration count, is the
+budget).
+
+### 7.4 H4 benchmarks (Apple M5 Max, single-thread, -O3, -ffp-contract=off)
+
+```
+PCG + ILU(0) on 2D Poisson (tol 1e-10, random RHS):
+  n^2     iters    ILU0 fac (ms)   solve (ms)   rel err
+    64       75            3.70          3.56   6.9e-11
+   128      149           55.64         30.16   9.7e-11
+   256      285          914.29        234.36   9.6e-11
+   512      556        15592.32       1820.15   9.7e-11
+
+GMRES(32) + ILU(0) on 2D Poisson (tol 1e-8, random RHS):
+  n^2    matvecs    ILU0 fac (ms)   solve (ms)
+    64       99            4.06         12.65
+   128      231           56.76        120.09
+   256      660          904.92       1413.27
+
+Multigrid per cycle (fixed 2+2 red-black GS):
+  n^2     V-cycle (ms)   FAS (ms)
+    32          0.012      0.011
+    64          0.052      0.053
+   128          0.265      0.268
+   256          1.198      1.218
+```
+
+Honest readings: (1) iteration counts scale O(n) as theory predicts
+(75→556 for 64→512); (2) V-cycle/FAS per-cycle time scales exactly
+O(N) (0.012 ms → 1.2 ms for 1024 → 65536 unknowns); (3) **ILU(0)
+factorization is the quadratic-cost outlier** — 15.6 s at 512² (naive
+no-fill sparse LU, O(nnz·n/2)≈O(n⁵/2) for the 2D stencil). ILU(0) is
+therefore recommended for n ≲ 128² (factor ≤ 56 ms); beyond that, use
+PCG+Jacobi (diagonal O(N)) or a direct/FAS path. A blocked /
+weighted-Jacobi-MG-preconditioned variant is the natural H4+
+candidate.
+
+## 8. Validation gates (per release)
 
 - `make all` — zero warnings (`-Wall -Wextra -Wpedantic`).
 - `make test` — full suite incl. `test_linalg` (14 suites, 827,421
   assertions), `test_rng` (7 tests, 395,456 assertions),
   `test_fft_f64` (3 tests, 4,632 assertions), `test_direct` (7 tests,
-  139 assertions) and the amalgamated single-header build.
+  139 assertions), `test_h4` (10 tests, 1,097 assertions incl. the
+  BiCGStab 40-step parity fixture) and the amalgamated single-header
+  build.
 - `make test-sanitizers` — ASan + UBSan + leak check, zero findings.
 - `make bench` — numbers appended to this file / `docs/benchmarks_sota.md`
   with machine + toolchain + commit.
