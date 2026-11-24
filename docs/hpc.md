@@ -337,12 +337,128 @@ price of arbitrary prime lengths. The next optimization (H3 work, only
 if the bars require it) is a cached-twiddle Bluestein; the current
 correctness-first design recomputes cos/sin per call.
 
-## 6. Validation gates (per release)
+## 6. Phase H3 — Direct Factorizations & Symmetric Eigensystem (2.2.0)
+
+`src/core/direct.c` — dense F64 direct solvers, single-thread, exact
+in the floating-point determinism class (fixed loop order, no
+reassociation beyond the kernel's own blocking).
+
+### 6.1 What ships
+
+| API | Notes |
+| --- | --- |
+| `rcre_linalg_lu_factor_f64` / `rcre_linalg_lu_solve_f64` | partial pivoting, packed LU (U upper, unit-L multipliers below), `P` out; solve = P applied to B, forward then backward substitution |
+| `rcre_linalg_solve_f64` | one-shot (copy, factor, solve) |
+| `rcre_linalg_cholesky_f64` | in-place, `lower` flag; dpotrf convention — the untouched triangle keeps the original A; -1 on non-positive pivot (semi-definite input) |
+| `rcre_linalg_qr_factor_f64` / `rcre_linalg_qr_q_f64` / `rcre_linalg_qr_lsolve_f64` | in-place R + scaled Householder vectors, `tau` out; explicit Q via `Q ← Q·H_k` (RIGHT multiplication, increasing k — the factorization applies reflectors from the left in increasing k, so Q = H₀…Hₖ₋₁); least squares via QᵀB then R⁻¹ |
+| `rcre_linalg_syev_f64` | symmetric eigensystem: Householder tridiagonalization (`sytrd_f64`, trailing 3-term HAH update, optional Q accumulation) + implicit QL (`steqr_f64`, Wilkinson shift from the trailing 2×2, 30n+10 sweep budget with shift fallback); eigenvalues ascending; V's columns are the eigenvectors (A·V = V·diag(w)) |
+
+### 6.2 The steqr design (and its cost)
+
+Each sweep computes the *exact* implicit similarity `T⁺ = QᵀTQ` where
+Q is the dense Givens product of the sweep (`M = (T−μI) = Q·R`,
+`mu` the Wilkinson shift):
+
+1. snapshot the sweep-start subdiagonal `esnap[i] = e[i]`;
+2. compute the Givens with the verified progression
+   `x = −s·c_prev·esnap[i] + c·(d[i+1] − μ)`, `c = x/ρ`, `s = z/ρ`;
+3. build the dense active-block Q (identity rows outside `[l, na)`);
+4. `B = QᵀT` (O(m²): T is tridiagonal — each B column is a 3-term
+   sum) then `T⁺ = B·Q` (one active-block GEMM, O(m³), m = na−l);
+5. eigenvectors: the running similarity S (initialized to the sytrd
+   similarity S₀, `T = S₀ᵀAS₀`) is updated `S ← S·Q` per sweep — the
+   Givens applied to the columns in ascending i. When T is finally
+   diagonal, **S is exactly the eigenvector matrix** (A·S = S·diag(w));
+   there is no separate eigenvector carrier and no final GEMM.
+
+The dense T⁺ costs O(n⁴) total in the worst case — that is the honest
+price of an exact-similarity QL (it is what makes the eigenvectors
+right without a second explicit-orthogonalizer pass). Measured:
+4,096×4,096 syev (values+vector) in 0.056 s on Apple M5 Max — the
+ Wilkinson shift deflates ~one element per sweep on well-conditioned
+inputs, so the active-block cost Σ 2m³ stays small. This path is not
+the large-n one (LAPACK uses the banded chase update, O(n³)); RCRE's
+correctness-first exact-similarity design is the right tool for
+n ≲ a few thousand and is documented as such.
+
+Subtle bugs found and fixed during the audit (all would have produced
+*orthogonal but wrong* eigenvectors, so the residual test is the
+keeper, not the orthogonality test):
+
+- **Q band-width**: the column-local quadratic forms
+  `(Qeᵢ)ᵀT(Qeⱼ)` are only valid when Q is banded of width 1 around the
+  diagonal; a product of k Givens has band width k, so the forms must
+  sum over the full column — caught when a single n=3 sweep preserved
+  trace but drifted det by 1.5e-3.
+- **S accumulation order**: `S ← S·Q` with Q = G_lᵀ…Gₙₐ₋₂ᵀ (G_lᵀ
+  leftmost) evaluates left-to-right — the Givens hit the columns in
+  *ascending* i. Descending application transposes the product and the
+  final S·Vt telescoped to the identity for n=2 while still passing
+  every eigenvalue check.
+- **Eigenvector carrier**: the tridiagonal-basis eigenvectors Vt
+  (Vt ← QᵀVt) initialized to I do *not* exist before the first sweep —
+  the running similarity S alone carries the answer, and S₀ (the
+  sytrd Q) must be its seed. A separate S·Vt product with S seeded to I
+  silently drops the tridiagonalization and returns Householder Qs
+  dressed as eigenvectors.
+- **LU pivot swap**: the pivot row swap must move the *entire* row
+  (columns 0..n−1), including the L multipliers of earlier columns;
+  swapping only from column k breaks P·A = L·U at n ≥ 3.
+- **sytrd**: tau = 2/(uᵀu) with u[0] = 1 *included* in uu (not
+  2/(1+uᵀu)); the stored A[k+1,k] must be reset to the scaled u[0] = 1;
+  the trailing block needs the 3-term HAH update
+  (A′ = A − τ(Wuᵀ + uWᵀ) + τ²(uᵀW)uuᵀ), not the 2-term LAPACK DSYR2K
+  form, because the stored vector is scaled.
+
+### 6.3 Conformance
+
+`tests/test_direct.c` — 7 tests, 139 assertions:
+
+- LU: factor + solve vs the naive reference for n = 2..8 (machine
+  exact), singular detection (zero pivot), solve residual;
+- Cholesky: in-place factor, `L·Lᵀ = A` from the lower factor only
+  (the upper triangle of the in-place matrix still holds A — the
+  dpotrf convention; the test transpose uses `(j >= i) ? L[j,i] : 0`),
+  SPD + solve residual;
+- QR: square and rectangular (24×12) — QᵀQ = I, R upper, Q·R = A,
+  least-squares residual vs the normal equations;
+- syev: known 2×2 (λ = 1,3; eigenvector (1,−1)/√2, column convention),
+  24×24 vs the cyclic-Jacobi oracle (eigenvalues relative 1e-9, residual
+  `‖AV − V·diag(w)‖∞ < 1e-10`, VᵀV = I to 1e-12), SPD sizes 8..128
+  (residual + ascending order + eigenvalues-only/vector paths agree).
+
+### 6.4 Measured bars (Apple M5 Max, Apple Clang 21, -O3, single-thread)
+
+`benchmarks/bench_h3.c` (`make bench_h3`), nominal ⅔n³ flops for the
+factorizations:
+
+| op | n = 512 | n = 1024 | n = 2048 | n = 4096 |
+| --- | --- | --- | --- | --- |
+| LU factor | 12.5 GF/s | 13.5 | 13.9 | 13.0 |
+| Cholesky | 6.2 GF/s | 5.1 | 4.2 | 4.1 |
+| QR factor (3-term, unblocked) | 0.4 GF/s | 0.3 | 0.2 | — |
+| QR explicit Q | 4.6 GF/s | 3.8 | 2.0 | — |
+| syev values (wall time) | <1 ms | <1 ms | 8 ms | 33 ms |
+| syev values+vector (wall time) | <1 ms | 2 ms | 11 ms | 56 ms |
+
+Honest reading: LU/Cholesky run at ~5–6× the unblocked F64 GEMM
+bar's reciprocal of peak — they are memory-bandwidth bound, not
+arithmetic bound (the updates stream n² trailing blocks). The unblocked
+3-term Householder QR is the known weak point (0.2–0.4 GF/s at
+2048): the three rank updates on the trailing block thrash the cache;
+a blocked 3-term (panel-buffered) version is the H4 candidate if the
+bars ever require it. The syev wall times are the meaningful figure —
+the nominal-⅔n³ flop count for an iterative eigen solver is
+misleading (the measured "GFLOP/s" there exceeds peak because the
+active-block GEMM does Σ 2m³ work, not ⅔n³).
+
+## 7. Validation gates (per release)
 
 - `make all` — zero warnings (`-Wall -Wextra -Wpedantic`).
 - `make test` — full suite incl. `test_linalg` (14 suites, 827,421
-  assertions), `test_rng` (7 tests, 395,456 assertions), `test_fft_f64`
-  (3 tests, 4,632 assertions) and the amalgamated single-header build.
+  assertions), `test_rng` (7 tests, 395,456 assertions),
+  `test_fft_f64` (3 tests, 4,632 assertions), `test_direct` (7 tests,
+  139 assertions) and the amalgamated single-header build.
 - `make test-sanitizers` — ASan + UBSan + leak check, zero findings.
 - `make bench` — numbers appended to this file / `docs/benchmarks_sota.md`
   with machine + toolchain + commit.

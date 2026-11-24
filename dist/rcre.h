@@ -1439,6 +1439,85 @@ RCRE_NODISCARD int rcre_fft_1d_f64(const double* in_re, const double* in_im,
                                    double* out_re, double* out_im,
                                    size_t n, int invert);
 
+/* ------------------- direct factorizations (H3, 2.2.0) ------------------ */
+
+/**
+ * @brief LU factorization with partial pivoting, F64 (H3, 2.2.0).
+ *
+ * A (n×n row-major, in/out) becomes the packed LU: U in the upper
+ * triangle, the unit multipliers of L below (L implicit, unit diagonal).
+ * piv[k] = row swapped with k at step k; applying the piv[k] row-swaps
+ * in increasing k order to a vector reproduces the row permutation P
+ * (A = P·L·U). 0 on success, -1 if exactly singular (zero pivot).
+ */
+RCRE_NODISCARD int rcre_linalg_lu_factor_f64(double* A, size_t lda, size_t n,
+                                             size_t* piv);
+/**
+ * @brief Solve A·X = B from a packed LU factor (getrs-class).
+ * B (n×nrhs row-major, in/out); the row permutation is applied to B,
+ * then the unit-lower forward solve and the upper backward solve.
+ */
+RCRE_NODISCARD int rcre_linalg_lu_solve_f64(const double* A, size_t lda,
+                                            const size_t* piv, size_t n,
+                                            double* B, size_t ldx, size_t nrhs);
+/**
+ * @brief One-shot dense solve A·X = B (A not modified; factor + solve).
+ * -1 if A is singular (B may be modified in that case).
+ */
+RCRE_NODISCARD int rcre_linalg_solve_f64(const double* A, size_t lda, size_t n,
+                                         double* B, size_t ldx, size_t nrhs);
+/**
+ * @brief In-place Cholesky factorization of an SPD matrix, F64 (H3).
+ * A (n×n row-major, in/out) -> L (lower = 1) or L^T (lower = 0) packed
+ * in the requested triangle including the diagonal.
+ * 0 on success, -1 if a pivot is <= 0 (not positive definite).
+ */
+RCRE_NODISCARD int rcre_linalg_cholesky_f64(double* A, size_t lda, size_t n,
+                                            int lower);
+/**
+ * @brief Solve A·X = B from a Cholesky factor (row-major, multi-RHS).
+ * F is the packed L (lower = 1) or L^T (lower = 0); B in/out.
+ */
+RCRE_NODISCARD int rcre_linalg_cholesky_solve_f64(const double* F, size_t lda,
+                                                  size_t n, double* B, size_t ldx,
+                                                  size_t nrhs, int lower);
+/**
+ * @brief In-place Householder QR, F64 (H3): A (m×n row-major, m >= n,
+ * in/out) -> R in the upper triangle; Householder vectors v_k (length
+ * m-k, scaled with v_k[0] implicit = 1) in A[k+1:m, k]; tau (length
+ * min(m,n), out) with H_k = I - tau_k·v_k·v_k^T. Q·R = A with
+ * Q = H_0 H_1 ... H_{n-1} (m×m; first n columns span range(A)).
+ */
+RCRE_NODISCARD int rcre_linalg_qr_factor_f64(double* A, size_t lda, size_t m,
+                                             size_t n, double* tau);
+/**
+ * @brief Explicit Q (m×m row-major out) from a packed QR factorization.
+ * Q = H_0 ... H_{kmax-1}; each H_k updates ALL columns (rows k..m-1).
+ */
+void rcre_linalg_qr_q_f64(const double* A, size_t lda, size_t m, size_t n,
+                          const double* tau, double* Q, size_t ldq);
+/**
+ * @brief Least squares min ||A·x - b|| per column of B via QR (H3).
+ * A already factored (qr_factor_f64, m >= n, nonsingular R).
+ * B (m×nrhs, in/out) becomes [x (rows 0..n-1); residual (rows n..m-1)].
+ */
+RCRE_NODISCARD int rcre_linalg_qr_lsolve_f64(const double* A, size_t lda,
+                                             size_t m, size_t n, const double* tau,
+                                             double* B, size_t ldx, size_t nrhs);
+/**
+ * @brief Symmetric eigendecomposition, F64 (H3, dsyev-class).
+ *
+ * A (n×n symmetric row-major, in/out — overwritten) -> w (n, out):
+ * eigenvalues in ASCENDING order; if compute_vectors != 0, V (n×n
+ * row-major, ldv, out): column j = unit eigenvector for w[j] (so
+ * A·V = V·diag(w), Q-orthogonal V). Householder tridiagonalization +
+ * Wilkinson-shift implicit QL. Deterministic. 0 on success, -1 on
+ * QL non-convergence (practically unreachable for well-scaled input).
+ */
+RCRE_NODISCARD int rcre_linalg_syev_f64(double* A, size_t lda, size_t n,
+                                        int compute_vectors, double* w,
+                                        double* V, size_t ldv);
+
 /* --------------------------- compensated reductions ---------------------- */
 
 /**
