@@ -84,6 +84,8 @@ static void test_f64_dot_axpy_scale_sum(void) {
             ASSERT_TRUE(fabs(yv[i] - ys[i]) <= 1e-14 * fmax(1.0, fabs(ys[i])));
 
         /* scale: x0.25 is exact (power of two) — both paths bit-identical */
+        memcpy(yv, y, n * sizeof(double));
+        memcpy(ys, y, n * sizeof(double));
         rcre_linalg_scale_f64(n, 0.25, yv);
         for (size_t i = 0; i < n; ++i) {
             ys[i] *= 0.25;

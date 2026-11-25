@@ -442,16 +442,10 @@ static void avx2_gemm64_microkernel_4x4(size_t K, double alpha,
     __m256d acc[4];
     for (size_t i = 0; i < 4; ++i) acc[i] = _mm256_loadu_pd(&C[i * ldc]);
     for (size_t k = 0; k < K; ++k) {
-        __m256d b0 = _mm256_loadu_pd(&B[k * ldb + 0]);
-        __m256d b1 = _mm256_loadu_pd(&B[k * ldb + 1]);
-        __m256d b2 = _mm256_loadu_pd(&B[k * ldb + 2]);
-        __m256d b3 = _mm256_loadu_pd(&B[k * ldb + 3]);
+        __m256d b = _mm256_loadu_pd(&B[k * ldb]);
         for (size_t i = 0; i < 4; ++i) {
-            const double a = A[i * lda + k] * alpha;
-            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b0, acc[i]);
-            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b1, acc[i]);
-            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b2, acc[i]);
-            acc[i] = _mm256_fmadd_pd(_mm256_set1_pd(a), b3, acc[i]);
+            __m256d a = _mm256_set1_pd(A[i * lda + k] * alpha);
+            acc[i] = _mm256_fmadd_pd(a, b, acc[i]);
         }
     }
     for (size_t i = 0; i < 4; ++i) _mm256_storeu_pd(&C[i * ldc], acc[i]);

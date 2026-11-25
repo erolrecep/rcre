@@ -164,24 +164,10 @@ static void avx512_gemm64_microkernel_8x8(size_t K, double alpha,
     __m512d acc[8];
     for (size_t i = 0; i < 8; ++i) acc[i] = _mm512_loadu_pd(&C[i * ldc]);
     for (size_t k = 0; k < K; ++k) {
-        __m512d b0 = _mm512_loadu_pd(&B[k * ldb + 0]);
-        __m512d b1 = _mm512_loadu_pd(&B[k * ldb + 1]);
-        __m512d b2 = _mm512_loadu_pd(&B[k * ldb + 2]);
-        __m512d b3 = _mm512_loadu_pd(&B[k * ldb + 3]);
-        __m512d b4 = _mm512_loadu_pd(&B[k * ldb + 4]);
-        __m512d b5 = _mm512_loadu_pd(&B[k * ldb + 5]);
-        __m512d b6 = _mm512_loadu_pd(&B[k * ldb + 6]);
-        __m512d b7 = _mm512_loadu_pd(&B[k * ldb + 7]);
+        __m512d b = _mm512_loadu_pd(&B[k * ldb]);
         for (size_t i = 0; i < 8; ++i) {
             __m512d a = _mm512_set1_pd(A[i * lda + k] * alpha);
-            acc[i] = _mm512_fmadd_pd(a, b0, acc[i]);
-            acc[i] = _mm512_fmadd_pd(a, b1, acc[i]);
-            acc[i] = _mm512_fmadd_pd(a, b2, acc[i]);
-            acc[i] = _mm512_fmadd_pd(a, b3, acc[i]);
-            acc[i] = _mm512_fmadd_pd(a, b4, acc[i]);
-            acc[i] = _mm512_fmadd_pd(a, b5, acc[i]);
-            acc[i] = _mm512_fmadd_pd(a, b6, acc[i]);
-            acc[i] = _mm512_fmadd_pd(a, b7, acc[i]);
+            acc[i] = _mm512_fmadd_pd(a, b, acc[i]);
         }
     }
     for (size_t i = 0; i < 8; ++i) _mm512_storeu_pd(&C[i * ldc], acc[i]);
