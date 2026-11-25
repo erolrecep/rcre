@@ -202,7 +202,7 @@ void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         for (size_t r = 0; r < 8; ++r) {
                             double acc = 0.0;
                             for (size_t k = kk; k < k_end; ++k)
-                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                                acc += (A[(i + r) * lda + k] * alpha) * B[k * ldb + j];
                             C[(i + r) * ldc + j] += acc;
                         }
                 }
@@ -210,7 +210,7 @@ void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                     for (size_t j = jj; j < j_end; ++j) {
                         double acc = 0.0;
                         for (size_t k = kk; k < k_end; ++k)
-                            acc += A[i * lda + k] * B[k * ldb + j];
+                            acc += (A[i * lda + k] * alpha) * B[k * ldb + j];
                         C[i * ldc + j] += acc;
                     }
             }

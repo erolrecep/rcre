@@ -7436,7 +7436,7 @@ void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         for (size_t r = 0; r < 8; ++r) {
                             double acc = 0.0;
                             for (size_t k = kk; k < k_end; ++k)
-                                acc += A[(i + r) * lda + k] * B[k * ldb + j];
+                                acc += (A[(i + r) * lda + k] * alpha) * B[k * ldb + j];
                             C[(i + r) * ldc + j] += acc;
                         }
                 }
@@ -7444,7 +7444,7 @@ void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                     for (size_t j = jj; j < j_end; ++j) {
                         double acc = 0.0;
                         for (size_t k = kk; k < k_end; ++k)
-                            acc += A[i * lda + k] * B[k * ldb + j];
+                            acc += (A[i * lda + k] * alpha) * B[k * ldb + j];
                         C[i * ldc + j] += acc;
                     }
             }
@@ -8127,28 +8127,7 @@ void rcre_hal_init(void) {
 #endif
 
 /* H0: AVX-512 is checked BEFORE AVX2 — an AVX-512 host gets 8-wide f64,
- * keeping the 4-wide AVX2 F32 cells (F32 512-bit kernels arrive in H2). */
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX512F__) || defined(__clang__) || defined(__GNUC__))
-    if (feats & RCRE_CPU_FEAT_AVX512F) {
-        rcre_hal.backend_name   = "x86 AVX-512F 512-bit";
-        rcre_hal.cpu_features   = feats;
-        rcre_hal.gemm_f32       = rcre_avx2_gemm_f32;
-        rcre_hal.dot_f32        = rcre_avx2_dot_f32;
-        rcre_hal.axpy_f32       = rcre_avx2_axpy_f32;
-        rcre_hal.rgb_to_gray_u8 = rcre_avx2_rgb_to_gray_u8;
-        rcre_hal.find_byte      = rcre_avx2_find_byte;
-        rcre_hal.count_byte     = rcre_avx2_count_byte;
-        rcre_hal.gemm_f64       = rcre_avx512_gemm_f64;
-        rcre_hal.dot_f64        = rcre_avx512_dot_f64;
-        rcre_hal.axpy_f64       = rcre_avx512_axpy_f64;
-        rcre_hal.gemv_f64       = rcre_avx512_gemv_f64;
-        rcre_hal.scale_f64      = rcre_avx512_scale_f64;
-        rcre_hal.sum_f64        = rcre_avx512_sum_f64;
-        atomic_store(&s_hal_initialized, true);
-        return;
-    }
-#endif
-
+ * keeping the 512-bit F32 cells. */
 #if (defined(__x86_64__) || defined(_M_X64)) && (defined(__AVX512F__) || defined(__clang__) || defined(__GNUC__))
     if (feats & RCRE_CPU_FEAT_AVX512F) {
         rcre_hal.backend_name   = "x86 AVX-512 512-bit";
@@ -8163,6 +8142,13 @@ void rcre_hal_init(void) {
         rcre_hal.rgb_to_gray_u8 = rcre_avx2_rgb_to_gray_u8;
         rcre_hal.find_byte      = rcre_avx2_find_byte;
         rcre_hal.count_byte     = rcre_avx2_count_byte;
+        /* H0: F64 cells */
+        rcre_hal.gemm_f64       = rcre_avx512_gemm_f64;
+        rcre_hal.dot_f64        = rcre_avx512_dot_f64;
+        rcre_hal.axpy_f64       = rcre_avx512_axpy_f64;
+        rcre_hal.gemv_f64       = rcre_avx512_gemv_f64;
+        rcre_hal.scale_f64      = rcre_avx512_scale_f64;
+        rcre_hal.sum_f64        = rcre_avx512_sum_f64;
         atomic_store(&s_hal_initialized, true);
         return;
     }
