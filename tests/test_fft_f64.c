@@ -160,6 +160,7 @@ static void test_fft_f64_against_direct_dft(void) {
              * at n ~ 1e8 (Bluestein); 1e-10 gate = 7.5x margin */
             ASSERT_TRUE(rt < 1e-10);
             free(ref_re); free(ref_im);
+            free(rt_re); free(rt_im);
         } else {
             /* large: check the n <= 4096 prefix is not exercised; use
              * Parseval + round-trip instead */
