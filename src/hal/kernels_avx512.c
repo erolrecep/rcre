@@ -162,16 +162,16 @@ static void avx512_gemm64_microkernel_8x8(size_t K, double alpha,
                               const double* B, size_t ldb,
                               double* C, size_t ldc) {
     __m512d acc[8];
-    for (size_t i = 0; i < 8; ++i) acc[i] = _mm512_load_pd(&C[i * ldc]);
+    for (size_t i = 0; i < 8; ++i) acc[i] = _mm512_loadu_pd(&C[i * ldc]);
     for (size_t k = 0; k < K; ++k) {
-        __m512d b0 = _mm512_load_pd(&B[k * ldb + 0]);
-        __m512d b1 = _mm512_load_pd(&B[k * ldb + 1]);
-        __m512d b2 = _mm512_load_pd(&B[k * ldb + 2]);
-        __m512d b3 = _mm512_load_pd(&B[k * ldb + 3]);
-        __m512d b4 = _mm512_load_pd(&B[k * ldb + 4]);
-        __m512d b5 = _mm512_load_pd(&B[k * ldb + 5]);
-        __m512d b6 = _mm512_load_pd(&B[k * ldb + 6]);
-        __m512d b7 = _mm512_load_pd(&B[k * ldb + 7]);
+        __m512d b0 = _mm512_loadu_pd(&B[k * ldb + 0]);
+        __m512d b1 = _mm512_loadu_pd(&B[k * ldb + 1]);
+        __m512d b2 = _mm512_loadu_pd(&B[k * ldb + 2]);
+        __m512d b3 = _mm512_loadu_pd(&B[k * ldb + 3]);
+        __m512d b4 = _mm512_loadu_pd(&B[k * ldb + 4]);
+        __m512d b5 = _mm512_loadu_pd(&B[k * ldb + 5]);
+        __m512d b6 = _mm512_loadu_pd(&B[k * ldb + 6]);
+        __m512d b7 = _mm512_loadu_pd(&B[k * ldb + 7]);
         for (size_t i = 0; i < 8; ++i) {
             __m512d a = _mm512_set1_pd(A[i * lda + k] * alpha);
             acc[i] = _mm512_fmadd_pd(a, b0, acc[i]);
@@ -184,7 +184,7 @@ static void avx512_gemm64_microkernel_8x8(size_t K, double alpha,
             acc[i] = _mm512_fmadd_pd(a, b7, acc[i]);
         }
     }
-    for (size_t i = 0; i < 8; ++i) _mm512_store_pd(&C[i * ldc], acc[i]);
+    for (size_t i = 0; i < 8; ++i) _mm512_storeu_pd(&C[i * ldc], acc[i]);
 }
 
 void rcre_avx512_gemm_f64(size_t M, size_t N, size_t K, double alpha,
@@ -236,9 +236,9 @@ double rcre_avx512_dot_f64(const double* x, const double* y, size_t n) {
     __m512d acc = _mm512_setzero_pd();
     size_t i = 0;
     for (; i + 8 <= n; i += 8)
-        acc = _mm512_fmadd_pd(_mm512_load_pd(&x[i]), _mm512_load_pd(&y[i]), acc);
+        acc = _mm512_fmadd_pd(_mm512_loadu_pd(&x[i]), _mm512_loadu_pd(&y[i]), acc);
     double t[8];
-    _mm512_store_pd(t, acc);
+    _mm512_storeu_pd(t, acc);
     double s = t[0];
     for (int k = 1; k < 8; ++k) s += t[k];
     for (; i < n; ++i) s += x[i] * y[i];
@@ -249,8 +249,8 @@ void rcre_avx512_axpy_f64(size_t n, double alpha, const double* x, double* y) {
     __m512d va = _mm512_set1_pd(alpha);
     size_t i = 0;
     for (; i + 8 <= n; i += 8)
-        _mm512_store_pd(&y[i], _mm512_fmadd_pd(va, _mm512_load_pd(&x[i]),
-                                               _mm512_load_pd(&y[i])));
+        _mm512_storeu_pd(&y[i], _mm512_fmadd_pd(va, _mm512_loadu_pd(&x[i]),
+                                                _mm512_loadu_pd(&y[i])));
     for (; i < n; ++i) y[i] += alpha * x[i];
 }
 
@@ -262,10 +262,10 @@ void rcre_avx512_gemv_f64(size_t M, size_t N, double alpha,
         const double* row = A + i * lda;
         size_t j = 0;
         for (; j + 8 <= N; j += 8)
-            acc = _mm512_fmadd_pd(_mm512_load_pd(&row[j]),
-                                  _mm512_load_pd(&x[j]), acc);
+            acc = _mm512_fmadd_pd(_mm512_loadu_pd(&row[j]),
+                                  _mm512_loadu_pd(&x[j]), acc);
         double t[8];
-        _mm512_store_pd(t, acc);
+        _mm512_storeu_pd(t, acc);
         double s = t[0];
         for (int k = 1; k < 8; ++k) s += t[k];
         for (; j < N; ++j) s += row[j] * x[j];
@@ -277,7 +277,7 @@ void rcre_avx512_scale_f64(size_t n, double alpha, double* x) {
     __m512d va = _mm512_set1_pd(alpha);
     size_t i = 0;
     for (; i + 8 <= n; i += 8)
-        _mm512_store_pd(&x[i], _mm512_mul_pd(_mm512_load_pd(&x[i]), va));
+        _mm512_storeu_pd(&x[i], _mm512_mul_pd(_mm512_loadu_pd(&x[i]), va));
     for (; i < n; ++i) x[i] *= alpha;
 }
 
@@ -285,9 +285,9 @@ double rcre_avx512_sum_f64(const double* x, size_t n) {
     __m512d acc = _mm512_setzero_pd();
     size_t i = 0;
     for (; i + 8 <= n; i += 8)
-        acc = _mm512_add_pd(acc, _mm512_load_pd(&x[i]));
+        acc = _mm512_add_pd(acc, _mm512_loadu_pd(&x[i]));
     double t[8];
-    _mm512_store_pd(t, acc);
+    _mm512_storeu_pd(t, acc);
     double s = t[0];
     for (int k = 1; k < 8; ++k) s += t[k];
     for (; i < n; ++i) s += x[i];
