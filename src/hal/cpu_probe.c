@@ -127,7 +127,7 @@ static void probe_cpu(void) {
 #if defined(__APPLE__)
     size_t len = sizeof(s_brand);
     if (sysctlbyname("machdep.cpu.brand_string", s_brand, &len, NULL, 0) != 0) {
-        strncpy(s_brand, "Apple Silicon", sizeof(s_brand) - 1);
+        (void)rcre_cstr_copy_bounded(s_brand, sizeof(s_brand), RCRE_STR("Apple Silicon"));
     }
 #elif (defined(__x86_64__) || defined(_M_X64) || defined(__i386__)) && !defined(_MSC_VER)
     /* x86 CPUID feature detection */
@@ -155,12 +155,12 @@ static void probe_cpu(void) {
         memcpy(s_brand, brand_regs, sizeof(brand_regs));
         s_brand[sizeof(s_brand) - 1] = '\0';
     } else {
-        strncpy(s_brand, "Generic x86 CPU", sizeof(s_brand) - 1);
+        (void)rcre_cstr_copy_bounded(s_brand, sizeof(s_brand), RCRE_STR("Generic x86 CPU"));
     }
 #elif defined(__EMSCRIPTEN__)
-    strncpy(s_brand, "WebAssembly Runtime", sizeof(s_brand) - 1);
+    (void)rcre_cstr_copy_bounded(s_brand, sizeof(s_brand), RCRE_STR("WebAssembly Runtime"));
 #else
-    strncpy(s_brand, "Generic Host CPU", sizeof(s_brand) - 1);
+    (void)rcre_cstr_copy_bounded(s_brand, sizeof(s_brand), RCRE_STR("Generic Host CPU"));
 #endif
 
     probe_topology();

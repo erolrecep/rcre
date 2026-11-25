@@ -31,7 +31,12 @@ RCRE_HalDispatch rcre_hal = {
     .scale_f32       = rcre_scalar_scale_f32,
     .scale_f64       = rcre_scalar_scale_f64,
     .sum_f32         = rcre_scalar_sum_f32,
-    .sum_f64         = rcre_scalar_sum_f64
+    .sum_f64         = rcre_scalar_sum_f64,
+    /* STR-REQ-05: SIMD string & UTF-8 kernels */
+    .utf8_validate   = rcre_scalar_utf8_validate,
+    .find_substr     = rcre_scalar_find_substr,
+    .ascii_to_lower  = rcre_scalar_ascii_to_lower,
+    .ascii_to_upper  = rcre_scalar_ascii_to_upper
 };
 
 static atomic_bool s_hal_initialized = false;
@@ -64,6 +69,11 @@ void rcre_hal_init(void) {
         rcre_hal.gemv_f64       = rcre_neon_gemv_f64;
         rcre_hal.scale_f64      = rcre_neon_scale_f64;
         rcre_hal.sum_f64        = rcre_neon_sum_f64;
+        /* STR-REQ-05: NEON string kernels */
+        rcre_hal.utf8_validate  = rcre_neon_utf8_validate;
+        rcre_hal.find_substr    = rcre_neon_find_substr;
+        rcre_hal.ascii_to_lower = rcre_neon_ascii_to_lower;
+        rcre_hal.ascii_to_upper = rcre_neon_ascii_to_upper;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -92,6 +102,11 @@ void rcre_hal_init(void) {
         rcre_hal.gemv_f64       = rcre_avx512_gemv_f64;
         rcre_hal.scale_f64      = rcre_avx512_scale_f64;
         rcre_hal.sum_f64        = rcre_avx512_sum_f64;
+        /* STR-REQ-05: AVX2 string kernels */
+        rcre_hal.utf8_validate  = rcre_avx2_utf8_validate;
+        rcre_hal.find_substr    = rcre_avx2_find_substr;
+        rcre_hal.ascii_to_lower = rcre_avx2_ascii_to_lower;
+        rcre_hal.ascii_to_upper = rcre_avx2_ascii_to_upper;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -118,6 +133,11 @@ void rcre_hal_init(void) {
         rcre_hal.gemv_f64       = rcre_avx2_gemv_f64;
         rcre_hal.scale_f64      = rcre_avx2_scale_f64;
         rcre_hal.sum_f64        = rcre_avx2_sum_f64;
+        /* STR-REQ-05: AVX2 string kernels */
+        rcre_hal.utf8_validate  = rcre_avx2_utf8_validate;
+        rcre_hal.find_substr    = rcre_avx2_find_substr;
+        rcre_hal.ascii_to_lower = rcre_avx2_ascii_to_lower;
+        rcre_hal.ascii_to_upper = rcre_avx2_ascii_to_upper;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -137,6 +157,10 @@ void rcre_hal_init(void) {
         rcre_hal.rgb_to_gray_u8 = rcre_wasm_rgb_to_gray_u8;
         rcre_hal.find_byte      = rcre_wasm_find_byte;
         rcre_hal.count_byte     = rcre_wasm_count_byte;
+        rcre_hal.utf8_validate  = rcre_wasm_utf8_validate;
+        rcre_hal.find_substr    = rcre_wasm_find_substr;
+        rcre_hal.ascii_to_lower = rcre_wasm_ascii_to_lower;
+        rcre_hal.ascii_to_upper = rcre_wasm_ascii_to_upper;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -154,6 +178,10 @@ void rcre_hal_init(void) {
     rcre_hal.rgb_to_gray_u8 = rcre_scalar_rgb_to_gray_u8;
     rcre_hal.find_byte      = rcre_scalar_find_byte;
     rcre_hal.count_byte     = rcre_scalar_count_byte;
+    rcre_hal.utf8_validate  = rcre_scalar_utf8_validate;
+    rcre_hal.find_substr    = rcre_scalar_find_substr;
+    rcre_hal.ascii_to_lower = rcre_scalar_ascii_to_lower;
+    rcre_hal.ascii_to_upper = rcre_scalar_ascii_to_upper;
     atomic_store(&s_hal_initialized, true);
 }
 

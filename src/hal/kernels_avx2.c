@@ -554,6 +554,175 @@ double rcre_avx2_sum_f64(const double* x, size_t n) {
     return s;
 }
 
+/* ========================================================================= */
+/* STR-REQ-05: x86 AVX2 256-bit String & UTF-8 Micro-Kernels                 */
+/* ========================================================================= */
+
+bool rcre_avx2_utf8_validate(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        return true;
+    }
+
+    const __m256i t_b1_hi = _mm256_setr_epi8(
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        (char)0x80, (char)0x80, (char)0x80, (char)0x80, 0x11, 0x01, 0x25, 0x49,
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        (char)0x80, (char)0x80, (char)0x80, (char)0x80, 0x11, 0x01, 0x25, 0x49
+    );
+    const __m256i t_b1_lo = _mm256_setr_epi8(
+        (char)0xD7, (char)0x93, (char)0x83, (char)0x83,
+        (char)0x8B, (char)0xCB, (char)0xCB, (char)0xCB,
+        (char)0xCB, (char)0xCB, (char)0xCB, (char)0xCB,
+        (char)0xCB, (char)0xEB, (char)0xCB, (char)0xCB,
+        (char)0xD7, (char)0x93, (char)0x83, (char)0x83,
+        (char)0x8B, (char)0xCB, (char)0xCB, (char)0xCB,
+        (char)0xCB, (char)0xCB, (char)0xCB, (char)0xCB,
+        (char)0xCB, (char)0xEB, (char)0xCB, (char)0xCB
+    );
+    const __m256i t_b2_hi = _mm256_setr_epi8(
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        (char)0xD6, (char)0x9E, (char)0xBA, (char)0xBA, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        (char)0xD6, (char)0x9E, (char)0xBA, (char)0xBA, 0x01, 0x01, 0x01, 0x01
+    );
+
+    const __m256i v_0f = _mm256_set1_epi8(0x0F);
+    const __m256i v_df = _mm256_set1_epi8((char)0xDF);
+    const __m256i v_ef = _mm256_set1_epi8((char)0xEF);
+    const __m256i v_80 = _mm256_set1_epi8((char)0x80);
+    const __m256i zero = _mm256_setzero_si256();
+
+    __m256i prev  = zero;
+    __m256i error = zero;
+    bool prev_ascii = true;
+
+    size_t i = 0;
+    while (i + 32U <= len) {
+        if (prev_ascii && i + 64U <= len) {
+            __m256i v0 = _mm256_loadu_si256((const __m256i*)&data[i +  0]);
+            __m256i v1 = _mm256_loadu_si256((const __m256i*)&data[i + 32]);
+            if (_mm256_movemask_epi8(_mm256_or_si256(v0, v1)) == 0) {
+                prev = zero;
+                i += 64U;
+                continue;
+            }
+        }
+
+        __m256i curr = _mm256_loadu_si256((const __m256i*)&data[i]);
+        if (prev_ascii && _mm256_movemask_epi8(curr) == 0) {
+            prev = zero;
+            i += 32U;
+            continue;
+        }
+
+        __m256i prev_hi = _mm256_permute2x128_si256(prev, curr, 0x21);
+        __m256i prev1 = _mm256_alignr_epi8(curr, prev_hi, 15);
+        __m256i prev2 = _mm256_alignr_epi8(curr, prev_hi, 14);
+        __m256i prev3 = _mm256_alignr_epi8(curr, prev_hi, 13);
+
+        __m256i p1_hi = _mm256_and_si256(_mm256_srli_epi16(prev1, 4), v_0f);
+        __m256i p1_lo = _mm256_and_si256(prev1, v_0f);
+        __m256i c_hi  = _mm256_and_si256(_mm256_srli_epi16(curr, 4), v_0f);
+
+        __m256i e1 = _mm256_shuffle_epi8(t_b1_hi, p1_hi);
+        __m256i e2 = _mm256_shuffle_epi8(t_b1_lo, p1_lo);
+        __m256i e3 = _mm256_shuffle_epi8(t_b2_hi, c_hi);
+        __m256i err = _mm256_and_si256(_mm256_and_si256(e1, e2), e3);
+
+        __m256i is_23 = _mm256_or_si256(_mm256_subs_epu8(prev2, v_df),
+                                        _mm256_subs_epu8(prev3, v_ef));
+        __m256i must23 = _mm256_andnot_si256(_mm256_cmpeq_epi8(is_23, zero), v_80);
+        err = _mm256_xor_si256(err, must23);
+        error = _mm256_or_si256(error, err);
+
+        prev = curr;
+        prev_ascii = (data[i + 31U] < 0xC0U) && (data[i + 30U] < 0xE0U) && (data[i + 29U] < 0xF0U);
+        i += 32U;
+    }
+
+    if (!_mm256_testz_si256(error, error)) {
+        return false;
+    }
+
+    if (!prev_ascii && i >= 32U) {
+        if (data[i - 1U] >= 0xC0U)      i -= 1U;
+        else if (data[i - 2U] >= 0xE0U) i -= 2U;
+        else if (data[i - 3U] >= 0xF0U) i -= 3U;
+    }
+    return rcre_scalar_utf8_validate(data + i, len - i);
+}
+
+size_t rcre_avx2_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return RCRE_NPOS;
+    if (needle_len == 1U) {
+        return rcre_avx2_find_byte(hay, hay_len, needle[0]);
+    }
+
+    const __m256i vfirst = _mm256_set1_epi8((char)needle[0]);
+    const __m256i vlast  = _mm256_set1_epi8((char)needle[needle_len - 1U]);
+    size_t i = 0;
+
+    for (; i + 32U + needle_len - 1U <= hay_len; i += 32U) {
+        __m256i h0 = _mm256_loadu_si256((const __m256i*)&hay[i]);
+        __m256i h1 = _mm256_loadu_si256((const __m256i*)&hay[i + needle_len - 1U]);
+        __m256i cmp = _mm256_and_si256(_mm256_cmpeq_epi8(h0, vfirst),
+                                       _mm256_cmpeq_epi8(h1, vlast));
+        uint32_t mask = (uint32_t)_mm256_movemask_epi8(cmp);
+        while (mask != 0) {
+            size_t lane = (size_t)__builtin_ctz(mask);
+            if (needle_len == 2U || memcmp(hay + i + lane + 1U, needle + 1U, needle_len - 2U) == 0) {
+                return i + lane;
+            }
+            mask &= mask - 1U;
+        }
+    }
+
+    size_t tail = rcre_scalar_find_substr(hay + i, hay_len - i, needle, needle_len);
+    return (tail == RCRE_NPOS) ? RCRE_NPOS : (i + tail);
+}
+
+void rcre_avx2_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const __m256i vA   = _mm256_set1_epi8('A');
+    const __m256i v25  = _mm256_set1_epi8(25);
+    const __m256i v20  = _mm256_set1_epi8(0x20);
+    const __m256i zero = _mm256_setzero_si256();
+    size_t i = 0;
+
+    for (; i + 32U <= len; i += 32U) {
+        __m256i s = _mm256_loadu_si256((const __m256i*)&src[i]);
+        __m256i gt = _mm256_subs_epu8(_mm256_sub_epi8(s, vA), v25);
+        __m256i m = _mm256_cmpeq_epi8(gt, zero);
+        _mm256_storeu_si256((__m256i*)&dst[i], _mm256_or_si256(s, _mm256_and_si256(m, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'A') <= 25U) ? (uint8_t)(c | 0x20U) : c;
+    }
+}
+
+void rcre_avx2_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const __m256i va   = _mm256_set1_epi8('a');
+    const __m256i v25  = _mm256_set1_epi8(25);
+    const __m256i v20  = _mm256_set1_epi8(0x20);
+    const __m256i zero = _mm256_setzero_si256();
+    size_t i = 0;
+
+    for (; i + 32U <= len; i += 32U) {
+        __m256i s = _mm256_loadu_si256((const __m256i*)&src[i]);
+        __m256i gt = _mm256_subs_epu8(_mm256_sub_epi8(s, va), v25);
+        __m256i m = _mm256_cmpeq_epi8(gt, zero);
+        _mm256_storeu_si256((__m256i*)&dst[i], _mm256_xor_si256(s, _mm256_and_si256(m, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'a') <= 25U) ? (uint8_t)(c & (uint8_t)~0x20U) : c;
+    }
+}
+
 #if defined(RCRE_NEED_POP_AVX2)
   #if RCRE_NEED_POP_AVX2 == 2
     #pragma clang attribute pop

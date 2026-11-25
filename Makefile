@@ -34,6 +34,7 @@ endif
 
 SRCS = src/core/arena.c \
        src/core/slice.c \
+       src/core/str.c \
        src/core/tensor.c \
        src/core/adapt.c \
        src/core/threadpool.c \
@@ -98,7 +99,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_slice test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_emeans test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse test_io test_df test_stat test_metric test_sota test_linalg test_rng test_fft_f64 test_direct test_h4
+TESTS = test_arena test_slice test_str test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_emeans test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse test_io test_df test_stat test_metric test_sota test_linalg test_rng test_fft_f64 test_direct test_h4
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -119,7 +120,7 @@ all: $(LIB) $(DYLIB) $(AMALGAMATED_HEADER) $(EXAMPLE_BINS)
 
 dist: $(AMALGAMATED_HEADER)
 
-$(AMALGAMATED_HEADER): $(SRCS) include/rcre.h scripts/amalgamate.py
+$(AMALGAMATED_HEADER): $(SRCS) include/rcre.h include/rcre_str.h scripts/amalgamate.py
 	@mkdir -p dist
 	python3 scripts/amalgamate.py
 
@@ -133,7 +134,7 @@ $(DYLIB): $(ALL_OBJS)
 	$(CC) -shared $(CFLAGS) $^ $(CAM_LDFLAGS) -lm -lpthread -o $@
 	@echo "✅ Built $@"
 
-$(OBJS): include/rcre.h
+$(OBJS): include/rcre.h include/rcre_str.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -379,6 +380,13 @@ bench: bin/bench_hal bin/bench_linalg bin/bench_rng bin/bench_h2 bin/bench_h3 bi
 bench_io: bin/bench_io
 	@bin/bench_io
 
+bin/bench_str: benchmarks/bench_str.c $(LIB)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $< $(LIB) -lm -lpthread -o $@
+
+bench_str: bin/bench_str
+	@bin/bench_str
+
 bench_roofline: bin/bench_roofline
 	@bin/bench_roofline
 
@@ -387,6 +395,8 @@ test-fuzz: $(LIB)
 	@echo "🧪 Running Deterministic Fuzz Regression Harness (ASan+UBSan)..."
 	$(CC) $(SANITIZER_FLAGS) -DFUZZ_STANDALONE $(SRCS) tests/fuzz/fuzz_io.c -lm -lpthread -o bin/fuzz_io_standalone
 	@bin/fuzz_io_standalone
+	$(CC) $(SANITIZER_FLAGS) -DFUZZ_STANDALONE $(SRCS) tests/fuzz/fuzz_str.c -lm -lpthread -o bin/fuzz_str_standalone
+	@bin/fuzz_str_standalone
 
 # =============================================================================
 # Profiling & Telemetry (rcre_prof) — CI threshold gate + trace export
@@ -418,6 +428,7 @@ test: $(LIB) $(AMALGAMATED_HEADER) $(TEST_BINS)
 	@echo "🚀 Running RCRE Full Unit Test Suite (Core, Camera & Amalgamated)..."
 	@bin/test_arena
 	@bin/test_slice
+	@bin/test_str
 	@bin/test_tensor_strides
 	@bin/test_adapt_spec
 	@bin/test_threadpool
@@ -465,6 +476,8 @@ test-sanitizers: $(AMALGAMATED_HEADER)
 	@bin/test_arena_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_slice.c -lm -lpthread -o bin/test_slice_asan
 	@bin/test_slice_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_str.c -lm -lpthread -o bin/test_str_asan
+	@bin/test_str_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_tensor_strides.c -lm -lpthread -o bin/test_tensor_strides_asan
 	@bin/test_tensor_strides_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_adapt_spec.c -lm -lpthread -o bin/test_adapt_spec_asan

@@ -1236,6 +1236,12 @@ typedef size_t (*rcre_find_byte_fn)(const uint8_t* hay, size_t len, uint8_t need
 
 typedef size_t (*rcre_count_byte_fn)(const uint8_t* hay, size_t len, uint8_t needle);
 
+/* STR-REQ-05: SIMD-accelerated string & UTF-8 micro-kernels */
+typedef bool (*rcre_utf8_validate_fn)(const uint8_t* data, size_t len);
+typedef size_t (*rcre_find_substr_fn)(const uint8_t* hay, size_t hay_len,
+                                      const uint8_t* needle, size_t needle_len);
+typedef void (*rcre_ascii_case_fn)(const uint8_t* src, uint8_t* dst, size_t len);
+
 typedef struct RCRE_CpuTopology {
     uint32_t logical_cores;         /* Host total online logical processors            */
     uint32_t perf_cores;            /* Asymmetric Performance (P) cores (Apple/hybrid) */
@@ -1267,6 +1273,11 @@ typedef struct RCRE_HalDispatch {
     rcre_scale_f64_fn      scale_f64;
     rcre_sum_f32_fn        sum_f32;
     rcre_sum_f64_fn        sum_f64;
+    /* STR-REQ-05: SIMD string & UTF-8 kernels */
+    rcre_utf8_validate_fn  utf8_validate;
+    rcre_find_substr_fn    find_substr;
+    rcre_ascii_case_fn     ascii_to_lower;
+    rcre_ascii_case_fn     ascii_to_upper;
 } RCRE_HalDispatch;
 
 extern RCRE_HalDispatch rcre_hal;
@@ -1922,6 +1933,13 @@ void rcre_qrng_sobol_point(RCRE_QRNG* q, double* out);
 void rcre_qrng_halton_at(uint64_t n, int k, double* out);
 void rcre_qrng_halton_init(RCRE_QRNG* q, int k);
 void rcre_qrng_halton_point(RCRE_QRNG* q, double* out);
+
+/* ========================================================================= */
+/* Safe, Zero-Malloc, SIMD-Accelerated C23 String Library (rcre_str)         */
+/* ========================================================================= */
+#ifndef RCRE_NO_STR
+#include "rcre_str.h"
+#endif
 
 /* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */

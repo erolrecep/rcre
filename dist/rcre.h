@@ -1241,6 +1241,12 @@ typedef size_t (*rcre_find_byte_fn)(const uint8_t* hay, size_t len, uint8_t need
 
 typedef size_t (*rcre_count_byte_fn)(const uint8_t* hay, size_t len, uint8_t needle);
 
+/* STR-REQ-05: SIMD-accelerated string & UTF-8 micro-kernels */
+typedef bool (*rcre_utf8_validate_fn)(const uint8_t* data, size_t len);
+typedef size_t (*rcre_find_substr_fn)(const uint8_t* hay, size_t hay_len,
+                                      const uint8_t* needle, size_t needle_len);
+typedef void (*rcre_ascii_case_fn)(const uint8_t* src, uint8_t* dst, size_t len);
+
 typedef struct RCRE_CpuTopology {
     uint32_t logical_cores;         /* Host total online logical processors            */
     uint32_t perf_cores;            /* Asymmetric Performance (P) cores (Apple/hybrid) */
@@ -1272,6 +1278,11 @@ typedef struct RCRE_HalDispatch {
     rcre_scale_f64_fn      scale_f64;
     rcre_sum_f32_fn        sum_f32;
     rcre_sum_f64_fn        sum_f64;
+    /* STR-REQ-05: SIMD string & UTF-8 kernels */
+    rcre_utf8_validate_fn  utf8_validate;
+    rcre_find_substr_fn    find_substr;
+    rcre_ascii_case_fn     ascii_to_lower;
+    rcre_ascii_case_fn     ascii_to_upper;
 } RCRE_HalDispatch;
 
 extern RCRE_HalDispatch rcre_hal;
@@ -1927,6 +1938,301 @@ void rcre_qrng_sobol_point(RCRE_QRNG* q, double* out);
 void rcre_qrng_halton_at(uint64_t n, int k, double* out);
 void rcre_qrng_halton_init(RCRE_QRNG* q, int k);
 void rcre_qrng_halton_point(RCRE_QRNG* q, double* out);
+
+/* ========================================================================= */
+/* Safe, Zero-Malloc, SIMD-Accelerated C23 String Library (rcre_str)         */
+/* ========================================================================= */
+#ifndef RCRE_NO_STR
+/**
+ * @file rcre_str.h
+ * @brief RCRE Safe, Zero-Malloc, SIMD-Accelerated C23 String Library
+ *
+ * Satisfies STR-REQ-01 through STR-REQ-06:
+ *   - STR-REQ-01: Length-prefixed zero-copy views (RCRE_Slice / RCRE_StrView)
+ *                 and compile-time literal macros (zero strlen on literals).
+ *   - STR-REQ-02: Fixed-capacity stack/struct bounded buffer (RCRE_StrBuf) —
+ *                 the direct, always-NUL-terminated, UTF-8-safe replacement
+ *                 for strcpy / strncpy / strlcpy / sprintf.
+ *   - STR-REQ-03: Rich slice comparison, search, trimming, pull-based splitting
+ *                 (replaces strtok), strict numeric parsing, and freestanding
+ *                 arena-backed RCRE_StrBuilder formatting & escaping.
+ *   - STR-REQ-04: Strict RFC 3629 UTF-8 validation, decoding, encoding,
+ *                 counting, and codepoint-boundary-safe truncation.
+ *   - STR-REQ-05: Dynamic HAL SIMD acceleration (utf8_validate, find_substr,
+ *                 ascii_to_lower, ascii_to_upper across NEON/AVX2/WASM/Scalar).
+ *   - STR-REQ-06: Arena-backed string interning pool (RCRE_StrPool) and safe
+ *                 path manipulation (rcre_path_*).
+ *
+ * Architectural guarantees:
+ *   - Zero malloc/calloc/realloc/free anywhere in this module.
+ *   - Pure, re-entrant, lock-free kernels safe for RCRE_ThreadPool slabs.
+ *   - Compiles cleanly under -DRCRE_FREESTANDING (no <stdio.h> or <stdlib.h>).
+ *   - Opt-in compile-time poisoning of legacy unsafe <string.h> functions via
+ *     #define RCRE_BAN_UNSAFE_CSTR before including this header.
+ */
+
+#ifndef RCRE_STR_H
+#define RCRE_STR_H
+
+#include <stdarg.h>
+#include <limits.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Ergonomic Types & C23 Compile-Time Macros (STR-REQ-01)                 */
+/* ========================================================================= */
+
+/** Semantic alias for read-only non-owning string views (identical ABI to RCRE_Slice). */
+typedef RCRE_Slice RCRE_StrView;
+
+/**
+ * @brief Constructs a zero-cost RCRE_Slice from a C string literal at compile time.
+ *        Zero strlen() overhead; empty literal "" yields rcre_slice_empty().
+ */
+#define RCRE_STR(lit)                                                        \
+    ((RCRE_Slice){                                                           \
+        .data = (sizeof(lit) > 1U) ? (const uint8_t*)(lit) : nullptr,        \
+        .len  = sizeof(lit) - 1U                                             \
+    })
+
+/**
+ * @brief printf-family format specifier & argument pair for non-NUL slices.
+ *        Example: printf("key=" RCRE_STR_FMT "\n", RCRE_STR_ARG(slice));
+ */
+#define RCRE_STR_FMT "%.*s"
+#define RCRE_STR_ARG(s)                                                      \
+    (int)((s).len > (size_t)INT_MAX ? (size_t)INT_MAX : (s).len),            \
+    ((s).data ? (const char*)(s).data : "")
+
+/* ========================================================================= */
+/* 2. Fixed-Capacity Stack/Struct Bounded Buffer (STR-REQ-02)                */
+/*    Direct replacement for strcpy / strncpy / strlcpy / snprintf.          */
+/* ========================================================================= */
+
+typedef struct RCRE_StrBuf {
+    uint8_t* data;      /* Caller-owned backing storage                      */
+    size_t   len;       /* Active byte length (strictly < cap when cap > 0)  */
+    size_t   cap;       /* Total capacity in bytes including trailing NUL    */
+    bool     truncated; /* Sticky flag: true if any write exceeded capacity  */
+} RCRE_StrBuf;
+
+/** Wraps a fixed-size char/uint8_t array into an initialized RCRE_StrBuf. */
+#define RCRE_STRBUF_WRAP(arr) rcre_strbuf_init((arr), sizeof(arr))
+
+/** Declares a stack-allocated backing buffer and its RCRE_StrBuf wrapper. */
+#define RCRE_STRBUF_STACK(name, N)                                           \
+    uint8_t name##_rcre_storage_[(N)];                                       \
+    RCRE_StrBuf name = rcre_strbuf_init(name##_rcre_storage_, sizeof(name##_rcre_storage_))
+
+RCRE_NODISCARD RCRE_StrBuf rcre_strbuf_init(void* backing, size_t cap);
+void rcre_strbuf_reset(RCRE_StrBuf* sb);
+
+RCRE_NODISCARD bool rcre_strbuf_copy(RCRE_StrBuf* sb, RCRE_Slice src);
+RCRE_NODISCARD bool rcre_strbuf_copy_cstr(RCRE_StrBuf* sb, const char* cstr);
+RCRE_NODISCARD bool rcre_strbuf_copy_utf8(RCRE_StrBuf* sb, RCRE_Slice src);
+
+RCRE_NODISCARD bool rcre_strbuf_append(RCRE_StrBuf* sb, RCRE_Slice src);
+RCRE_NODISCARD bool rcre_strbuf_append_cstr(RCRE_StrBuf* sb, const char* cstr);
+RCRE_NODISCARD bool rcre_strbuf_append_utf8(RCRE_StrBuf* sb, RCRE_Slice src);
+RCRE_NODISCARD bool rcre_strbuf_append_byte(RCRE_StrBuf* sb, uint8_t b);
+RCRE_NODISCARD bool rcre_strbuf_append_cp(RCRE_StrBuf* sb, uint32_t cp);
+RCRE_NODISCARD bool rcre_strbuf_append_u64(RCRE_StrBuf* sb, uint64_t val);
+RCRE_NODISCARD bool rcre_strbuf_append_i64(RCRE_StrBuf* sb, int64_t val);
+RCRE_NODISCARD bool rcre_strbuf_append_hex(RCRE_StrBuf* sb, uint64_t val, bool uppercase);
+RCRE_NODISCARD bool rcre_strbuf_append_f64(RCRE_StrBuf* sb, double val, int precision);
+RCRE_NODISCARD bool rcre_strbuf_vfmt(RCRE_StrBuf* sb, const char* fmt, va_list ap);
+RCRE_NODISCARD bool rcre_strbuf_fmt(RCRE_StrBuf* sb, const char* fmt, ...);
+
+RCRE_NODISCARD RCRE_Slice rcre_strbuf_as_slice(const RCRE_StrBuf* sb);
+RCRE_NODISCARD const char* rcre_strbuf_cstr(const RCRE_StrBuf* sb);
+
+/**
+ * @brief One-call UTF-8-safe bounded copy into a legacy char[N] struct field.
+ *        Always NUL-terminates when dst && dst_cap > 0; never reads past src.len;
+ *        never shears multi-byte UTF-8 codepoints. Returns false if truncated or invalid.
+ */
+RCRE_NODISCARD bool rcre_cstr_copy_bounded(char* dst, size_t dst_cap, RCRE_Slice src);
+
+/* ========================================================================= */
+/* 3. Expanded Zero-Copy Slice Operations & Pull Iterators (STR-REQ-03)      */
+/* ========================================================================= */
+
+typedef struct RCRE_SplitIter {
+    RCRE_Slice rest;
+    RCRE_Slice delim;
+    uint8_t    delim_byte;
+    bool       use_byte;
+    bool       done;
+} RCRE_SplitIter;
+
+/* Comparison & Hashing */
+RCRE_NODISCARD int rcre_slice_cmp(RCRE_Slice a, RCRE_Slice b);
+RCRE_NODISCARD bool rcre_slice_eq_ascii_ci(RCRE_Slice a, RCRE_Slice b);
+RCRE_NODISCARD int rcre_slice_cmp_ascii_ci(RCRE_Slice a, RCRE_Slice b);
+RCRE_NODISCARD uint64_t rcre_slice_hash64(RCRE_Slice s);
+RCRE_NODISCARD uint64_t rcre_slice_hash64_seeded(RCRE_Slice s, uint64_t seed);
+
+/* SIMD-Accelerated Substring & Charset Search */
+RCRE_NODISCARD size_t rcre_slice_find(RCRE_Slice hay, RCRE_Slice needle);
+RCRE_NODISCARD size_t rcre_slice_rfind(RCRE_Slice hay, RCRE_Slice needle);
+RCRE_NODISCARD bool rcre_slice_contains(RCRE_Slice hay, RCRE_Slice needle);
+RCRE_NODISCARD size_t rcre_slice_find_any_byte(RCRE_Slice s, RCRE_Slice charset);
+RCRE_NODISCARD size_t rcre_slice_span_bytes(RCRE_Slice s, RCRE_Slice charset);
+
+/* Trimming & Prefix/Suffix Stripping */
+RCRE_NODISCARD RCRE_Slice rcre_slice_trim_left_ascii(RCRE_Slice s);
+RCRE_NODISCARD RCRE_Slice rcre_slice_trim_right_ascii(RCRE_Slice s);
+RCRE_NODISCARD RCRE_Slice rcre_slice_trim_chars(RCRE_Slice s, RCRE_Slice charset);
+RCRE_NODISCARD RCRE_Slice rcre_slice_strip_prefix(RCRE_Slice s, RCRE_Slice prefix, bool* stripped);
+RCRE_NODISCARD RCRE_Slice rcre_slice_strip_suffix(RCRE_Slice s, RCRE_Slice suffix, bool* stripped);
+
+/* Zero-Copy Re-Entrant Splitting (replaces strtok) */
+RCRE_NODISCARD RCRE_SplitIter rcre_split_byte_init(RCRE_Slice s, uint8_t delim);
+RCRE_NODISCARD RCRE_SplitIter rcre_split_slice_init(RCRE_Slice s, RCRE_Slice delim);
+RCRE_NODISCARD bool rcre_split_next(RCRE_SplitIter* it, RCRE_Slice* out_token);
+RCRE_NODISCARD bool rcre_split_line_next(RCRE_Slice* cursor, RCRE_Slice* out_line);
+
+/* Strict Zero-Allocation Parsers (freestanding, overflow-checked) */
+RCRE_NODISCARD bool rcre_slice_parse_hex_u64(RCRE_Slice s, uint64_t* out_val);
+RCRE_NODISCARD bool rcre_slice_parse_bool(RCRE_Slice s, bool* out_val);
+RCRE_NODISCARD bool rcre_slice_parse_f64(RCRE_Slice s, double* out_val);
+
+/* ========================================================================= */
+/* 4. Expanded Arena String Builder & Transforms (STR-REQ-03)                */
+/* ========================================================================= */
+
+void rcre_sb_reset(RCRE_StrBuilder* sb);
+bool rcre_sb_append_hex(RCRE_StrBuilder* sb, uint64_t val, bool uppercase);
+bool rcre_sb_append_f64(RCRE_StrBuilder* sb, double val, int precision);
+bool rcre_sb_append_cp(RCRE_StrBuilder* sb, uint32_t cp);
+bool rcre_sb_append_repeat(RCRE_StrBuilder* sb, RCRE_Slice unit, size_t count);
+bool rcre_sb_append_vfmt(RCRE_StrBuilder* sb, const char* fmt, va_list ap);
+bool rcre_sb_append_fmt(RCRE_StrBuilder* sb, const char* fmt, ...);
+bool rcre_sb_append_escape_json(RCRE_StrBuilder* sb, RCRE_Slice s);
+bool rcre_sb_append_escape_csv(RCRE_StrBuilder* sb, RCRE_Slice s, uint8_t delim);
+
+/* Arena-backed functional transforms (always NUL-terminated at data[len]) */
+RCRE_NODISCARD RCRE_Slice rcre_str_dup(RCRE_Arena* arena, RCRE_Slice s);
+RCRE_NODISCARD RCRE_Slice rcre_str_concat(RCRE_Arena* arena, RCRE_Slice a, RCRE_Slice b);
+RCRE_NODISCARD RCRE_Slice rcre_str_join(RCRE_Arena* arena, const RCRE_Slice* parts, size_t count, RCRE_Slice sep);
+RCRE_NODISCARD RCRE_Slice rcre_str_replace_all(RCRE_Arena* arena, RCRE_Slice s, RCRE_Slice old_sub, RCRE_Slice new_sub);
+RCRE_NODISCARD RCRE_Slice rcre_str_to_lower_ascii(RCRE_Arena* arena, RCRE_Slice s);
+RCRE_NODISCARD RCRE_Slice rcre_str_to_upper_ascii(RCRE_Arena* arena, RCRE_Slice s);
+RCRE_NODISCARD RCRE_Slice rcre_str_fmt(RCRE_Arena* arena, const char* fmt, ...);
+
+/* ========================================================================= */
+/* 5. Strict RFC 3629 UTF-8 Layer (STR-REQ-04)                               */
+/* ========================================================================= */
+
+#define RCRE_UTF8_REPLACEMENT_CP 0xFFFDu
+
+/**
+ * @brief Validates strict RFC 3629 UTF-8 (rejects overlongs, UTF-16 surrogates,
+ *        codepoints > U+10FFFF, and truncated sequences).
+ *        Uses rcre_hal.utf8_validate SIMD fast path. If invalid and
+ *        out_err_offset != nullptr, writes the exact failing byte index.
+ */
+RCRE_NODISCARD bool rcre_utf8_validate(RCRE_Slice s, size_t* out_err_offset);
+RCRE_NODISCARD bool rcre_utf8_is_ascii(RCRE_Slice s);
+
+/** Returns codepoint count, or RCRE_NPOS if s contains invalid UTF-8. */
+RCRE_NODISCARD size_t rcre_utf8_count(RCRE_Slice s);
+
+/**
+ * @brief Decodes next UTF-8 codepoint from *cursor and advances *cursor.
+ * @return 1..4 (bytes consumed) on valid codepoint, 0 on empty cursor,
+ *         -1 on invalid UTF-8 (leaves cursor untouched; *out_cp = 0xFFFD).
+ */
+RCRE_NODISCARD int rcre_utf8_decode_next(RCRE_Slice* cursor, uint32_t* out_cp);
+
+/**
+ * @brief Decodes last UTF-8 codepoint from *cursor and shrinks cursor->len.
+ * @return 1..4 (bytes consumed) on valid codepoint, 0 on empty cursor,
+ *         -1 on invalid UTF-8 (leaves cursor untouched; *out_cp = 0xFFFD).
+ */
+RCRE_NODISCARD int rcre_utf8_decode_prev(RCRE_Slice* cursor, uint32_t* out_cp);
+
+/** Encodes Unicode scalar value cp into out[4]. Returns 1..4, or 0 if invalid. */
+RCRE_NODISCARD size_t rcre_utf8_encode(uint32_t cp, uint8_t out[4]);
+
+/** Returns longest valid UTF-8 prefix of s whose byte length <= max_bytes. */
+RCRE_NODISCARD RCRE_Slice rcre_utf8_truncate_bytes(RCRE_Slice s, size_t max_bytes);
+
+/** Extracts [start_cp, start_cp + count_cp) codepoints as a zero-copy slice. */
+RCRE_NODISCARD RCRE_Slice rcre_utf8_sub_codepoints(RCRE_Slice s, size_t start_cp, size_t count_cp);
+
+/* ========================================================================= */
+/* 6. Arena String Interning Pool (STR-REQ-06)                               */
+/* ========================================================================= */
+
+typedef uint32_t RCRE_StrId;
+#define RCRE_STR_ID_INVALID ((RCRE_StrId)0xFFFFFFFFu)
+
+typedef struct RCRE_StrPoolEntry {
+    uint64_t   hash;
+    RCRE_Slice slice;
+    RCRE_StrId id;
+} RCRE_StrPoolEntry;
+
+typedef struct RCRE_StrPool {
+    RCRE_Arena*        arena;
+    RCRE_StrPoolEntry* slots;    /* Power-of-two open-addressed hash table */
+    size_t             slot_cap;
+    RCRE_Slice*        by_id;    /* Dense id -> interned slice table       */
+    size_t             id_cap;
+    size_t             count;
+    uint64_t           seed;
+} RCRE_StrPool;
+
+RCRE_NODISCARD int rcre_strpool_init(RCRE_StrPool* pool, RCRE_Arena* arena, size_t initial_cap);
+RCRE_NODISCARD RCRE_StrId rcre_strpool_intern(RCRE_StrPool* pool, RCRE_Slice s);
+RCRE_NODISCARD RCRE_StrId rcre_strpool_find(const RCRE_StrPool* pool, RCRE_Slice s);
+RCRE_NODISCARD RCRE_Slice rcre_strpool_get(const RCRE_StrPool* pool, RCRE_StrId id);
+RCRE_NODISCARD const char* rcre_strpool_cstr(const RCRE_StrPool* pool, RCRE_StrId id);
+RCRE_NODISCARD size_t rcre_strpool_count(const RCRE_StrPool* pool);
+
+/* ========================================================================= */
+/* 7. Safe Path Manipulation (STR-REQ-06)                                    */
+/* ========================================================================= */
+
+RCRE_NODISCARD RCRE_Slice rcre_path_basename(RCRE_Slice path);
+RCRE_NODISCARD RCRE_Slice rcre_path_dirname(RCRE_Slice path);
+RCRE_NODISCARD RCRE_Slice rcre_path_ext(RCRE_Slice path);
+RCRE_NODISCARD RCRE_Slice rcre_path_stem(RCRE_Slice path);
+RCRE_NODISCARD RCRE_Slice rcre_path_join(RCRE_Arena* arena, RCRE_Slice a, RCRE_Slice b);
+
+#ifdef __cplusplus
+}
+#endif
+
+/* ========================================================================= */
+/* Optional Compile-Time Guardrail: Poison Legacy Unsafe <string.h> APIs     */
+/* Define RCRE_BAN_UNSAFE_CSTR before including rcre_str.h to enforce at     */
+/* compile time that strcpy/strcat/sprintf/gets/strncpy/strtok cannot build. */
+/* ========================================================================= */
+#ifdef RCRE_BAN_UNSAFE_CSTR
+  #include <string.h>
+  #ifndef RCRE_FREESTANDING
+    #include <stdio.h>
+  #endif
+  #undef strcpy
+  #undef strncpy
+  #undef strcat
+  #undef strncat
+  #undef sprintf
+  #undef vsprintf
+  #undef gets
+  #undef strtok
+  #if defined(__GNUC__) || defined(__clang__)
+    #pragma GCC poison strcpy strncpy strcat strncat sprintf vsprintf gets strtok
+  #endif
+#endif
+
+#endif /* RCRE_STR_H */
+#endif
 
 /* ========================================================================= */
 /* Autograd & Neural Network Extensions                                      */
@@ -5123,6 +5429,12 @@ size_t rcre_scalar_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_scalar_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
+bool rcre_scalar_utf8_validate(const uint8_t* data, size_t len);
+size_t rcre_scalar_find_substr(const uint8_t* hay, size_t hay_len,
+                               const uint8_t* needle, size_t needle_len);
+void rcre_scalar_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len);
+void rcre_scalar_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len);
+
 /* H0 (2.1.0): F64 substrate + F32 completeness (scalar reference; every
  * ISA backend below provides matching cells, so no algorithm ever has to
  * branch on ISA — a missing cell is a build error, not a runtime check). */
@@ -5167,6 +5479,12 @@ void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
 size_t rcre_neon_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_neon_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+bool rcre_neon_utf8_validate(const uint8_t* data, size_t len);
+size_t rcre_neon_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len);
+void rcre_neon_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len);
+void rcre_neon_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len);
 
 /* H0 (2.1.0): F64 cells — NEON doubles are 128-bit / 4-wide */
 void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
@@ -5232,6 +5550,12 @@ size_t rcre_avx2_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
+bool rcre_avx2_utf8_validate(const uint8_t* data, size_t len);
+size_t rcre_avx2_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len);
+void rcre_avx2_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len);
+void rcre_avx2_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len);
+
 /* H0 (2.1.0): F64 cells — AVX2 doubles are 256-bit / 4-wide */
 void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         const double* A, size_t lda, const double* B, size_t ldb,
@@ -5280,6 +5604,12 @@ void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
 size_t rcre_wasm_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_wasm_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+bool rcre_wasm_utf8_validate(const uint8_t* data, size_t len);
+size_t rcre_wasm_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len);
+void rcre_wasm_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len);
+void rcre_wasm_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len);
 #endif
 
 #endif /* RCRE_HAL_INTERNAL_H */
@@ -5767,6 +6097,7 @@ static inline void gpt_scratch_end(GPTScratch *s) {
  * Satisfies HAL-REQ-02.
  */
 
+#include <string.h>
 
 float rcre_scalar_dot_f32(const float* x, const float* y, size_t n) {
     float acc0 = 0.0f;
@@ -6085,6 +6416,84 @@ void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
     }
 }
 
+/* ========================================================================= */
+/* STR-REQ-05: Scalar Reference String & UTF-8 Micro-Kernels                 */
+/* ========================================================================= */
+
+bool rcre_scalar_utf8_validate(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        return true;
+    }
+    size_t i = 0;
+    while (i < len) {
+        uint8_t b0 = data[i];
+        if (b0 < 0x80U) {
+            i += 1U;
+            continue;
+        }
+        if (b0 >= 0xC2U && b0 <= 0xDFU) {
+            if (i + 1U >= len || (data[i + 1U] & 0xC0U) != 0x80U) return false;
+            i += 2U;
+        } else if (b0 >= 0xE0U && b0 <= 0xEFU) {
+            if (i + 2U >= len) return false;
+            uint8_t b1 = data[i + 1U];
+            uint8_t b2 = data[i + 2U];
+            if ((b1 & 0xC0U) != 0x80U || (b2 & 0xC0U) != 0x80U) return false;
+            if (b0 == 0xE0U && b1 < 0xA0U) return false;
+            if (b0 == 0xEDU && b1 >= 0xA0U) return false;
+            i += 3U;
+        } else if (b0 >= 0xF0U && b0 <= 0xF4U) {
+            if (i + 3U >= len) return false;
+            uint8_t b1 = data[i + 1U];
+            uint8_t b2 = data[i + 2U];
+            uint8_t b3 = data[i + 3U];
+            if ((b1 & 0xC0U) != 0x80U || (b2 & 0xC0U) != 0x80U || (b3 & 0xC0U) != 0x80U) return false;
+            if (b0 == 0xF0U && b1 < 0x90U) return false;
+            if (b0 == 0xF4U && b1 >= 0x90U) return false;
+            i += 4U;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+size_t rcre_scalar_find_substr(const uint8_t* hay, size_t hay_len,
+                               const uint8_t* needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return RCRE_NPOS;
+    if (needle_len == 1U) {
+        return rcre_scalar_find_byte(hay, hay_len, needle[0]);
+    }
+    uint8_t first = needle[0];
+    uint8_t last = needle[needle_len - 1U];
+    size_t limit = hay_len - needle_len + 1U;
+    for (size_t i = 0; i < limit; ++i) {
+        if (hay[i] == first && hay[i + needle_len - 1U] == last) {
+            if (needle_len == 2U || memcmp(hay + i + 1U, needle + 1U, needle_len - 2U) == 0) {
+                return i;
+            }
+        }
+    }
+    return RCRE_NPOS;
+}
+
+void rcre_scalar_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'A') <= 25U) ? (uint8_t)(c | 0x20U) : c;
+    }
+}
+
+void rcre_scalar_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'a') <= 25U) ? (uint8_t)(c & (uint8_t)~0x20U) : c;
+    }
+}
+
 /* --- Source: kernels_neon.c --- */
 /**
  * @file kernels_neon.c
@@ -6097,6 +6506,7 @@ void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
+#include <string.h>
 
 float rcre_neon_dot_f32(const float* x, const float* y, size_t n) {
     float32x4_t sum0 = vdupq_n_f32(0.0f);
@@ -6663,6 +7073,207 @@ double rcre_neon_sum_f64(const double* x, size_t n) {
     return s;
 }
 
+/* ========================================================================= */
+/* STR-REQ-05: ARM NEON 128-bit String & UTF-8 Micro-Kernels                 */
+/* ========================================================================= */
+
+bool rcre_neon_utf8_validate(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        return true;
+    }
+#if defined(__aarch64__)
+    static const uint8_t b1_hi_tbl[16] = {
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        0x80, 0x80, 0x80, 0x80, 0x11, 0x01, 0x25, 0x49
+    };
+    static const uint8_t b1_lo_tbl[16] = {
+        0xD7, 0x93, 0x83, 0x83, 0x8B, 0xCB, 0xCB, 0xCB,
+        0xCB, 0xCB, 0xCB, 0xCB, 0xCB, 0xEB, 0xCB, 0xCB
+    };
+    static const uint8_t b2_hi_tbl[16] = {
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0xD6, 0x9E, 0xBA, 0xBA, 0x01, 0x01, 0x01, 0x01
+    };
+
+    const uint8x16_t t_b1_hi = vld1q_u8(b1_hi_tbl);
+    const uint8x16_t t_b1_lo = vld1q_u8(b1_lo_tbl);
+    const uint8x16_t t_b2_hi = vld1q_u8(b2_hi_tbl);
+    const uint8x16_t v_0f    = vdupq_n_u8(0x0F);
+    const uint8x16_t v_df    = vdupq_n_u8(0xDF);
+    const uint8x16_t v_ef    = vdupq_n_u8(0xEF);
+    const uint8x16_t v_80    = vdupq_n_u8(0x80);
+
+    uint8x16_t prev  = vdupq_n_u8(0);
+    uint8x16_t error = vdupq_n_u8(0);
+    bool prev_ascii  = true;
+
+    size_t i = 0;
+    while (i + 16U <= len) {
+        /* 64-byte ASCII fast path when previous chunk ended cleanly on ASCII */
+        if (prev_ascii && i + 64U <= len) {
+            uint8x16_t v0 = vld1q_u8(&data[i +  0]);
+            uint8x16_t v1 = vld1q_u8(&data[i + 16]);
+            uint8x16_t v2 = vld1q_u8(&data[i + 32]);
+            uint8x16_t v3 = vld1q_u8(&data[i + 48]);
+            uint8x16_t any = vorrq_u8(vorrq_u8(v0, v1), vorrq_u8(v2, v3));
+            if (vmaxvq_u8(any) < 0x80U) {
+                prev = vdupq_n_u8(0);
+                i += 64U;
+                continue;
+            }
+        }
+
+        uint8x16_t curr = vld1q_u8(&data[i]);
+        if (prev_ascii && vmaxvq_u8(curr) < 0x80U) {
+            prev = vdupq_n_u8(0);
+            i += 16U;
+            continue;
+        }
+
+        /* Keiser-Lemire vectorized 3-table UTF-8 validation */
+        uint8x16_t prev1 = vextq_u8(prev, curr, 15);
+        uint8x16_t prev2 = vextq_u8(prev, curr, 14);
+        uint8x16_t prev3 = vextq_u8(prev, curr, 13);
+
+        uint8x16_t e1 = vqtbl1q_u8(t_b1_hi, vshrq_n_u8(prev1, 4));
+        uint8x16_t e2 = vqtbl1q_u8(t_b1_lo, vandq_u8(prev1, v_0f));
+        uint8x16_t e3 = vqtbl1q_u8(t_b2_hi, vshrq_n_u8(curr, 4));
+        uint8x16_t err = vandq_u8(vandq_u8(e1, e2), e3);
+
+        uint8x16_t is_23 = vorrq_u8(vqsubq_u8(prev2, v_df), vqsubq_u8(prev3, v_ef));
+        uint8x16_t must23 = vandq_u8(vtstq_u8(is_23, is_23), v_80);
+        err = veorq_u8(err, must23);
+        error = vorrq_u8(error, err);
+
+        prev = curr;
+        uint8_t last1 = data[i + 15U];
+        uint8_t last2 = data[i + 14U];
+        uint8_t last3 = data[i + 13U];
+        prev_ascii = (last1 < 0xC0U) && (last2 < 0xE0U) && (last3 < 0xF0U);
+        i += 16U;
+    }
+
+    if (vmaxvq_u8(error) != 0) {
+        return false;
+    }
+
+    /* Rewind over any incomplete 1..3-byte prefix at the last SIMD boundary */
+    if (!prev_ascii && i >= 16U) {
+        if (data[i - 1U] >= 0xC0U)      i -= 1U;
+        else if (data[i - 2U] >= 0xE0U) i -= 2U;
+        else if (data[i - 3U] >= 0xF0U) i -= 3U;
+    }
+    return rcre_scalar_utf8_validate(data + i, len - i);
+#else
+    return rcre_scalar_utf8_validate(data, len);
+#endif
+}
+
+size_t rcre_neon_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return RCRE_NPOS;
+    if (needle_len == 1U) {
+        return rcre_neon_find_byte(hay, hay_len, needle[0]);
+    }
+
+#if defined(__aarch64__)
+    const uint8x16_t vfirst = vdupq_n_u8(needle[0]);
+    const uint8x16_t vlast  = vdupq_n_u8(needle[needle_len - 1U]);
+    size_t i = 0;
+
+    for (; i + 16U + needle_len - 1U <= hay_len; i += 16U) {
+        uint8x16_t h0 = vld1q_u8(&hay[i]);
+        uint8x16_t h1 = vld1q_u8(&hay[i + needle_len - 1U]);
+        uint8x16_t cmp = vandq_u8(vceqq_u8(h0, vfirst), vceqq_u8(h1, vlast));
+        if (vmaxvq_u8(cmp) != 0) {
+            uint8x8_t narrowed = vshrn_n_u16(vreinterpretq_u16_u8(cmp), 4);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u8(narrowed), 0);
+            while (mask != 0) {
+                size_t lane = (size_t)(__builtin_ctzll(mask) >> 2);
+                if (needle_len == 2U || memcmp(hay + i + lane + 1U, needle + 1U, needle_len - 2U) == 0) {
+                    return i + lane;
+                }
+                mask &= ~(0xFULL << (lane * 4U));
+            }
+        }
+    }
+
+    size_t tail = rcre_scalar_find_substr(hay + i, hay_len - i, needle, needle_len);
+    return (tail == RCRE_NPOS) ? RCRE_NPOS : (i + tail);
+#else
+    return rcre_scalar_find_substr(hay, hay_len, needle, needle_len);
+#endif
+}
+
+void rcre_neon_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const uint8x16_t vA   = vdupq_n_u8((uint8_t)'A');
+    const uint8x16_t v25  = vdupq_n_u8(25);
+    const uint8x16_t v20  = vdupq_n_u8(0x20);
+    size_t i = 0;
+
+    for (; i + 64U <= len; i += 64U) {
+        uint8x16_t s0 = vld1q_u8(&src[i +  0]);
+        uint8x16_t s1 = vld1q_u8(&src[i + 16]);
+        uint8x16_t s2 = vld1q_u8(&src[i + 32]);
+        uint8x16_t s3 = vld1q_u8(&src[i + 48]);
+
+        uint8x16_t m0 = vcleq_u8(vsubq_u8(s0, vA), v25);
+        uint8x16_t m1 = vcleq_u8(vsubq_u8(s1, vA), v25);
+        uint8x16_t m2 = vcleq_u8(vsubq_u8(s2, vA), v25);
+        uint8x16_t m3 = vcleq_u8(vsubq_u8(s3, vA), v25);
+
+        vst1q_u8(&dst[i +  0], vorrq_u8(s0, vandq_u8(m0, v20)));
+        vst1q_u8(&dst[i + 16], vorrq_u8(s1, vandq_u8(m1, v20)));
+        vst1q_u8(&dst[i + 32], vorrq_u8(s2, vandq_u8(m2, v20)));
+        vst1q_u8(&dst[i + 48], vorrq_u8(s3, vandq_u8(m3, v20)));
+    }
+    for (; i + 16U <= len; i += 16U) {
+        uint8x16_t s0 = vld1q_u8(&src[i]);
+        uint8x16_t m0 = vcleq_u8(vsubq_u8(s0, vA), v25);
+        vst1q_u8(&dst[i], vorrq_u8(s0, vandq_u8(m0, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'A') <= 25U) ? (uint8_t)(c | 0x20U) : c;
+    }
+}
+
+void rcre_neon_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const uint8x16_t va   = vdupq_n_u8((uint8_t)'a');
+    const uint8x16_t v25  = vdupq_n_u8(25);
+    const uint8x16_t v20  = vdupq_n_u8(0x20);
+    size_t i = 0;
+
+    for (; i + 64U <= len; i += 64U) {
+        uint8x16_t s0 = vld1q_u8(&src[i +  0]);
+        uint8x16_t s1 = vld1q_u8(&src[i + 16]);
+        uint8x16_t s2 = vld1q_u8(&src[i + 32]);
+        uint8x16_t s3 = vld1q_u8(&src[i + 48]);
+
+        uint8x16_t m0 = vcleq_u8(vsubq_u8(s0, va), v25);
+        uint8x16_t m1 = vcleq_u8(vsubq_u8(s1, va), v25);
+        uint8x16_t m2 = vcleq_u8(vsubq_u8(s2, va), v25);
+        uint8x16_t m3 = vcleq_u8(vsubq_u8(s3, va), v25);
+
+        vst1q_u8(&dst[i +  0], veorq_u8(s0, vandq_u8(m0, v20)));
+        vst1q_u8(&dst[i + 16], veorq_u8(s1, vandq_u8(m1, v20)));
+        vst1q_u8(&dst[i + 32], veorq_u8(s2, vandq_u8(m2, v20)));
+        vst1q_u8(&dst[i + 48], veorq_u8(s3, vandq_u8(m3, v20)));
+    }
+    for (; i + 16U <= len; i += 16U) {
+        uint8x16_t s0 = vld1q_u8(&src[i]);
+        uint8x16_t m0 = vcleq_u8(vsubq_u8(s0, va), v25);
+        vst1q_u8(&dst[i], veorq_u8(s0, vandq_u8(m0, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'a') <= 25U) ? (uint8_t)(c & (uint8_t)~0x20U) : c;
+    }
+}
+
 #endif /* __ARM_NEON || __aarch64__ */
 
 /* --- Source: kernels_avx2.c --- */
@@ -7221,6 +7832,175 @@ double rcre_avx2_sum_f64(const double* x, size_t n) {
     return s;
 }
 
+/* ========================================================================= */
+/* STR-REQ-05: x86 AVX2 256-bit String & UTF-8 Micro-Kernels                 */
+/* ========================================================================= */
+
+bool rcre_avx2_utf8_validate(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        return true;
+    }
+
+    const __m256i t_b1_hi = _mm256_setr_epi8(
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        (char)0x80, (char)0x80, (char)0x80, (char)0x80, 0x11, 0x01, 0x25, 0x49,
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        (char)0x80, (char)0x80, (char)0x80, (char)0x80, 0x11, 0x01, 0x25, 0x49
+    );
+    const __m256i t_b1_lo = _mm256_setr_epi8(
+        (char)0xD7, (char)0x93, (char)0x83, (char)0x83,
+        (char)0x8B, (char)0xCB, (char)0xCB, (char)0xCB,
+        (char)0xCB, (char)0xCB, (char)0xCB, (char)0xCB,
+        (char)0xCB, (char)0xEB, (char)0xCB, (char)0xCB,
+        (char)0xD7, (char)0x93, (char)0x83, (char)0x83,
+        (char)0x8B, (char)0xCB, (char)0xCB, (char)0xCB,
+        (char)0xCB, (char)0xCB, (char)0xCB, (char)0xCB,
+        (char)0xCB, (char)0xEB, (char)0xCB, (char)0xCB
+    );
+    const __m256i t_b2_hi = _mm256_setr_epi8(
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        (char)0xD6, (char)0x9E, (char)0xBA, (char)0xBA, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        (char)0xD6, (char)0x9E, (char)0xBA, (char)0xBA, 0x01, 0x01, 0x01, 0x01
+    );
+
+    const __m256i v_0f = _mm256_set1_epi8(0x0F);
+    const __m256i v_df = _mm256_set1_epi8((char)0xDF);
+    const __m256i v_ef = _mm256_set1_epi8((char)0xEF);
+    const __m256i v_80 = _mm256_set1_epi8((char)0x80);
+    const __m256i zero = _mm256_setzero_si256();
+
+    __m256i prev  = zero;
+    __m256i error = zero;
+    bool prev_ascii = true;
+
+    size_t i = 0;
+    while (i + 32U <= len) {
+        if (prev_ascii && i + 64U <= len) {
+            __m256i v0 = _mm256_loadu_si256((const __m256i*)&data[i +  0]);
+            __m256i v1 = _mm256_loadu_si256((const __m256i*)&data[i + 32]);
+            if (_mm256_movemask_epi8(_mm256_or_si256(v0, v1)) == 0) {
+                prev = zero;
+                i += 64U;
+                continue;
+            }
+        }
+
+        __m256i curr = _mm256_loadu_si256((const __m256i*)&data[i]);
+        if (prev_ascii && _mm256_movemask_epi8(curr) == 0) {
+            prev = zero;
+            i += 32U;
+            continue;
+        }
+
+        __m256i prev_hi = _mm256_permute2x128_si256(prev, curr, 0x21);
+        __m256i prev1 = _mm256_alignr_epi8(curr, prev_hi, 15);
+        __m256i prev2 = _mm256_alignr_epi8(curr, prev_hi, 14);
+        __m256i prev3 = _mm256_alignr_epi8(curr, prev_hi, 13);
+
+        __m256i p1_hi = _mm256_and_si256(_mm256_srli_epi16(prev1, 4), v_0f);
+        __m256i p1_lo = _mm256_and_si256(prev1, v_0f);
+        __m256i c_hi  = _mm256_and_si256(_mm256_srli_epi16(curr, 4), v_0f);
+
+        __m256i e1 = _mm256_shuffle_epi8(t_b1_hi, p1_hi);
+        __m256i e2 = _mm256_shuffle_epi8(t_b1_lo, p1_lo);
+        __m256i e3 = _mm256_shuffle_epi8(t_b2_hi, c_hi);
+        __m256i err = _mm256_and_si256(_mm256_and_si256(e1, e2), e3);
+
+        __m256i is_23 = _mm256_or_si256(_mm256_subs_epu8(prev2, v_df),
+                                        _mm256_subs_epu8(prev3, v_ef));
+        __m256i must23 = _mm256_andnot_si256(_mm256_cmpeq_epi8(is_23, zero), v_80);
+        err = _mm256_xor_si256(err, must23);
+        error = _mm256_or_si256(error, err);
+
+        prev = curr;
+        prev_ascii = (data[i + 31U] < 0xC0U) && (data[i + 30U] < 0xE0U) && (data[i + 29U] < 0xF0U);
+        i += 32U;
+    }
+
+    if (!_mm256_testz_si256(error, error)) {
+        return false;
+    }
+
+    if (!prev_ascii && i >= 32U) {
+        if (data[i - 1U] >= 0xC0U)      i -= 1U;
+        else if (data[i - 2U] >= 0xE0U) i -= 2U;
+        else if (data[i - 3U] >= 0xF0U) i -= 3U;
+    }
+    return rcre_scalar_utf8_validate(data + i, len - i);
+}
+
+size_t rcre_avx2_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return RCRE_NPOS;
+    if (needle_len == 1U) {
+        return rcre_avx2_find_byte(hay, hay_len, needle[0]);
+    }
+
+    const __m256i vfirst = _mm256_set1_epi8((char)needle[0]);
+    const __m256i vlast  = _mm256_set1_epi8((char)needle[needle_len - 1U]);
+    size_t i = 0;
+
+    for (; i + 32U + needle_len - 1U <= hay_len; i += 32U) {
+        __m256i h0 = _mm256_loadu_si256((const __m256i*)&hay[i]);
+        __m256i h1 = _mm256_loadu_si256((const __m256i*)&hay[i + needle_len - 1U]);
+        __m256i cmp = _mm256_and_si256(_mm256_cmpeq_epi8(h0, vfirst),
+                                       _mm256_cmpeq_epi8(h1, vlast));
+        uint32_t mask = (uint32_t)_mm256_movemask_epi8(cmp);
+        while (mask != 0) {
+            size_t lane = (size_t)__builtin_ctz(mask);
+            if (needle_len == 2U || memcmp(hay + i + lane + 1U, needle + 1U, needle_len - 2U) == 0) {
+                return i + lane;
+            }
+            mask &= mask - 1U;
+        }
+    }
+
+    size_t tail = rcre_scalar_find_substr(hay + i, hay_len - i, needle, needle_len);
+    return (tail == RCRE_NPOS) ? RCRE_NPOS : (i + tail);
+}
+
+void rcre_avx2_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const __m256i vA   = _mm256_set1_epi8('A');
+    const __m256i v25  = _mm256_set1_epi8(25);
+    const __m256i v20  = _mm256_set1_epi8(0x20);
+    const __m256i zero = _mm256_setzero_si256();
+    size_t i = 0;
+
+    for (; i + 32U <= len; i += 32U) {
+        __m256i s = _mm256_loadu_si256((const __m256i*)&src[i]);
+        __m256i gt = _mm256_subs_epu8(_mm256_sub_epi8(s, vA), v25);
+        __m256i m = _mm256_cmpeq_epi8(gt, zero);
+        _mm256_storeu_si256((__m256i*)&dst[i], _mm256_or_si256(s, _mm256_and_si256(m, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'A') <= 25U) ? (uint8_t)(c | 0x20U) : c;
+    }
+}
+
+void rcre_avx2_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const __m256i va   = _mm256_set1_epi8('a');
+    const __m256i v25  = _mm256_set1_epi8(25);
+    const __m256i v20  = _mm256_set1_epi8(0x20);
+    const __m256i zero = _mm256_setzero_si256();
+    size_t i = 0;
+
+    for (; i + 32U <= len; i += 32U) {
+        __m256i s = _mm256_loadu_si256((const __m256i*)&src[i]);
+        __m256i gt = _mm256_subs_epu8(_mm256_sub_epi8(s, va), v25);
+        __m256i m = _mm256_cmpeq_epi8(gt, zero);
+        _mm256_storeu_si256((__m256i*)&dst[i], _mm256_xor_si256(s, _mm256_and_si256(m, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'a') <= 25U) ? (uint8_t)(c & (uint8_t)~0x20U) : c;
+    }
+}
+
 #if defined(RCRE_NEED_POP_AVX2)
   #if RCRE_NEED_POP_AVX2 == 2
     #pragma clang attribute pop
@@ -7537,6 +8317,7 @@ double rcre_avx512_sum_f64(const double* x, size_t n) {
 
 #if defined(__wasm_simd128__)
 #include <wasm_simd128.h>
+#include <string.h>
 
 float rcre_wasm_dot_f32(const float* x, const float* y, size_t n) {
     v128_t sum0 = wasm_f32x4_splat(0.0f);
@@ -7814,6 +8595,140 @@ void rcre_wasm_gemv_f32(size_t M, size_t K, float alpha,
     }
 }
 
+/* ========================================================================= */
+/* STR-REQ-05: WebAssembly 128-bit SIMD String & UTF-8 Micro-Kernels         */
+/* ========================================================================= */
+
+bool rcre_wasm_utf8_validate(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        return true;
+    }
+
+    const v128_t t_b1_hi = wasm_u8x16_const(
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        0x80, 0x80, 0x80, 0x80, 0x11, 0x01, 0x25, 0x49
+    );
+    const v128_t t_b1_lo = wasm_u8x16_const(
+        0xD7, 0x93, 0x83, 0x83, 0x8B, 0xCB, 0xCB, 0xCB,
+        0xCB, 0xCB, 0xCB, 0xCB, 0xCB, 0xEB, 0xCB, 0xCB
+    );
+    const v128_t t_b2_hi = wasm_u8x16_const(
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0xD6, 0x9E, 0xBA, 0xBA, 0x01, 0x01, 0x01, 0x01
+    );
+    const v128_t v_0f = wasm_u8x16_splat(0x0F);
+    const v128_t v_df = wasm_u8x16_splat(0xDF);
+    const v128_t v_ef = wasm_u8x16_splat(0xEF);
+    const v128_t v_80 = wasm_u8x16_splat(0x80);
+    const v128_t zero = wasm_i8x16_splat(0);
+
+    v128_t prev = zero;
+    v128_t error = zero;
+    bool prev_ascii = true;
+
+    size_t i = 0;
+    while (i + 16U <= len) {
+        v128_t curr = wasm_v128_load(&data[i]);
+        if (prev_ascii && wasm_i8x16_bitmask(curr) == 0) {
+            prev = zero;
+            i += 16U;
+            continue;
+        }
+        v128_t prev1 = wasm_i8x16_shuffle(prev, curr, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        v128_t prev2 = wasm_i8x16_shuffle(prev, curr, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
+        v128_t prev3 = wasm_i8x16_shuffle(prev, curr, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
+
+        v128_t e1 = wasm_i8x16_swizzle(t_b1_hi, wasm_u8x16_shr(prev1, 4));
+        v128_t e2 = wasm_i8x16_swizzle(t_b1_lo, wasm_v128_and(prev1, v_0f));
+        v128_t e3 = wasm_i8x16_swizzle(t_b2_hi, wasm_u8x16_shr(curr, 4));
+        v128_t err = wasm_v128_and(wasm_v128_and(e1, e2), e3);
+
+        v128_t is_23 = wasm_v128_or(wasm_u8x16_sub_sat(prev2, v_df), wasm_u8x16_sub_sat(prev3, v_ef));
+        v128_t must23 = wasm_v128_and(wasm_i8x16_ne(is_23, zero), v_80);
+        err = wasm_v128_xor(err, must23);
+        error = wasm_v128_or(error, err);
+
+        prev = curr;
+        prev_ascii = (data[i + 15U] < 0xC0U) && (data[i + 14U] < 0xE0U) && (data[i + 13U] < 0xF0U);
+        i += 16U;
+    }
+
+    if (wasm_v128_any_true(error)) {
+        return false;
+    }
+    if (!prev_ascii && i >= 16U) {
+        if (data[i - 1U] >= 0xC0U)      i -= 1U;
+        else if (data[i - 2U] >= 0xE0U) i -= 2U;
+        else if (data[i - 3U] >= 0xF0U) i -= 3U;
+    }
+    return rcre_scalar_utf8_validate(data + i, len - i);
+}
+
+size_t rcre_wasm_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return RCRE_NPOS;
+    if (needle_len == 1U) {
+        return rcre_wasm_find_byte(hay, hay_len, needle[0]);
+    }
+    const v128_t vfirst = wasm_u8x16_splat(needle[0]);
+    const v128_t vlast  = wasm_u8x16_splat(needle[needle_len - 1U]);
+    size_t i = 0;
+
+    for (; i + 16U + needle_len - 1U <= hay_len; i += 16U) {
+        v128_t h0 = wasm_v128_load(&hay[i]);
+        v128_t h1 = wasm_v128_load(&hay[i + needle_len - 1U]);
+        v128_t cmp = wasm_v128_and(wasm_i8x16_eq(h0, vfirst), wasm_i8x16_eq(h1, vlast));
+        uint32_t mask = (uint32_t)wasm_i8x16_bitmask(cmp);
+        while (mask != 0) {
+            size_t lane = (size_t)__builtin_ctz(mask);
+            if (needle_len == 2U || memcmp(hay + i + lane + 1U, needle + 1U, needle_len - 2U) == 0) {
+                return i + lane;
+            }
+            mask &= mask - 1U;
+        }
+    }
+
+    size_t tail = rcre_scalar_find_substr(hay + i, hay_len - i, needle, needle_len);
+    return (tail == RCRE_NPOS) ? RCRE_NPOS : (i + tail);
+}
+
+void rcre_wasm_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const v128_t vA  = wasm_u8x16_splat((uint8_t)'A');
+    const v128_t v25 = wasm_u8x16_splat(25);
+    const v128_t v20 = wasm_u8x16_splat(0x20);
+    size_t i = 0;
+
+    for (; i + 16U <= len; i += 16U) {
+        v128_t s = wasm_v128_load(&src[i]);
+        v128_t m = wasm_u8x16_le(wasm_i8x16_sub(s, vA), v25);
+        wasm_v128_store(&dst[i], wasm_v128_or(s, wasm_v128_and(m, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'A') <= 25U) ? (uint8_t)(c | 0x20U) : c;
+    }
+}
+
+void rcre_wasm_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const v128_t va  = wasm_u8x16_splat((uint8_t)'a');
+    const v128_t v25 = wasm_u8x16_splat(25);
+    const v128_t v20 = wasm_u8x16_splat(0x20);
+    size_t i = 0;
+
+    for (; i + 16U <= len; i += 16U) {
+        v128_t s = wasm_v128_load(&src[i]);
+        v128_t m = wasm_u8x16_le(wasm_i8x16_sub(s, va), v25);
+        wasm_v128_store(&dst[i], wasm_v128_xor(s, wasm_v128_and(m, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'a') <= 25U) ? (uint8_t)(c & (uint8_t)~0x20U) : c;
+    }
+}
+
 #endif /* __wasm_simd128__ */
 
 /* --- Source: cpu_probe.c --- */
@@ -7945,7 +8860,7 @@ static void probe_cpu(void) {
 #if defined(__APPLE__)
     size_t len = sizeof(s_brand);
     if (sysctlbyname("machdep.cpu.brand_string", s_brand, &len, NULL, 0) != 0) {
-        strncpy(s_brand, "Apple Silicon", sizeof(s_brand) - 1);
+        (void)rcre_cstr_copy_bounded(s_brand, sizeof(s_brand), RCRE_STR("Apple Silicon"));
     }
 #elif (defined(__x86_64__) || defined(_M_X64) || defined(__i386__)) && !defined(_MSC_VER)
     /* x86 CPUID feature detection */
@@ -7973,12 +8888,12 @@ static void probe_cpu(void) {
         memcpy(s_brand, brand_regs, sizeof(brand_regs));
         s_brand[sizeof(s_brand) - 1] = '\0';
     } else {
-        strncpy(s_brand, "Generic x86 CPU", sizeof(s_brand) - 1);
+        (void)rcre_cstr_copy_bounded(s_brand, sizeof(s_brand), RCRE_STR("Generic x86 CPU"));
     }
 #elif defined(__EMSCRIPTEN__)
-    strncpy(s_brand, "WebAssembly Runtime", sizeof(s_brand) - 1);
+    (void)rcre_cstr_copy_bounded(s_brand, sizeof(s_brand), RCRE_STR("WebAssembly Runtime"));
 #else
-    strncpy(s_brand, "Generic Host CPU", sizeof(s_brand) - 1);
+    (void)rcre_cstr_copy_bounded(s_brand, sizeof(s_brand), RCRE_STR("Generic Host CPU"));
 #endif
 
     probe_topology();
@@ -8088,7 +9003,12 @@ RCRE_HalDispatch rcre_hal = {
     .scale_f32       = rcre_scalar_scale_f32,
     .scale_f64       = rcre_scalar_scale_f64,
     .sum_f32         = rcre_scalar_sum_f32,
-    .sum_f64         = rcre_scalar_sum_f64
+    .sum_f64         = rcre_scalar_sum_f64,
+    /* STR-REQ-05: SIMD string & UTF-8 kernels */
+    .utf8_validate   = rcre_scalar_utf8_validate,
+    .find_substr     = rcre_scalar_find_substr,
+    .ascii_to_lower  = rcre_scalar_ascii_to_lower,
+    .ascii_to_upper  = rcre_scalar_ascii_to_upper
 };
 
 static atomic_bool s_hal_initialized = false;
@@ -8121,6 +9041,11 @@ void rcre_hal_init(void) {
         rcre_hal.gemv_f64       = rcre_neon_gemv_f64;
         rcre_hal.scale_f64      = rcre_neon_scale_f64;
         rcre_hal.sum_f64        = rcre_neon_sum_f64;
+        /* STR-REQ-05: NEON string kernels */
+        rcre_hal.utf8_validate  = rcre_neon_utf8_validate;
+        rcre_hal.find_substr    = rcre_neon_find_substr;
+        rcre_hal.ascii_to_lower = rcre_neon_ascii_to_lower;
+        rcre_hal.ascii_to_upper = rcre_neon_ascii_to_upper;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -8149,6 +9074,11 @@ void rcre_hal_init(void) {
         rcre_hal.gemv_f64       = rcre_avx512_gemv_f64;
         rcre_hal.scale_f64      = rcre_avx512_scale_f64;
         rcre_hal.sum_f64        = rcre_avx512_sum_f64;
+        /* STR-REQ-05: AVX2 string kernels */
+        rcre_hal.utf8_validate  = rcre_avx2_utf8_validate;
+        rcre_hal.find_substr    = rcre_avx2_find_substr;
+        rcre_hal.ascii_to_lower = rcre_avx2_ascii_to_lower;
+        rcre_hal.ascii_to_upper = rcre_avx2_ascii_to_upper;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -8175,6 +9105,11 @@ void rcre_hal_init(void) {
         rcre_hal.gemv_f64       = rcre_avx2_gemv_f64;
         rcre_hal.scale_f64      = rcre_avx2_scale_f64;
         rcre_hal.sum_f64        = rcre_avx2_sum_f64;
+        /* STR-REQ-05: AVX2 string kernels */
+        rcre_hal.utf8_validate  = rcre_avx2_utf8_validate;
+        rcre_hal.find_substr    = rcre_avx2_find_substr;
+        rcre_hal.ascii_to_lower = rcre_avx2_ascii_to_lower;
+        rcre_hal.ascii_to_upper = rcre_avx2_ascii_to_upper;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -8194,6 +9129,10 @@ void rcre_hal_init(void) {
         rcre_hal.rgb_to_gray_u8 = rcre_wasm_rgb_to_gray_u8;
         rcre_hal.find_byte      = rcre_wasm_find_byte;
         rcre_hal.count_byte     = rcre_wasm_count_byte;
+        rcre_hal.utf8_validate  = rcre_wasm_utf8_validate;
+        rcre_hal.find_substr    = rcre_wasm_find_substr;
+        rcre_hal.ascii_to_lower = rcre_wasm_ascii_to_lower;
+        rcre_hal.ascii_to_upper = rcre_wasm_ascii_to_upper;
         atomic_store(&s_hal_initialized, true);
         return;
     }
@@ -8211,6 +9150,10 @@ void rcre_hal_init(void) {
     rcre_hal.rgb_to_gray_u8 = rcre_scalar_rgb_to_gray_u8;
     rcre_hal.find_byte      = rcre_scalar_find_byte;
     rcre_hal.count_byte     = rcre_scalar_count_byte;
+    rcre_hal.utf8_validate  = rcre_scalar_utf8_validate;
+    rcre_hal.find_substr    = rcre_scalar_find_substr;
+    rcre_hal.ascii_to_lower = rcre_scalar_ascii_to_lower;
+    rcre_hal.ascii_to_upper = rcre_scalar_ascii_to_upper;
     atomic_store(&s_hal_initialized, true);
 }
 
@@ -8866,6 +9809,1718 @@ char* rcre_sb_to_cstr(RCRE_StrBuilder* sb) {
     }
     sb->buf[sb->len] = '\0';
     return (char*)sb->buf;
+}
+
+/* --- Source: str.c --- */
+/**
+ * @file str.c
+ * @brief RCRE Safe, Zero-Malloc, SIMD-Accelerated C23 String Library
+ *
+ * Satisfies STR-REQ-01 through STR-REQ-06.
+ * Pure ISO C23, zero heap allocations, freestanding-clean (-DRCRE_FREESTANDING),
+ * UBSan/ASan-clean on empty/NULL/unaligned slices, and HAL-SIMD accelerated.
+ */
+
+#include <string.h>
+
+/* ========================================================================= */
+/* Internal Helpers (namespaced with rcre_str__ for amalgamation uniqueness) */
+/* ========================================================================= */
+
+static inline uint64_t rcre_str__f64_to_bits(double v) {
+    uint64_t bits = 0;
+    memcpy(&bits, &v, sizeof(bits));
+    return bits;
+}
+
+static inline double rcre_str__bits_to_f64(uint64_t bits) {
+    double v = 0.0;
+    memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+static inline bool rcre_str__f64_isnan(double v) {
+    uint64_t b = rcre_str__f64_to_bits(v);
+    return ((b >> 52) & 0x7FFULL) == 0x7FFULL && (b & 0x000FFFFFFFFFFFFFULL) != 0ULL;
+}
+
+static inline bool rcre_str__f64_isinf(double v) {
+    uint64_t b = rcre_str__f64_to_bits(v);
+    return ((b >> 52) & 0x7FFULL) == 0x7FFULL && (b & 0x000FFFFFFFFFFFFFULL) == 0ULL;
+}
+
+static inline bool rcre_str__f64_signbit(double v) {
+    return (rcre_str__f64_to_bits(v) >> 63) != 0ULL;
+}
+
+static double rcre_str__pow10_u32(unsigned int exp) {
+    double res = 1.0;
+    double base = 10.0;
+    while (exp > 0U) {
+        if (exp & 1U) res *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return res;
+}
+
+static inline bool rcre_str__is_ascii_space(uint8_t c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+static inline uint8_t rcre_str__to_lower_byte(uint8_t c) {
+    return (c >= 'A' && c <= 'Z') ? (uint8_t)(c + 32U) : c;
+}
+
+static inline bool rcre_str__is_path_sep(uint8_t c) {
+    return c == '/' || c == '\\';
+}
+
+static inline size_t rcre_str__next_pow2(size_t v) {
+    if (v <= 16U) return 16U;
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+#if SIZE_MAX > 0xFFFFFFFFULL
+    v |= v >> 32;
+#endif
+    return (v == SIZE_MAX) ? 0U : (v + 1U);
+}
+
+/* SplitMix64-inspired finalizer over fast 64-bit mixing (deterministic, zero-dep) */
+static inline uint64_t rcre_str__mix64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+static inline uint64_t rcre_str__load_u64_le(const uint8_t* p) {
+    uint64_t v = 0;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+/* Sink abstraction for freestanding formatting into either RCRE_StrBuf or RCRE_StrBuilder */
+typedef struct {
+    RCRE_StrBuf*     strbuf;
+    RCRE_StrBuilder* builder;
+} rcre_str__sink;
+
+static bool rcre_str__sink_write(rcre_str__sink* sink, const uint8_t* bytes, size_t n) {
+    if (n == 0) {
+        return true;
+    }
+    if (sink->strbuf) {
+        return rcre_strbuf_append(sink->strbuf, rcre_slice_from_parts(bytes, n));
+    }
+    return rcre_sb_append_slice(sink->builder, rcre_slice_from_parts(bytes, n));
+}
+
+static bool rcre_str__sink_byte(rcre_str__sink* sink, uint8_t b) {
+    return rcre_str__sink_write(sink, &b, 1);
+}
+
+static bool rcre_str__sink_pad(rcre_str__sink* sink, uint8_t ch, size_t count) {
+    uint8_t chunk[32];
+    memset(chunk, ch, sizeof(chunk));
+    while (count > 0) {
+        size_t step = (count < sizeof(chunk)) ? count : sizeof(chunk);
+        if (!rcre_str__sink_write(sink, chunk, step)) {
+            return false;
+        }
+        count -= step;
+    }
+    return true;
+}
+
+static bool rcre_str__sink_write_aligned(
+    rcre_str__sink* sink,
+    const uint8_t* bytes,
+    size_t len,
+    size_t width,
+    bool left_align,
+    uint8_t pad_ch
+) {
+    size_t pad = (width > len) ? (width - len) : 0U;
+    if (!left_align && pad > 0) {
+        if (!rcre_str__sink_pad(sink, pad_ch, pad)) return false;
+    }
+    if (!rcre_str__sink_write(sink, bytes, len)) return false;
+    if (left_align && pad > 0) {
+        if (!rcre_str__sink_pad(sink, ' ', pad)) return false;
+    }
+    return true;
+}
+
+static size_t rcre_str__u64_to_dec(uint64_t val, uint8_t out[24]) {
+    uint8_t rev[24];
+    size_t n = 0;
+    do {
+        rev[n++] = (uint8_t)('0' + (val % 10ULL));
+        val /= 10ULL;
+    } while (val > 0);
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = rev[n - 1U - i];
+    }
+    return n;
+}
+
+static size_t rcre_str__u64_to_hex(uint64_t val, bool uppercase, uint8_t out[24]) {
+    const char* digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+    uint8_t rev[24];
+    size_t n = 0;
+    do {
+        rev[n++] = (uint8_t)digits[val & 0xFULL];
+        val >>= 4;
+    } while (val > 0);
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = rev[n - 1U - i];
+    }
+    return n;
+}
+
+static bool rcre_str__sink_f64(rcre_str__sink* sink, double val, int precision) {
+    if (precision < 0) precision = 6;
+    if (precision > 15) precision = 15;
+
+    if (rcre_str__f64_isnan(val)) {
+        return rcre_str__sink_write(sink, (const uint8_t*)"nan", 3);
+    }
+    if (rcre_str__f64_signbit(val)) {
+        if (!rcre_str__sink_byte(sink, '-')) return false;
+        val = -val;
+    }
+    if (rcre_str__f64_isinf(val)) {
+        return rcre_str__sink_write(sink, (const uint8_t*)"inf", 3);
+    }
+
+    /* Fall back to scientific notation for huge magnitudes that overflow uint64 */
+    if (val >= 1e18) {
+        int exp10 = 0;
+        double m = val;
+        while (m >= 10.0) { m /= 10.0; exp10++; }
+        if (!rcre_str__sink_f64(sink, m, precision)) return false;
+        if (!rcre_str__sink_byte(sink, 'e')) return false;
+        if (!rcre_str__sink_byte(sink, '+')) return false;
+        uint8_t ebuf[24];
+        size_t elen = rcre_str__u64_to_dec((uint64_t)exp10, ebuf);
+        if (elen < 2) {
+            if (!rcre_str__sink_byte(sink, '0')) return false;
+        }
+        return rcre_str__sink_write(sink, ebuf, elen);
+    }
+
+    static const double pow10_tbl[16] = {
+        1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7,
+        1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15
+    };
+    double scale = pow10_tbl[precision];
+
+    uint64_t whole = (uint64_t)val;
+    double frac_d = (val - (double)whole) * scale + 0.5;
+    uint64_t frac = (uint64_t)frac_d;
+    uint64_t scale_u = (uint64_t)scale;
+    if (precision == 0) {
+        if (frac >= 1ULL) {
+            whole += 1ULL;
+        }
+    } else if (frac >= scale_u) {
+        whole += 1ULL;
+        frac -= scale_u;
+    }
+
+    uint8_t wbuf[24];
+    size_t wlen = rcre_str__u64_to_dec(whole, wbuf);
+    if (!rcre_str__sink_write(sink, wbuf, wlen)) return false;
+
+    if (precision > 0) {
+        if (!rcre_str__sink_byte(sink, '.')) return false;
+        uint8_t fbuf[24];
+        size_t flen = rcre_str__u64_to_dec(frac, fbuf);
+        if ((size_t)precision > flen) {
+            if (!rcre_str__sink_pad(sink, '0', (size_t)precision - flen)) return false;
+        }
+        if (!rcre_str__sink_write(sink, fbuf, flen)) return false;
+    }
+    return true;
+}
+
+static bool rcre_str__sink_vfmt(rcre_str__sink* sink, const char* fmt, va_list ap) {
+    if (!fmt) {
+        return true;
+    }
+    bool ok = true;
+    const uint8_t* p = (const uint8_t*)fmt;
+
+    while (*p != '\0') {
+        const uint8_t* lit_start = p;
+        while (*p != '\0' && *p != '%') {
+            p++;
+        }
+        if (p > lit_start) {
+            if (!rcre_str__sink_write(sink, lit_start, (size_t)(p - lit_start))) {
+                ok = false;
+            }
+        }
+        if (*p == '\0') break;
+        p++; /* skip '%' */
+
+        if (*p == '%') {
+            if (!rcre_str__sink_byte(sink, '%')) ok = false;
+            p++;
+            continue;
+        }
+
+        /* Flags */
+        bool left_align = false;
+        bool zero_pad = false;
+        while (*p == '-' || *p == '0') {
+            if (*p == '-') left_align = true;
+            if (*p == '0') zero_pad = true;
+            p++;
+        }
+        if (left_align) zero_pad = false;
+
+        /* Width */
+        size_t width = 0;
+        while (*p >= '0' && *p <= '9') {
+            if (width < 4096U) {
+                width = width * 10U + (size_t)(*p - '0');
+            }
+            p++;
+        }
+
+        /* Precision */
+        int precision = -1;
+        if (*p == '.') {
+            p++;
+            precision = 0;
+            while (*p >= '0' && *p <= '9') {
+                if (precision < 1000) {
+                    precision = precision * 10 + (int)(*p - '0');
+                }
+                p++;
+            }
+        }
+
+        /* Length modifier: l, ll, z */
+        int len_mod = 0; /* 0=default, 1=l, 2=ll, 3=z */
+        if (*p == 'l') {
+            p++;
+            if (*p == 'l') { len_mod = 2; p++; }
+            else           { len_mod = 1; }
+        } else if (*p == 'z') {
+            len_mod = 3;
+            p++;
+        }
+
+        uint8_t spec = *p;
+        if (spec == '\0') break;
+        p++;
+
+        uint8_t pad_ch = zero_pad ? (uint8_t)'0' : (uint8_t)' ';
+
+        switch (spec) {
+            case 'c': {
+                uint8_t ch = (uint8_t)va_arg(ap, int);
+                if (!rcre_str__sink_write_aligned(sink, &ch, 1, width, left_align, ' ')) ok = false;
+                break;
+            }
+            case 's': {
+                const char* cs = va_arg(ap, const char*);
+                RCRE_Slice s = cs ? rcre_slice_from_cstr(cs) : RCRE_STR("(null)");
+                if (precision >= 0 && (size_t)precision < s.len) {
+                    s.len = (size_t)precision;
+                }
+                if (!rcre_str__sink_write_aligned(sink, s.data, s.len, width, left_align, ' ')) ok = false;
+                break;
+            }
+            case 'S': {
+                RCRE_Slice s = va_arg(ap, RCRE_Slice);
+                if (precision >= 0 && (size_t)precision < s.len) {
+                    s.len = (size_t)precision;
+                }
+                if (!rcre_str__sink_write_aligned(sink, s.data, s.len, width, left_align, ' ')) ok = false;
+                break;
+            }
+            case 'd':
+            case 'i': {
+                int64_t val = 0;
+                if (len_mod == 2)      val = (int64_t)va_arg(ap, long long);
+                else if (len_mod == 1) val = (int64_t)va_arg(ap, long);
+                else if (len_mod == 3) val = (int64_t)va_arg(ap, ptrdiff_t);
+                else                   val = (int64_t)va_arg(ap, int);
+
+                uint8_t num[32];
+                size_t n = 0;
+                uint64_t mag = 0;
+                bool neg = (val < 0);
+                if (neg) {
+                    mag = (val == INT64_MIN) ? ((uint64_t)INT64_MAX + 1ULL) : (uint64_t)(-val);
+                } else {
+                    mag = (uint64_t)val;
+                }
+                if (neg && !zero_pad) {
+                    num[n++] = '-';
+                }
+                n += rcre_str__u64_to_dec(mag, num + n);
+                if (neg && zero_pad) {
+                    if (!rcre_str__sink_byte(sink, '-')) ok = false;
+                    size_t adj_w = (width > 0) ? (width - 1U) : 0U;
+                    if (!rcre_str__sink_write_aligned(sink, num, n, adj_w, false, '0')) ok = false;
+                } else {
+                    if (!rcre_str__sink_write_aligned(sink, num, n, width, left_align, pad_ch)) ok = false;
+                }
+                break;
+            }
+            case 'u': {
+                uint64_t val = 0;
+                if (len_mod == 2)      val = (uint64_t)va_arg(ap, unsigned long long);
+                else if (len_mod == 1) val = (uint64_t)va_arg(ap, unsigned long);
+                else if (len_mod == 3) val = (uint64_t)va_arg(ap, size_t);
+                else                   val = (uint64_t)va_arg(ap, unsigned int);
+
+                uint8_t num[24];
+                size_t n = rcre_str__u64_to_dec(val, num);
+                if (!rcre_str__sink_write_aligned(sink, num, n, width, left_align, pad_ch)) ok = false;
+                break;
+            }
+            case 'x':
+            case 'X': {
+                uint64_t val = 0;
+                if (len_mod == 2)      val = (uint64_t)va_arg(ap, unsigned long long);
+                else if (len_mod == 1) val = (uint64_t)va_arg(ap, unsigned long);
+                else if (len_mod == 3) val = (uint64_t)va_arg(ap, size_t);
+                else                   val = (uint64_t)va_arg(ap, unsigned int);
+
+                uint8_t num[24];
+                size_t n = rcre_str__u64_to_hex(val, spec == 'X', num);
+                if (!rcre_str__sink_write_aligned(sink, num, n, width, left_align, pad_ch)) ok = false;
+                break;
+            }
+            case 'p': {
+                uintptr_t ptr = (uintptr_t)va_arg(ap, const void*);
+                uint8_t num[26];
+                num[0] = '0';
+                num[1] = 'x';
+                size_t n = 2U + rcre_str__u64_to_hex((uint64_t)ptr, false, num + 2);
+                if (!rcre_str__sink_write_aligned(sink, num, n, width, left_align, ' ')) ok = false;
+                break;
+            }
+            case 'f':
+            case 'F': {
+                double val = va_arg(ap, double);
+                uint8_t tmp[96];
+                RCRE_StrBuf local = rcre_strbuf_init(tmp, sizeof(tmp));
+                rcre_str__sink local_sink = { .strbuf = &local, .builder = nullptr };
+                (void)rcre_str__sink_f64(&local_sink, val, precision);
+                if (!rcre_str__sink_write_aligned(sink, local.data, local.len, width, left_align, pad_ch)) {
+                    ok = false;
+                }
+                break;
+            }
+            default: {
+                uint8_t raw[2] = { '%', spec };
+                if (!rcre_str__sink_write(sink, raw, 2)) ok = false;
+                break;
+            }
+        }
+    }
+    return ok;
+}
+
+/* ========================================================================= */
+/* 1. RCRE_StrBuf — Fixed-Capacity Bounded Buffer (STR-REQ-02)               */
+/* ========================================================================= */
+
+RCRE_StrBuf rcre_strbuf_init(void* backing, size_t cap) {
+    RCRE_StrBuf sb = {
+        .data      = (backing && cap > 0) ? (uint8_t*)backing : nullptr,
+        .len       = 0,
+        .cap       = (backing && cap > 0) ? cap : 0,
+        .truncated = false
+    };
+    if (sb.data) {
+        sb.data[0] = '\0';
+    }
+    return sb;
+}
+
+void rcre_strbuf_reset(RCRE_StrBuf* sb) {
+    if (!sb) return;
+    sb->len = 0;
+    sb->truncated = false;
+    if (sb->data && sb->cap > 0) {
+        sb->data[0] = '\0';
+    }
+}
+
+bool rcre_strbuf_copy(RCRE_StrBuf* sb, RCRE_Slice src) {
+    if (!sb) return false;
+    rcre_strbuf_reset(sb);
+    return rcre_strbuf_append(sb, src);
+}
+
+bool rcre_strbuf_copy_cstr(RCRE_StrBuf* sb, const char* cstr) {
+    return rcre_strbuf_copy(sb, rcre_slice_from_cstr(cstr));
+}
+
+bool rcre_strbuf_copy_utf8(RCRE_StrBuf* sb, RCRE_Slice src) {
+    if (!sb) return false;
+    rcre_strbuf_reset(sb);
+    return rcre_strbuf_append_utf8(sb, src);
+}
+
+bool rcre_strbuf_append(RCRE_StrBuf* sb, RCRE_Slice src) {
+    if (!sb) return false;
+    if (src.len == 0) {
+        return !sb->truncated;
+    }
+    if (!src.data) {
+        sb->truncated = true;
+        return false;
+    }
+    if (!sb->data || sb->cap == 0) {
+        sb->truncated = true;
+        return false;
+    }
+    size_t max_payload = sb->cap - 1U;
+    size_t avail = (sb->len < max_payload) ? (max_payload - sb->len) : 0U;
+    size_t to_copy = (src.len <= avail) ? src.len : avail;
+    if (to_copy > 0) {
+        memmove(sb->data + sb->len, src.data, to_copy);
+        sb->len += to_copy;
+    }
+    sb->data[sb->len] = '\0';
+    if (to_copy < src.len) {
+        sb->truncated = true;
+        return false;
+    }
+    return !sb->truncated;
+}
+
+bool rcre_strbuf_append_cstr(RCRE_StrBuf* sb, const char* cstr) {
+    return rcre_strbuf_append(sb, rcre_slice_from_cstr(cstr));
+}
+
+bool rcre_strbuf_append_utf8(RCRE_StrBuf* sb, RCRE_Slice src) {
+    if (!sb) return false;
+    if (src.len == 0) return !sb->truncated;
+    if (!src.data || !sb->data || sb->cap == 0) {
+        sb->truncated = true;
+        return false;
+    }
+    size_t max_payload = sb->cap - 1U;
+    size_t avail = (sb->len < max_payload) ? (max_payload - sb->len) : 0U;
+    RCRE_Slice fit = rcre_utf8_truncate_bytes(src, avail);
+    if (fit.len > 0) {
+        memmove(sb->data + sb->len, fit.data, fit.len);
+        sb->len += fit.len;
+    }
+    sb->data[sb->len] = '\0';
+    if (fit.len < src.len) {
+        sb->truncated = true;
+        return false;
+    }
+    return !sb->truncated;
+}
+
+bool rcre_strbuf_append_byte(RCRE_StrBuf* sb, uint8_t b) {
+    return rcre_strbuf_append(sb, rcre_slice_from_parts(&b, 1));
+}
+
+bool rcre_strbuf_append_cp(RCRE_StrBuf* sb, uint32_t cp) {
+    uint8_t enc[4];
+    size_t n = rcre_utf8_encode(cp, enc);
+    if (n == 0) {
+        return false;
+    }
+    return rcre_strbuf_append(sb, rcre_slice_from_parts(enc, n));
+}
+
+bool rcre_strbuf_append_u64(RCRE_StrBuf* sb, uint64_t val) {
+    uint8_t buf[24];
+    size_t n = rcre_str__u64_to_dec(val, buf);
+    return rcre_strbuf_append(sb, rcre_slice_from_parts(buf, n));
+}
+
+bool rcre_strbuf_append_i64(RCRE_StrBuf* sb, int64_t val) {
+    if (val < 0) {
+        if (!rcre_strbuf_append_byte(sb, '-')) return false;
+        uint64_t mag = (val == INT64_MIN) ? ((uint64_t)INT64_MAX + 1ULL) : (uint64_t)(-val);
+        return rcre_strbuf_append_u64(sb, mag);
+    }
+    return rcre_strbuf_append_u64(sb, (uint64_t)val);
+}
+
+bool rcre_strbuf_append_hex(RCRE_StrBuf* sb, uint64_t val, bool uppercase) {
+    uint8_t buf[24];
+    size_t n = rcre_str__u64_to_hex(val, uppercase, buf);
+    return rcre_strbuf_append(sb, rcre_slice_from_parts(buf, n));
+}
+
+bool rcre_strbuf_append_f64(RCRE_StrBuf* sb, double val, int precision) {
+    if (!sb) return false;
+    rcre_str__sink sink = { .strbuf = sb, .builder = nullptr };
+    return rcre_str__sink_f64(&sink, val, precision);
+}
+
+bool rcre_strbuf_vfmt(RCRE_StrBuf* sb, const char* fmt, va_list ap) {
+    if (!sb) return false;
+    rcre_str__sink sink = { .strbuf = sb, .builder = nullptr };
+    return rcre_str__sink_vfmt(&sink, fmt, ap);
+}
+
+bool rcre_strbuf_fmt(RCRE_StrBuf* sb, const char* fmt, ...) {
+    if (!sb) return false;
+    va_list ap;
+    va_start(ap, fmt);
+    bool ok = rcre_strbuf_vfmt(sb, fmt, ap);
+    va_end(ap);
+    return ok;
+}
+
+RCRE_Slice rcre_strbuf_as_slice(const RCRE_StrBuf* sb) {
+    if (!sb || !sb->data || sb->len == 0) {
+        return rcre_slice_empty();
+    }
+    return rcre_slice_from_parts(sb->data, sb->len);
+}
+
+const char* rcre_strbuf_cstr(const RCRE_StrBuf* sb) {
+    if (!sb || !sb->data || sb->cap == 0) {
+        return "";
+    }
+    return (const char*)sb->data;
+}
+
+bool rcre_cstr_copy_bounded(char* dst, size_t dst_cap, RCRE_Slice src) {
+    if (!dst || dst_cap == 0) {
+        return false;
+    }
+    RCRE_StrBuf sb = rcre_strbuf_init(dst, dst_cap);
+    return rcre_strbuf_copy_utf8(&sb, src);
+}
+
+/* ========================================================================= */
+/* 2. Expanded Zero-Copy Slice Operations (STR-REQ-03)                       */
+/* ========================================================================= */
+
+int rcre_slice_cmp(RCRE_Slice a, RCRE_Slice b) {
+    size_t min_len = (a.len < b.len) ? a.len : b.len;
+    if (min_len > 0 && a.data != b.data) {
+        int c = memcmp(a.data, b.data, min_len);
+        if (c != 0) return (c < 0) ? -1 : 1;
+    }
+    if (a.len < b.len) return -1;
+    if (a.len > b.len) return 1;
+    return 0;
+}
+
+bool rcre_slice_eq_ascii_ci(RCRE_Slice a, RCRE_Slice b) {
+    if (a.len != b.len) return false;
+    if (a.len == 0 || a.data == b.data) return true;
+    for (size_t i = 0; i < a.len; ++i) {
+        if (rcre_str__to_lower_byte(a.data[i]) != rcre_str__to_lower_byte(b.data[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int rcre_slice_cmp_ascii_ci(RCRE_Slice a, RCRE_Slice b) {
+    size_t min_len = (a.len < b.len) ? a.len : b.len;
+    for (size_t i = 0; i < min_len; ++i) {
+        uint8_t ca = rcre_str__to_lower_byte(a.data[i]);
+        uint8_t cb = rcre_str__to_lower_byte(b.data[i]);
+        if (ca != cb) return (ca < cb) ? -1 : 1;
+    }
+    if (a.len < b.len) return -1;
+    if (a.len > b.len) return 1;
+    return 0;
+}
+
+uint64_t rcre_slice_hash64_seeded(RCRE_Slice s, uint64_t seed) {
+    uint64_t h = seed ^ (0x9e3779b97f4a7c15ULL * ((uint64_t)s.len + 1ULL));
+    if (!s.data || s.len == 0) {
+        return rcre_str__mix64(h);
+    }
+    size_t i = 0;
+    for (; i + 8U <= s.len; i += 8U) {
+        uint64_t k = rcre_str__load_u64_le(s.data + i);
+        h = rcre_str__mix64(h ^ k);
+    }
+    if (i < s.len) {
+        uint64_t tail = 0;
+        size_t rem = s.len - i;
+        for (size_t b = 0; b < rem; ++b) {
+            tail |= ((uint64_t)s.data[i + b]) << (b * 8U);
+        }
+        h = rcre_str__mix64(h ^ tail);
+    }
+    return rcre_str__mix64(h);
+}
+
+uint64_t rcre_slice_hash64(RCRE_Slice s) {
+    return rcre_slice_hash64_seeded(s, 0xcbf29ce484222325ULL);
+}
+
+size_t rcre_slice_find(RCRE_Slice hay, RCRE_Slice needle) {
+    if (needle.len == 0) {
+        return 0;
+    }
+    if (!hay.data || !needle.data || needle.len > hay.len) {
+        return RCRE_NPOS;
+    }
+    if (needle.len == 1) {
+        return rcre_hal.find_byte(hay.data, hay.len, needle.data[0]);
+    }
+    return rcre_hal.find_substr(hay.data, hay.len, needle.data, needle.len);
+}
+
+size_t rcre_slice_rfind(RCRE_Slice hay, RCRE_Slice needle) {
+    if (needle.len == 0) {
+        return hay.len;
+    }
+    if (!hay.data || !needle.data || needle.len > hay.len) {
+        return RCRE_NPOS;
+    }
+    if (needle.len == 1) {
+        return rcre_slice_rfind_byte(hay, needle.data[0]);
+    }
+    uint8_t first = needle.data[0];
+    uint8_t last = needle.data[needle.len - 1U];
+    size_t i = hay.len - needle.len + 1U;
+    while (i > 0) {
+        i--;
+        if (hay.data[i] == first && hay.data[i + needle.len - 1U] == last) {
+            if (needle.len == 2 || memcmp(hay.data + i + 1, needle.data + 1, needle.len - 2U) == 0) {
+                return i;
+            }
+        }
+    }
+    return RCRE_NPOS;
+}
+
+bool rcre_slice_contains(RCRE_Slice hay, RCRE_Slice needle) {
+    return rcre_slice_find(hay, needle) != RCRE_NPOS;
+}
+
+size_t rcre_slice_find_any_byte(RCRE_Slice s, RCRE_Slice charset) {
+    if (!s.data || s.len == 0 || !charset.data || charset.len == 0) {
+        return RCRE_NPOS;
+    }
+    uint8_t lut[256];
+    memset(lut, 0, sizeof(lut));
+    for (size_t j = 0; j < charset.len; ++j) {
+        lut[charset.data[j]] = 1U;
+    }
+    for (size_t i = 0; i < s.len; ++i) {
+        if (lut[s.data[i]]) return i;
+    }
+    return RCRE_NPOS;
+}
+
+size_t rcre_slice_span_bytes(RCRE_Slice s, RCRE_Slice charset) {
+    if (!s.data || s.len == 0 || !charset.data || charset.len == 0) {
+        return 0;
+    }
+    uint8_t lut[256];
+    memset(lut, 0, sizeof(lut));
+    for (size_t j = 0; j < charset.len; ++j) {
+        lut[charset.data[j]] = 1U;
+    }
+    size_t i = 0;
+    while (i < s.len && lut[s.data[i]]) {
+        i++;
+    }
+    return i;
+}
+
+RCRE_Slice rcre_slice_trim_left_ascii(RCRE_Slice s) {
+    if (!s.data || s.len == 0) return rcre_slice_empty();
+    size_t start = 0;
+    while (start < s.len && rcre_str__is_ascii_space(s.data[start])) {
+        start++;
+    }
+    return rcre_slice_sub(s, start, s.len);
+}
+
+RCRE_Slice rcre_slice_trim_right_ascii(RCRE_Slice s) {
+    if (!s.data || s.len == 0) return rcre_slice_empty();
+    size_t end = s.len;
+    while (end > 0 && rcre_str__is_ascii_space(s.data[end - 1U])) {
+        end--;
+    }
+    return rcre_slice_sub(s, 0, end);
+}
+
+RCRE_Slice rcre_slice_trim_chars(RCRE_Slice s, RCRE_Slice charset) {
+    if (!s.data || s.len == 0 || !charset.data || charset.len == 0) {
+        return s;
+    }
+    uint8_t lut[256];
+    memset(lut, 0, sizeof(lut));
+    for (size_t j = 0; j < charset.len; ++j) {
+        lut[charset.data[j]] = 1U;
+    }
+    size_t start = 0;
+    size_t end = s.len;
+    while (start < end && lut[s.data[start]]) start++;
+    while (end > start && lut[s.data[end - 1U]]) end--;
+    return rcre_slice_sub(s, start, end);
+}
+
+RCRE_Slice rcre_slice_strip_prefix(RCRE_Slice s, RCRE_Slice prefix, bool* stripped) {
+    if (rcre_slice_starts_with(s, prefix)) {
+        if (stripped) *stripped = true;
+        return rcre_slice_sub(s, prefix.len, s.len);
+    }
+    if (stripped) *stripped = false;
+    return s;
+}
+
+RCRE_Slice rcre_slice_strip_suffix(RCRE_Slice s, RCRE_Slice suffix, bool* stripped) {
+    if (rcre_slice_ends_with(s, suffix)) {
+        if (stripped) *stripped = true;
+        return rcre_slice_sub(s, 0, s.len - suffix.len);
+    }
+    if (stripped) *stripped = false;
+    return s;
+}
+
+RCRE_SplitIter rcre_split_byte_init(RCRE_Slice s, uint8_t delim) {
+    RCRE_SplitIter it = {
+        .rest       = s,
+        .delim      = rcre_slice_empty(),
+        .delim_byte = delim,
+        .use_byte   = true,
+        .done       = false
+    };
+    return it;
+}
+
+RCRE_SplitIter rcre_split_slice_init(RCRE_Slice s, RCRE_Slice delim) {
+    RCRE_SplitIter it = {
+        .rest       = s,
+        .delim      = delim,
+        .delim_byte = (delim.len == 1 && delim.data) ? delim.data[0] : 0,
+        .use_byte   = (delim.len == 1 && delim.data != nullptr),
+        .done       = false
+    };
+    return it;
+}
+
+bool rcre_split_next(RCRE_SplitIter* it, RCRE_Slice* out_token) {
+    if (!it || !out_token || it->done) {
+        return false;
+    }
+    if (it->use_byte) {
+        RCRE_SlicePair p = rcre_slice_split_once_byte(it->rest, it->delim_byte);
+        *out_token = p.head;
+        if (p.found) {
+            it->rest = p.tail;
+        } else {
+            it->rest = rcre_slice_empty();
+            it->done = true;
+        }
+        return true;
+    }
+    if (it->delim.len == 0) {
+        /* Empty delimiter yields the whole remaining slice once to avoid infinite loop */
+        *out_token = it->rest;
+        it->rest = rcre_slice_empty();
+        it->done = true;
+        return true;
+    }
+    size_t pos = rcre_slice_find(it->rest, it->delim);
+    if (pos == RCRE_NPOS) {
+        *out_token = it->rest;
+        it->rest = rcre_slice_empty();
+        it->done = true;
+        return true;
+    }
+    *out_token = rcre_slice_sub(it->rest, 0, pos);
+    it->rest = rcre_slice_sub(it->rest, pos + it->delim.len, it->rest.len);
+    return true;
+}
+
+bool rcre_split_line_next(RCRE_Slice* cursor, RCRE_Slice* out_line) {
+    if (!cursor || !out_line || !cursor->data || cursor->len == 0) {
+        return false;
+    }
+    size_t nl = rcre_slice_find_byte(*cursor, '\n');
+    RCRE_Slice line;
+    if (nl == RCRE_NPOS) {
+        line = *cursor;
+        *cursor = rcre_slice_empty();
+    } else {
+        line = rcre_slice_sub(*cursor, 0, nl);
+        *cursor = rcre_slice_sub(*cursor, nl + 1U, cursor->len);
+    }
+    if (line.len > 0 && line.data[line.len - 1U] == '\r') {
+        line = rcre_slice_sub(line, 0, line.len - 1U);
+    }
+    *out_line = line;
+    return true;
+}
+
+bool rcre_slice_parse_hex_u64(RCRE_Slice s, uint64_t* out_val) {
+    if (!out_val || !s.data || s.len == 0) return false;
+    size_t idx = 0;
+    if (s.len >= 2 && s.data[0] == '0' && (s.data[1] == 'x' || s.data[1] == 'X')) {
+        idx = 2;
+    }
+    if (idx >= s.len) return false;
+
+    uint64_t acc = 0;
+    for (; idx < s.len; ++idx) {
+        uint8_t c = s.data[idx];
+        uint64_t d = 0;
+        if (c >= '0' && c <= '9')      d = (uint64_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (uint64_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (uint64_t)(c - 'A' + 10);
+        else return false;
+
+        if (acc > (UINT64_MAX >> 4)) return false;
+        acc = (acc << 4) | d;
+    }
+    *out_val = acc;
+    return true;
+}
+
+bool rcre_slice_parse_bool(RCRE_Slice s, bool* out_val) {
+    if (!out_val) return false;
+    s = rcre_slice_trim_ascii(s);
+    if (rcre_slice_eq_ascii_ci(s, RCRE_STR("true")) ||
+        rcre_slice_eq_ascii_ci(s, RCRE_STR("1")) ||
+        rcre_slice_eq_ascii_ci(s, RCRE_STR("yes")) ||
+        rcre_slice_eq_ascii_ci(s, RCRE_STR("on"))) {
+        *out_val = true;
+        return true;
+    }
+    if (rcre_slice_eq_ascii_ci(s, RCRE_STR("false")) ||
+        rcre_slice_eq_ascii_ci(s, RCRE_STR("0")) ||
+        rcre_slice_eq_ascii_ci(s, RCRE_STR("no")) ||
+        rcre_slice_eq_ascii_ci(s, RCRE_STR("off"))) {
+        *out_val = false;
+        return true;
+    }
+    return false;
+}
+
+bool rcre_slice_parse_f64(RCRE_Slice s, double* out_val) {
+    if (!out_val) return false;
+    s = rcre_slice_trim_ascii(s);
+    if (!s.data || s.len == 0) return false;
+
+    size_t idx = 0;
+    bool neg = false;
+    if (s.data[idx] == '-') {
+        neg = true;
+        idx++;
+    } else if (s.data[idx] == '+') {
+        idx++;
+    }
+    if (idx >= s.len) return false;
+
+    RCRE_Slice rem = rcre_slice_sub(s, idx, s.len);
+    if (rcre_slice_eq_ascii_ci(rem, RCRE_STR("nan"))) {
+        uint64_t qnan = neg ? 0xFFF8000000000000ULL : 0x7FF8000000000000ULL;
+        *out_val = rcre_str__bits_to_f64(qnan);
+        return true;
+    }
+    if (rcre_slice_eq_ascii_ci(rem, RCRE_STR("inf")) ||
+        rcre_slice_eq_ascii_ci(rem, RCRE_STR("infinity"))) {
+        uint64_t infb = neg ? 0xFFF0000000000000ULL : 0x7FF0000000000000ULL;
+        *out_val = rcre_str__bits_to_f64(infb);
+        return true;
+    }
+
+    uint64_t mant = 0;
+    int digits = 0;
+    int sig_digits = 0;
+    int exp_adj = 0;
+    bool seen_dot = false;
+
+    while (idx < s.len) {
+        uint8_t c = s.data[idx];
+        if (c >= '0' && c <= '9') {
+            digits++;
+            if (sig_digits < 19) {
+                if (mant != 0 || c != '0') {
+                    mant = mant * 10ULL + (uint64_t)(c - '0');
+                    sig_digits++;
+                }
+                if (seen_dot) exp_adj--;
+            } else {
+                if (!seen_dot) exp_adj++;
+            }
+            idx++;
+        } else if (c == '.' && !seen_dot) {
+            seen_dot = true;
+            idx++;
+        } else {
+            break;
+        }
+    }
+
+    if (digits == 0) return false;
+
+    int exp10 = 0;
+    if (idx < s.len && (s.data[idx] == 'e' || s.data[idx] == 'E')) {
+        idx++;
+        bool eneg = false;
+        if (idx < s.len && (s.data[idx] == '-' || s.data[idx] == '+')) {
+            eneg = (s.data[idx] == '-');
+            idx++;
+        }
+        int edigits = 0;
+        int eval = 0;
+        while (idx < s.len && s.data[idx] >= '0' && s.data[idx] <= '9') {
+            edigits++;
+            if (eval < 10000) {
+                eval = eval * 10 + (int)(s.data[idx] - '0');
+            }
+            idx++;
+        }
+        if (edigits == 0) return false;
+        exp10 = eneg ? -eval : eval;
+    }
+
+    if (idx != s.len) return false;
+
+    int total_exp = exp10 + exp_adj;
+    if (mant == 0) {
+        *out_val = neg ? -0.0 : 0.0;
+        return true;
+    }
+    if (total_exp > 309) {
+        *out_val = rcre_str__bits_to_f64(neg ? 0xFFF0000000000000ULL : 0x7FF0000000000000ULL);
+        return true;
+    }
+    if (total_exp < -340) {
+        *out_val = neg ? -0.0 : 0.0;
+        return true;
+    }
+
+    /* Exact IEEE-754 double scaling for small exponents, binary exponentiation for large */
+    static const double exact_pow10[23] = {
+        1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,
+        1e8,  1e9,  1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+        1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22
+    };
+    double res = (double)mant;
+    if (total_exp >= 0 && total_exp <= 22) {
+        res *= exact_pow10[total_exp];
+    } else if (total_exp < 0 && total_exp >= -22) {
+        res /= exact_pow10[-total_exp];
+    } else if (total_exp > 22) {
+        if (total_exp > 300) {
+            res *= 1e300;
+            res *= rcre_str__pow10_u32((unsigned int)(total_exp - 300));
+        } else {
+            res *= rcre_str__pow10_u32((unsigned int)total_exp);
+        }
+    } else {
+        /* Split negative exponents past -300 to avoid intermediate 1e309 Inf */
+        if (total_exp < -300) {
+            res /= 1e300;
+            res /= rcre_str__pow10_u32((unsigned int)(-total_exp - 300));
+        } else {
+            res /= rcre_str__pow10_u32((unsigned int)(-total_exp));
+        }
+    }
+
+    *out_val = neg ? -res : res;
+    return true;
+}
+
+/* ========================================================================= */
+/* 3. Expanded Arena String Builder & Transforms (STR-REQ-03)                */
+/* ========================================================================= */
+
+void rcre_sb_reset(RCRE_StrBuilder* sb) {
+    if (!sb) return;
+    sb->len = 0;
+    sb->overflow = (sb->arena == nullptr);
+    if (sb->buf && sb->cap > 0) {
+        sb->buf[0] = '\0';
+    }
+}
+
+bool rcre_sb_append_hex(RCRE_StrBuilder* sb, uint64_t val, bool uppercase) {
+    uint8_t buf[24];
+    size_t n = rcre_str__u64_to_hex(val, uppercase, buf);
+    return rcre_sb_append_slice(sb, rcre_slice_from_parts(buf, n));
+}
+
+bool rcre_sb_append_f64(RCRE_StrBuilder* sb, double val, int precision) {
+    if (!sb || sb->overflow) return false;
+    rcre_str__sink sink = { .strbuf = nullptr, .builder = sb };
+    return rcre_str__sink_f64(&sink, val, precision);
+}
+
+bool rcre_sb_append_cp(RCRE_StrBuilder* sb, uint32_t cp) {
+    uint8_t enc[4];
+    size_t n = rcre_utf8_encode(cp, enc);
+    if (n == 0) return false;
+    return rcre_sb_append_slice(sb, rcre_slice_from_parts(enc, n));
+}
+
+bool rcre_sb_append_repeat(RCRE_StrBuilder* sb, RCRE_Slice unit, size_t count) {
+    if (!sb || sb->overflow) return false;
+    if (unit.len == 0 || count == 0) return true;
+    for (size_t i = 0; i < count; ++i) {
+        if (!rcre_sb_append_slice(sb, unit)) return false;
+    }
+    return true;
+}
+
+bool rcre_sb_append_vfmt(RCRE_StrBuilder* sb, const char* fmt, va_list ap) {
+    if (!sb || sb->overflow) return false;
+    rcre_str__sink sink = { .strbuf = nullptr, .builder = sb };
+    return rcre_str__sink_vfmt(&sink, fmt, ap);
+}
+
+bool rcre_sb_append_fmt(RCRE_StrBuilder* sb, const char* fmt, ...) {
+    if (!sb || sb->overflow) return false;
+    va_list ap;
+    va_start(ap, fmt);
+    bool ok = rcre_sb_append_vfmt(sb, fmt, ap);
+    va_end(ap);
+    return ok;
+}
+
+bool rcre_sb_append_escape_json(RCRE_StrBuilder* sb, RCRE_Slice s) {
+    if (!sb || sb->overflow) return false;
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < s.len; ++i) {
+        uint8_t c = s.data[i];
+        switch (c) {
+            case '"':  if (!rcre_sb_append_slice(sb, RCRE_STR("\\\""))) return false; break;
+            case '\\': if (!rcre_sb_append_slice(sb, RCRE_STR("\\\\"))) return false; break;
+            case '\b': if (!rcre_sb_append_slice(sb, RCRE_STR("\\b")))  return false; break;
+            case '\f': if (!rcre_sb_append_slice(sb, RCRE_STR("\\f")))  return false; break;
+            case '\n': if (!rcre_sb_append_slice(sb, RCRE_STR("\\n")))  return false; break;
+            case '\r': if (!rcre_sb_append_slice(sb, RCRE_STR("\\r")))  return false; break;
+            case '\t': if (!rcre_sb_append_slice(sb, RCRE_STR("\\t")))  return false; break;
+            default:
+                if (c < 0x20U) {
+                    uint8_t esc[6] = { '\\', 'u', '0', '0', (uint8_t)hex[c >> 4], (uint8_t)hex[c & 0xFU] };
+                    if (!rcre_sb_append_slice(sb, rcre_slice_from_parts(esc, 6))) return false;
+                } else {
+                    if (!rcre_sb_append_byte(sb, c)) return false;
+                }
+                break;
+        }
+    }
+    return true;
+}
+
+bool rcre_sb_append_escape_csv(RCRE_StrBuilder* sb, RCRE_Slice s, uint8_t delim) {
+    if (!sb || sb->overflow) return false;
+    bool needs_quote = false;
+    for (size_t i = 0; i < s.len; ++i) {
+        uint8_t c = s.data[i];
+        if (c == delim || c == '"' || c == '\n' || c == '\r') {
+            needs_quote = true;
+            break;
+        }
+    }
+    if (!needs_quote) {
+        return rcre_sb_append_slice(sb, s);
+    }
+    if (!rcre_sb_append_byte(sb, '"')) return false;
+    for (size_t i = 0; i < s.len; ++i) {
+        if (s.data[i] == '"') {
+            if (!rcre_sb_append_slice(sb, RCRE_STR("\"\""))) return false;
+        } else {
+            if (!rcre_sb_append_byte(sb, s.data[i])) return false;
+        }
+    }
+    return rcre_sb_append_byte(sb, '"');
+}
+
+RCRE_Slice rcre_str_dup(RCRE_Arena* arena, RCRE_Slice s) {
+    if (!arena || s.len == 0 || !s.data) {
+        return rcre_slice_empty();
+    }
+    if (s.len > SIZE_MAX - 1U) {
+        return rcre_slice_empty();
+    }
+    uint8_t* dst = (uint8_t*)rcre_arena_alloc(arena, s.len + 1U, 8);
+    if (!dst) {
+        return rcre_slice_empty();
+    }
+    memcpy(dst, s.data, s.len);
+    dst[s.len] = '\0';
+    return rcre_slice_from_parts(dst, s.len);
+}
+
+RCRE_Slice rcre_str_concat(RCRE_Arena* arena, RCRE_Slice a, RCRE_Slice b) {
+    if (!arena) return rcre_slice_empty();
+    if (a.len > SIZE_MAX - b.len - 1U) return rcre_slice_empty();
+    size_t total = a.len + b.len;
+    if (total == 0) return rcre_slice_empty();
+    uint8_t* dst = (uint8_t*)rcre_arena_alloc(arena, total + 1U, 8);
+    if (!dst) return rcre_slice_empty();
+    if (a.len > 0 && a.data) memcpy(dst, a.data, a.len);
+    if (b.len > 0 && b.data) memcpy(dst + a.len, b.data, b.len);
+    dst[total] = '\0';
+    return rcre_slice_from_parts(dst, total);
+}
+
+RCRE_Slice rcre_str_join(RCRE_Arena* arena, const RCRE_Slice* parts, size_t count, RCRE_Slice sep) {
+    if (!arena || !parts || count == 0) return rcre_slice_empty();
+    size_t total = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (parts[i].len > SIZE_MAX - total) return rcre_slice_empty();
+        total += parts[i].len;
+        if (i + 1U < count) {
+            if (sep.len > SIZE_MAX - total) return rcre_slice_empty();
+            total += sep.len;
+        }
+    }
+    if (total == 0 || total > SIZE_MAX - 1U) return rcre_slice_empty();
+    uint8_t* dst = (uint8_t*)rcre_arena_alloc(arena, total + 1U, 8);
+    if (!dst) return rcre_slice_empty();
+
+    size_t pos = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (parts[i].len > 0 && parts[i].data) {
+            memcpy(dst + pos, parts[i].data, parts[i].len);
+            pos += parts[i].len;
+        }
+        if (i + 1U < count && sep.len > 0 && sep.data) {
+            memcpy(dst + pos, sep.data, sep.len);
+            pos += sep.len;
+        }
+    }
+    dst[pos] = '\0';
+    return rcre_slice_from_parts(dst, pos);
+}
+
+RCRE_Slice rcre_str_replace_all(RCRE_Arena* arena, RCRE_Slice s, RCRE_Slice old_sub, RCRE_Slice new_sub) {
+    if (!arena || s.len == 0 || !s.data) return rcre_slice_empty();
+    if (old_sub.len == 0 || !old_sub.data) {
+        return rcre_str_dup(arena, s);
+    }
+
+    RCRE_StrBuilder sb = rcre_sb_init(arena, s.len);
+    RCRE_Slice cur = s;
+    while (cur.len > 0) {
+        size_t pos = rcre_slice_find(cur, old_sub);
+        if (pos == RCRE_NPOS) {
+            if (!rcre_sb_append_slice(&sb, cur)) return rcre_slice_empty();
+            break;
+        }
+        if (pos > 0) {
+            if (!rcre_sb_append_slice(&sb, rcre_slice_sub(cur, 0, pos))) return rcre_slice_empty();
+        }
+        if (new_sub.len > 0) {
+            if (!rcre_sb_append_slice(&sb, new_sub)) return rcre_slice_empty();
+        }
+        cur = rcre_slice_sub(cur, pos + old_sub.len, cur.len);
+    }
+    return rcre_sb_to_slice(&sb);
+}
+
+RCRE_Slice rcre_str_to_lower_ascii(RCRE_Arena* arena, RCRE_Slice s) {
+    if (!arena || s.len == 0 || !s.data || s.len > SIZE_MAX - 1U) {
+        return rcre_slice_empty();
+    }
+    uint8_t* dst = (uint8_t*)rcre_arena_alloc(arena, s.len + 1U, 64);
+    if (!dst) return rcre_slice_empty();
+    rcre_hal.ascii_to_lower(s.data, dst, s.len);
+    dst[s.len] = '\0';
+    return rcre_slice_from_parts(dst, s.len);
+}
+
+RCRE_Slice rcre_str_to_upper_ascii(RCRE_Arena* arena, RCRE_Slice s) {
+    if (!arena || s.len == 0 || !s.data || s.len > SIZE_MAX - 1U) {
+        return rcre_slice_empty();
+    }
+    uint8_t* dst = (uint8_t*)rcre_arena_alloc(arena, s.len + 1U, 64);
+    if (!dst) return rcre_slice_empty();
+    rcre_hal.ascii_to_upper(s.data, dst, s.len);
+    dst[s.len] = '\0';
+    return rcre_slice_from_parts(dst, s.len);
+}
+
+RCRE_Slice rcre_str_fmt(RCRE_Arena* arena, const char* fmt, ...) {
+    if (!arena || !fmt) return rcre_slice_empty();
+    RCRE_StrBuilder sb = rcre_sb_init(arena, 64);
+    va_list ap;
+    va_start(ap, fmt);
+    bool ok = rcre_sb_append_vfmt(&sb, fmt, ap);
+    va_end(ap);
+    if (!ok || sb.overflow) return rcre_slice_empty();
+    return rcre_sb_to_slice(&sb);
+}
+
+/* ========================================================================= */
+/* 4. Strict RFC 3629 UTF-8 Layer (STR-REQ-04)                               */
+/* ========================================================================= */
+
+static int rcre_str__utf8_decode_at(const uint8_t* p, size_t len, uint32_t* out_cp) {
+    if (len == 0) return 0;
+    uint8_t b0 = p[0];
+    if (b0 < 0x80U) {
+        if (out_cp) *out_cp = (uint32_t)b0;
+        return 1;
+    }
+    if (b0 >= 0xC2U && b0 <= 0xDFU) {
+        if (len < 2U) goto invalid;
+        uint8_t b1 = p[1];
+        if ((b1 & 0xC0U) != 0x80U) goto invalid;
+        if (out_cp) *out_cp = ((uint32_t)(b0 & 0x1FU) << 6) | (uint32_t)(b1 & 0x3FU);
+        return 2;
+    }
+    if (b0 >= 0xE0U && b0 <= 0xEFU) {
+        if (len < 3U) goto invalid;
+        uint8_t b1 = p[1];
+        uint8_t b2 = p[2];
+        if ((b1 & 0xC0U) != 0x80U || (b2 & 0xC0U) != 0x80U) goto invalid;
+        if (b0 == 0xE0U && b1 < 0xA0U) goto invalid; /* Overlong 3-byte */
+        if (b0 == 0xEDU && b1 >= 0xA0U) goto invalid; /* UTF-16 surrogates U+D800..U+DFFF */
+        if (out_cp) {
+            *out_cp = ((uint32_t)(b0 & 0x0FU) << 12) |
+                      ((uint32_t)(b1 & 0x3FU) << 6)  |
+                      (uint32_t)(b2 & 0x3FU);
+        }
+        return 3;
+    }
+    if (b0 >= 0xF0U && b0 <= 0xF4U) {
+        if (len < 4U) goto invalid;
+        uint8_t b1 = p[1];
+        uint8_t b2 = p[2];
+        uint8_t b3 = p[3];
+        if ((b1 & 0xC0U) != 0x80U || (b2 & 0xC0U) != 0x80U || (b3 & 0xC0U) != 0x80U) goto invalid;
+        if (b0 == 0xF0U && b1 < 0x90U) goto invalid;  /* Overlong 4-byte */
+        if (b0 == 0xF4U && b1 >= 0x90U) goto invalid; /* > U+10FFFF */
+        if (out_cp) {
+            *out_cp = ((uint32_t)(b0 & 0x07U) << 18) |
+                      ((uint32_t)(b1 & 0x3FU) << 12) |
+                      ((uint32_t)(b2 & 0x3FU) << 6)  |
+                      (uint32_t)(b3 & 0x3FU);
+        }
+        return 4;
+    }
+
+invalid:
+    if (out_cp) *out_cp = RCRE_UTF8_REPLACEMENT_CP;
+    return -1;
+}
+
+bool rcre_utf8_validate(RCRE_Slice s, size_t* out_err_offset) {
+    if (!s.data || s.len == 0) {
+        return true;
+    }
+    if (rcre_hal.utf8_validate(s.data, s.len)) {
+        return true;
+    }
+    if (out_err_offset) {
+        size_t i = 0;
+        while (i < s.len) {
+            int step = rcre_str__utf8_decode_at(s.data + i, s.len - i, nullptr);
+            if (step <= 0) {
+                *out_err_offset = i;
+                return false;
+            }
+            i += (size_t)step;
+        }
+        *out_err_offset = s.len;
+    }
+    return false;
+}
+
+bool rcre_utf8_is_ascii(RCRE_Slice s) {
+    if (!s.data || s.len == 0) return true;
+    size_t i = 0;
+    uint64_t acc = 0;
+    for (; i + 8U <= s.len; i += 8U) {
+        acc |= rcre_str__load_u64_le(s.data + i);
+    }
+    if ((acc & 0x8080808080808080ULL) != 0ULL) return false;
+    for (; i < s.len; ++i) {
+        if ((s.data[i] & 0x80U) != 0U) return false;
+    }
+    return true;
+}
+
+size_t rcre_utf8_count(RCRE_Slice s) {
+    if (!s.data || s.len == 0) return 0;
+    if (!rcre_hal.utf8_validate(s.data, s.len)) {
+        return RCRE_NPOS;
+    }
+    /* For validated UTF-8, codepoint count == bytes where (b & 0xC0) != 0x80 */
+    size_t count = 0;
+    for (size_t i = 0; i < s.len; ++i) {
+        count += (size_t)((s.data[i] & 0xC0U) != 0x80U);
+    }
+    return count;
+}
+
+int rcre_utf8_decode_next(RCRE_Slice* cursor, uint32_t* out_cp) {
+    if (!cursor || !cursor->data || cursor->len == 0) {
+        if (out_cp) *out_cp = 0;
+        return 0;
+    }
+    int step = rcre_str__utf8_decode_at(cursor->data, cursor->len, out_cp);
+    if (step > 0) {
+        cursor->data += (size_t)step;
+        cursor->len -= (size_t)step;
+        if (cursor->len == 0) cursor->data = nullptr;
+    }
+    return step;
+}
+
+int rcre_utf8_decode_prev(RCRE_Slice* cursor, uint32_t* out_cp) {
+    if (!cursor || !cursor->data || cursor->len == 0) {
+        if (out_cp) *out_cp = 0;
+        return 0;
+    }
+    size_t end = cursor->len;
+    size_t start = end - 1U;
+    size_t backtrack = 0;
+    while (start > 0 && ((cursor->data[start] & 0xC0U) == 0x80U) && backtrack < 3U) {
+        start--;
+        backtrack++;
+    }
+    size_t seq_len = end - start;
+    int step = rcre_str__utf8_decode_at(cursor->data + start, seq_len, out_cp);
+    if (step != (int)seq_len) {
+        if (out_cp) *out_cp = RCRE_UTF8_REPLACEMENT_CP;
+        return -1;
+    }
+    cursor->len = start;
+    if (cursor->len == 0) cursor->data = nullptr;
+    return step;
+}
+
+size_t rcre_utf8_encode(uint32_t cp, uint8_t out[4]) {
+    if (!out) return 0;
+    if (cp <= 0x7FU) {
+        out[0] = (uint8_t)cp;
+        return 1;
+    }
+    if (cp <= 0x7FFU) {
+        out[0] = (uint8_t)(0xC0U | (cp >> 6));
+        out[1] = (uint8_t)(0x80U | (cp & 0x3FU));
+        return 2;
+    }
+    if (cp >= 0xD800U && cp <= 0xDFFFU) {
+        return 0; /* Reject UTF-16 surrogates */
+    }
+    if (cp <= 0xFFFFU) {
+        out[0] = (uint8_t)(0xE0U | (cp >> 12));
+        out[1] = (uint8_t)(0x80U | ((cp >> 6) & 0x3FU));
+        out[2] = (uint8_t)(0x80U | (cp & 0x3FU));
+        return 3;
+    }
+    if (cp <= 0x10FFFFU) {
+        out[0] = (uint8_t)(0xF0U | (cp >> 18));
+        out[1] = (uint8_t)(0x80U | ((cp >> 12) & 0x3FU));
+        out[2] = (uint8_t)(0x80U | ((cp >> 6) & 0x3FU));
+        out[3] = (uint8_t)(0x80U | (cp & 0x3FU));
+        return 4;
+    }
+    return 0;
+}
+
+RCRE_Slice rcre_utf8_truncate_bytes(RCRE_Slice s, size_t max_bytes) {
+    if (!s.data || s.len == 0 || max_bytes == 0) {
+        return rcre_slice_empty();
+    }
+    size_t limit = (max_bytes < s.len) ? max_bytes : s.len;
+    /* Fast path when the entire input is already valid UTF-8 and fits */
+    if (limit == s.len && rcre_hal.utf8_validate(s.data, s.len)) {
+        return s;
+    }
+    size_t i = 0;
+    while (i < limit) {
+        int step = rcre_str__utf8_decode_at(s.data + i, s.len - i, nullptr);
+        if (step <= 0 || i + (size_t)step > limit) {
+            break;
+        }
+        i += (size_t)step;
+    }
+    return rcre_slice_sub(s, 0, i);
+}
+
+RCRE_Slice rcre_utf8_sub_codepoints(RCRE_Slice s, size_t start_cp, size_t count_cp) {
+    if (!s.data || s.len == 0 || count_cp == 0) {
+        return rcre_slice_empty();
+    }
+    RCRE_Slice cur = s;
+    size_t idx = 0;
+    while (idx < start_cp && cur.len > 0) {
+        int step = rcre_utf8_decode_next(&cur, nullptr);
+        if (step <= 0) return rcre_slice_empty();
+        idx++;
+    }
+    if (idx < start_cp || cur.len == 0) {
+        return rcre_slice_empty();
+    }
+    const uint8_t* start_ptr = cur.data;
+    size_t taken = 0;
+    while (taken < count_cp && cur.len > 0) {
+        int step = rcre_utf8_decode_next(&cur, nullptr);
+        if (step <= 0) break;
+        taken++;
+    }
+    size_t byte_len = (cur.data ? (size_t)(cur.data - start_ptr) : (size_t)((s.data + s.len) - start_ptr));
+    return rcre_slice_from_parts(start_ptr, byte_len);
+}
+
+/* ========================================================================= */
+/* 5. Arena String Interning Pool (STR-REQ-06)                               */
+/* ========================================================================= */
+
+static bool rcre_str__pool_grow(RCRE_StrPool* pool, size_t min_slot_cap, size_t min_id_cap) {
+    size_t new_slot_cap = rcre_str__next_pow2(min_slot_cap);
+    if (new_slot_cap == 0 || new_slot_cap > SIZE_MAX / sizeof(RCRE_StrPoolEntry)) {
+        return false;
+    }
+    if (min_id_cap > SIZE_MAX / sizeof(RCRE_Slice)) {
+        return false;
+    }
+
+    RCRE_StrPoolEntry* new_slots = (RCRE_StrPoolEntry*)rcre_arena_alloc(
+        pool->arena, new_slot_cap * sizeof(RCRE_StrPoolEntry), alignof(RCRE_StrPoolEntry));
+    if (!new_slots) return false;
+    for (size_t i = 0; i < new_slot_cap; ++i) {
+        new_slots[i].hash = 0;
+        new_slots[i].slice = rcre_slice_empty();
+        new_slots[i].id = RCRE_STR_ID_INVALID;
+    }
+
+    RCRE_Slice* new_by_id = pool->by_id;
+    size_t new_id_cap = pool->id_cap;
+    if (min_id_cap > pool->id_cap) {
+        new_id_cap = (pool->id_cap == 0) ? 16U : pool->id_cap;
+        while (new_id_cap < min_id_cap) {
+            if (new_id_cap > SIZE_MAX / 2U) { new_id_cap = min_id_cap; break; }
+            new_id_cap *= 2U;
+        }
+        new_by_id = (RCRE_Slice*)rcre_arena_alloc(
+            pool->arena, new_id_cap * sizeof(RCRE_Slice), alignof(RCRE_Slice));
+        if (!new_by_id) return false;
+        if (pool->count > 0 && pool->by_id) {
+            memcpy(new_by_id, pool->by_id, pool->count * sizeof(RCRE_Slice));
+        }
+    }
+
+    /* Reinsert existing entries */
+    size_t mask = new_slot_cap - 1U;
+    for (size_t i = 0; i < pool->slot_cap; ++i) {
+        if (pool->slots[i].id != RCRE_STR_ID_INVALID) {
+            size_t idx = (size_t)(pool->slots[i].hash & (uint64_t)mask);
+            while (new_slots[idx].id != RCRE_STR_ID_INVALID) {
+                idx = (idx + 1U) & mask;
+            }
+            new_slots[idx] = pool->slots[i];
+        }
+    }
+
+    pool->slots = new_slots;
+    pool->slot_cap = new_slot_cap;
+    pool->by_id = new_by_id;
+    pool->id_cap = new_id_cap;
+    return true;
+}
+
+int rcre_strpool_init(RCRE_StrPool* pool, RCRE_Arena* arena, size_t initial_cap) {
+    if (!pool || !arena) return RCRE_ERR_INVALID_ARG;
+    memset(pool, 0, sizeof(*pool));
+    pool->arena = arena;
+    pool->seed = 0x517cc1b727220a95ULL;
+
+    size_t id_cap = (initial_cap < 16U) ? 16U : initial_cap;
+    size_t slot_cap = rcre_str__next_pow2(id_cap * 2U);
+    if (!rcre_str__pool_grow(pool, slot_cap, id_cap)) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    return RCRE_OK;
+}
+
+RCRE_StrId rcre_strpool_find(const RCRE_StrPool* pool, RCRE_Slice s) {
+    if (!pool || !pool->slots || pool->slot_cap == 0) {
+        return RCRE_STR_ID_INVALID;
+    }
+    uint64_t h = rcre_slice_hash64_seeded(s, pool->seed);
+    size_t mask = pool->slot_cap - 1U;
+    size_t idx = (size_t)(h & (uint64_t)mask);
+    for (;;) {
+        const RCRE_StrPoolEntry* e = &pool->slots[idx];
+        if (e->id == RCRE_STR_ID_INVALID) {
+            return RCRE_STR_ID_INVALID;
+        }
+        if (e->hash == h && rcre_slice_eq(e->slice, s)) {
+            return e->id;
+        }
+        idx = (idx + 1U) & mask;
+    }
+}
+
+RCRE_StrId rcre_strpool_intern(RCRE_StrPool* pool, RCRE_Slice s) {
+    if (!pool || !pool->arena || !pool->slots || pool->slot_cap == 0) {
+        return RCRE_STR_ID_INVALID;
+    }
+    if (pool->count >= (size_t)RCRE_STR_ID_INVALID) {
+        return RCRE_STR_ID_INVALID;
+    }
+
+    RCRE_StrId existing = rcre_strpool_find(pool, s);
+    if (existing != RCRE_STR_ID_INVALID) {
+        return existing;
+    }
+
+    /* Keep load factor <= 70% */
+    if ((pool->count + 1U) * 10U >= pool->slot_cap * 7U || pool->count >= pool->id_cap) {
+        size_t next_slots = (pool->slot_cap <= SIZE_MAX / 2U) ? (pool->slot_cap * 2U) : 0U;
+        size_t next_ids = (pool->count + 1U > pool->id_cap) ? (pool->id_cap * 2U) : pool->id_cap;
+        if (next_slots == 0 || !rcre_str__pool_grow(pool, next_slots, next_ids)) {
+            return RCRE_STR_ID_INVALID;
+        }
+    }
+
+    /* Always store a NUL-terminated copy in the arena (even for empty slice) */
+    if (s.len > SIZE_MAX - 1U) return RCRE_STR_ID_INVALID;
+    uint8_t* copy = (uint8_t*)rcre_arena_alloc(pool->arena, s.len + 1U, 8);
+    if (!copy) return RCRE_STR_ID_INVALID;
+    if (s.len > 0 && s.data) {
+        memcpy(copy, s.data, s.len);
+    }
+    copy[s.len] = '\0';
+
+    RCRE_Slice stored = { .data = copy, .len = s.len };
+    uint64_t h = rcre_slice_hash64_seeded(stored, pool->seed);
+    RCRE_StrId id = (RCRE_StrId)pool->count;
+
+    size_t mask = pool->slot_cap - 1U;
+    size_t idx = (size_t)(h & (uint64_t)mask);
+    while (pool->slots[idx].id != RCRE_STR_ID_INVALID) {
+        idx = (idx + 1U) & mask;
+    }
+    pool->slots[idx].hash = h;
+    pool->slots[idx].slice = stored;
+    pool->slots[idx].id = id;
+    pool->by_id[id] = stored;
+    pool->count++;
+    return id;
+}
+
+RCRE_Slice rcre_strpool_get(const RCRE_StrPool* pool, RCRE_StrId id) {
+    if (!pool || !pool->by_id || (size_t)id >= pool->count) {
+        return rcre_slice_empty();
+    }
+    RCRE_Slice s = pool->by_id[id];
+    if (s.len == 0) {
+        return rcre_slice_empty();
+    }
+    return s;
+}
+
+const char* rcre_strpool_cstr(const RCRE_StrPool* pool, RCRE_StrId id) {
+    if (!pool || !pool->by_id || (size_t)id >= pool->count) {
+        return "";
+    }
+    return pool->by_id[id].data ? (const char*)pool->by_id[id].data : "";
+}
+
+size_t rcre_strpool_count(const RCRE_StrPool* pool) {
+    return pool ? pool->count : 0;
+}
+
+/* ========================================================================= */
+/* 6. Safe Path Manipulation (STR-REQ-06)                                    */
+/* ========================================================================= */
+
+static RCRE_Slice rcre_str__trim_trailing_seps(RCRE_Slice path) {
+    size_t end = path.len;
+    while (end > 1U && rcre_str__is_path_sep(path.data[end - 1U])) {
+        end--;
+    }
+    return rcre_slice_sub(path, 0, end);
+}
+
+RCRE_Slice rcre_path_basename(RCRE_Slice path) {
+    if (!path.data || path.len == 0) return rcre_slice_empty();
+    RCRE_Slice p = rcre_str__trim_trailing_seps(path);
+    if (p.len == 1U && rcre_str__is_path_sep(p.data[0])) {
+        return p;
+    }
+    size_t i = p.len;
+    while (i > 0) {
+        i--;
+        if (rcre_str__is_path_sep(p.data[i])) {
+            return rcre_slice_sub(p, i + 1U, p.len);
+        }
+    }
+    return p;
+}
+
+RCRE_Slice rcre_path_dirname(RCRE_Slice path) {
+    if (!path.data || path.len == 0) return RCRE_STR(".");
+    RCRE_Slice p = rcre_str__trim_trailing_seps(path);
+    if (p.len == 1U && rcre_str__is_path_sep(p.data[0])) {
+        return p;
+    }
+    size_t i = p.len;
+    while (i > 0) {
+        i--;
+        if (rcre_str__is_path_sep(p.data[i])) {
+            if (i == 0) return rcre_slice_sub(p, 0, 1);
+            return rcre_str__trim_trailing_seps(rcre_slice_sub(p, 0, i));
+        }
+    }
+    return RCRE_STR(".");
+}
+
+RCRE_Slice rcre_path_ext(RCRE_Slice path) {
+    RCRE_Slice base = rcre_path_basename(path);
+    if (base.len <= 1U) return rcre_slice_empty();
+    size_t dot = rcre_slice_rfind_byte(base, '.');
+    /* Hidden file like ".bashrc" (dot == 0) has no extension */
+    if (dot == RCRE_NPOS || dot == 0) {
+        return rcre_slice_empty();
+    }
+    return rcre_slice_sub(base, dot, base.len);
+}
+
+RCRE_Slice rcre_path_stem(RCRE_Slice path) {
+    RCRE_Slice base = rcre_path_basename(path);
+    RCRE_Slice ext = rcre_path_ext(base);
+    if (ext.len == 0) return base;
+    return rcre_slice_sub(base, 0, base.len - ext.len);
+}
+
+RCRE_Slice rcre_path_join(RCRE_Arena* arena, RCRE_Slice a, RCRE_Slice b) {
+    if (!arena) return rcre_slice_empty();
+    if (a.len == 0) return rcre_str_dup(arena, b);
+    if (b.len == 0) return rcre_str_dup(arena, a);
+    /* Absolute RHS overrides LHS (POSIX convention) */
+    if (rcre_str__is_path_sep(b.data[0])) {
+        return rcre_str_dup(arena, b);
+    }
+    size_t a_end = a.len;
+    while (a_end > 1U && rcre_str__is_path_sep(a.data[a_end - 1U])) {
+        a_end--;
+    }
+    RCRE_Slice a_trim = rcre_slice_sub(a, 0, a_end);
+    if (a_trim.len == 1U && rcre_str__is_path_sep(a_trim.data[0])) {
+        return rcre_str_concat(arena, a_trim, b);
+    }
+    RCRE_Slice parts[2] = { a_trim, b };
+    return rcre_str_join(arena, parts, 2, RCRE_STR("/"));
 }
 
 /* --- Source: tensor.c --- */
@@ -15224,10 +17879,11 @@ RCRE_NODISCARD int rcre_df_create(
 
     for (size_t c = 0; c < num_cols; ++c) {
         if (col_names && col_names[c]) {
-            strncpy(cols[c].name, col_names[c], RCRE_DF_MAX_NAME - 1);
-            cols[c].name[RCRE_DF_MAX_NAME - 1] = '\0';
+            (void)rcre_cstr_copy_bounded(cols[c].name, sizeof(cols[c].name),
+                                         rcre_slice_from_cstr(col_names[c]));
         } else {
-            snprintf(cols[c].name, sizeof(cols[c].name), "col_%zu", c);
+            RCRE_StrBuf name_buf = RCRE_STRBUF_WRAP(cols[c].name);
+            (void)rcre_strbuf_fmt(&name_buf, "col_%zu", c);
         }
 
         cols[c].dtype = col_dtypes[c];

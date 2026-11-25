@@ -21,6 +21,7 @@ endif()
 set(RCRE_CORE_SRCS
     src/core/arena.c
     src/core/slice.c
+    src/core/str.c
     src/core/tensor.c
     src/core/adapt.c
     src/core/threadpool.c

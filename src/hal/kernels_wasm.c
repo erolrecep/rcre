@@ -10,6 +10,7 @@
 
 #if defined(__wasm_simd128__)
 #include <wasm_simd128.h>
+#include <string.h>
 
 float rcre_wasm_dot_f32(const float* x, const float* y, size_t n) {
     v128_t sum0 = wasm_f32x4_splat(0.0f);
@@ -284,6 +285,140 @@ void rcre_wasm_gemv_f32(size_t M, size_t K, float alpha,
         float acc = rcre_wasm_dot_f32(&A[i * lda], x, K);
         float prev = (beta == 0.0f) ? 0.0f : (y[i] * beta);
         y[i] = prev + alpha * acc;
+    }
+}
+
+/* ========================================================================= */
+/* STR-REQ-05: WebAssembly 128-bit SIMD String & UTF-8 Micro-Kernels         */
+/* ========================================================================= */
+
+bool rcre_wasm_utf8_validate(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        return true;
+    }
+
+    const v128_t t_b1_hi = wasm_u8x16_const(
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        0x80, 0x80, 0x80, 0x80, 0x11, 0x01, 0x25, 0x49
+    );
+    const v128_t t_b1_lo = wasm_u8x16_const(
+        0xD7, 0x93, 0x83, 0x83, 0x8B, 0xCB, 0xCB, 0xCB,
+        0xCB, 0xCB, 0xCB, 0xCB, 0xCB, 0xEB, 0xCB, 0xCB
+    );
+    const v128_t t_b2_hi = wasm_u8x16_const(
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0xD6, 0x9E, 0xBA, 0xBA, 0x01, 0x01, 0x01, 0x01
+    );
+    const v128_t v_0f = wasm_u8x16_splat(0x0F);
+    const v128_t v_df = wasm_u8x16_splat(0xDF);
+    const v128_t v_ef = wasm_u8x16_splat(0xEF);
+    const v128_t v_80 = wasm_u8x16_splat(0x80);
+    const v128_t zero = wasm_i8x16_splat(0);
+
+    v128_t prev = zero;
+    v128_t error = zero;
+    bool prev_ascii = true;
+
+    size_t i = 0;
+    while (i + 16U <= len) {
+        v128_t curr = wasm_v128_load(&data[i]);
+        if (prev_ascii && wasm_i8x16_bitmask(curr) == 0) {
+            prev = zero;
+            i += 16U;
+            continue;
+        }
+        v128_t prev1 = wasm_i8x16_shuffle(prev, curr, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+        v128_t prev2 = wasm_i8x16_shuffle(prev, curr, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
+        v128_t prev3 = wasm_i8x16_shuffle(prev, curr, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
+
+        v128_t e1 = wasm_i8x16_swizzle(t_b1_hi, wasm_u8x16_shr(prev1, 4));
+        v128_t e2 = wasm_i8x16_swizzle(t_b1_lo, wasm_v128_and(prev1, v_0f));
+        v128_t e3 = wasm_i8x16_swizzle(t_b2_hi, wasm_u8x16_shr(curr, 4));
+        v128_t err = wasm_v128_and(wasm_v128_and(e1, e2), e3);
+
+        v128_t is_23 = wasm_v128_or(wasm_u8x16_sub_sat(prev2, v_df), wasm_u8x16_sub_sat(prev3, v_ef));
+        v128_t must23 = wasm_v128_and(wasm_i8x16_ne(is_23, zero), v_80);
+        err = wasm_v128_xor(err, must23);
+        error = wasm_v128_or(error, err);
+
+        prev = curr;
+        prev_ascii = (data[i + 15U] < 0xC0U) && (data[i + 14U] < 0xE0U) && (data[i + 13U] < 0xF0U);
+        i += 16U;
+    }
+
+    if (wasm_v128_any_true(error)) {
+        return false;
+    }
+    if (!prev_ascii && i >= 16U) {
+        if (data[i - 1U] >= 0xC0U)      i -= 1U;
+        else if (data[i - 2U] >= 0xE0U) i -= 2U;
+        else if (data[i - 3U] >= 0xF0U) i -= 3U;
+    }
+    return rcre_scalar_utf8_validate(data + i, len - i);
+}
+
+size_t rcre_wasm_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return RCRE_NPOS;
+    if (needle_len == 1U) {
+        return rcre_wasm_find_byte(hay, hay_len, needle[0]);
+    }
+    const v128_t vfirst = wasm_u8x16_splat(needle[0]);
+    const v128_t vlast  = wasm_u8x16_splat(needle[needle_len - 1U]);
+    size_t i = 0;
+
+    for (; i + 16U + needle_len - 1U <= hay_len; i += 16U) {
+        v128_t h0 = wasm_v128_load(&hay[i]);
+        v128_t h1 = wasm_v128_load(&hay[i + needle_len - 1U]);
+        v128_t cmp = wasm_v128_and(wasm_i8x16_eq(h0, vfirst), wasm_i8x16_eq(h1, vlast));
+        uint32_t mask = (uint32_t)wasm_i8x16_bitmask(cmp);
+        while (mask != 0) {
+            size_t lane = (size_t)__builtin_ctz(mask);
+            if (needle_len == 2U || memcmp(hay + i + lane + 1U, needle + 1U, needle_len - 2U) == 0) {
+                return i + lane;
+            }
+            mask &= mask - 1U;
+        }
+    }
+
+    size_t tail = rcre_scalar_find_substr(hay + i, hay_len - i, needle, needle_len);
+    return (tail == RCRE_NPOS) ? RCRE_NPOS : (i + tail);
+}
+
+void rcre_wasm_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const v128_t vA  = wasm_u8x16_splat((uint8_t)'A');
+    const v128_t v25 = wasm_u8x16_splat(25);
+    const v128_t v20 = wasm_u8x16_splat(0x20);
+    size_t i = 0;
+
+    for (; i + 16U <= len; i += 16U) {
+        v128_t s = wasm_v128_load(&src[i]);
+        v128_t m = wasm_u8x16_le(wasm_i8x16_sub(s, vA), v25);
+        wasm_v128_store(&dst[i], wasm_v128_or(s, wasm_v128_and(m, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'A') <= 25U) ? (uint8_t)(c | 0x20U) : c;
+    }
+}
+
+void rcre_wasm_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const v128_t va  = wasm_u8x16_splat((uint8_t)'a');
+    const v128_t v25 = wasm_u8x16_splat(25);
+    const v128_t v20 = wasm_u8x16_splat(0x20);
+    size_t i = 0;
+
+    for (; i + 16U <= len; i += 16U) {
+        v128_t s = wasm_v128_load(&src[i]);
+        v128_t m = wasm_u8x16_le(wasm_i8x16_sub(s, va), v25);
+        wasm_v128_store(&dst[i], wasm_v128_xor(s, wasm_v128_and(m, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'a') <= 25U) ? (uint8_t)(c & (uint8_t)~0x20U) : c;
     }
 }
 

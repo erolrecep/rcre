@@ -40,6 +40,12 @@ size_t rcre_scalar_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_scalar_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
+bool rcre_scalar_utf8_validate(const uint8_t* data, size_t len);
+size_t rcre_scalar_find_substr(const uint8_t* hay, size_t hay_len,
+                               const uint8_t* needle, size_t needle_len);
+void rcre_scalar_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len);
+void rcre_scalar_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len);
+
 /* H0 (2.1.0): F64 substrate + F32 completeness (scalar reference; every
  * ISA backend below provides matching cells, so no algorithm ever has to
  * branch on ISA — a missing cell is a build error, not a runtime check). */
@@ -84,6 +90,12 @@ void rcre_neon_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
 size_t rcre_neon_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_neon_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+bool rcre_neon_utf8_validate(const uint8_t* data, size_t len);
+size_t rcre_neon_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len);
+void rcre_neon_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len);
+void rcre_neon_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len);
 
 /* H0 (2.1.0): F64 cells — NEON doubles are 128-bit / 4-wide */
 void rcre_neon_gemm_f64(size_t M, size_t N, size_t K, double alpha,
@@ -149,6 +161,12 @@ size_t rcre_avx2_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_avx2_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
+bool rcre_avx2_utf8_validate(const uint8_t* data, size_t len);
+size_t rcre_avx2_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len);
+void rcre_avx2_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len);
+void rcre_avx2_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len);
+
 /* H0 (2.1.0): F64 cells — AVX2 doubles are 256-bit / 4-wide */
 void rcre_avx2_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                         const double* A, size_t lda, const double* B, size_t ldb,
@@ -197,6 +215,12 @@ void rcre_wasm_rgb_to_gray_u8(const uint8_t* rgb, uint8_t* gray, size_t num_pixe
 size_t rcre_wasm_find_byte(const uint8_t* hay, size_t len, uint8_t needle);
 
 size_t rcre_wasm_count_byte(const uint8_t* hay, size_t len, uint8_t needle);
+
+bool rcre_wasm_utf8_validate(const uint8_t* data, size_t len);
+size_t rcre_wasm_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len);
+void rcre_wasm_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len);
+void rcre_wasm_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len);
 #endif
 
 #endif /* RCRE_HAL_INTERNAL_H */

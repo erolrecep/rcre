@@ -10,6 +10,7 @@
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
+#include <string.h>
 
 float rcre_neon_dot_f32(const float* x, const float* y, size_t n) {
     float32x4_t sum0 = vdupq_n_f32(0.0f);
@@ -574,6 +575,207 @@ double rcre_neon_sum_f64(const double* x, size_t n) {
     double s = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
     for (; i < n; ++i) s += x[i];
     return s;
+}
+
+/* ========================================================================= */
+/* STR-REQ-05: ARM NEON 128-bit String & UTF-8 Micro-Kernels                 */
+/* ========================================================================= */
+
+bool rcre_neon_utf8_validate(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        return true;
+    }
+#if defined(__aarch64__)
+    static const uint8_t b1_hi_tbl[16] = {
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        0x80, 0x80, 0x80, 0x80, 0x11, 0x01, 0x25, 0x49
+    };
+    static const uint8_t b1_lo_tbl[16] = {
+        0xD7, 0x93, 0x83, 0x83, 0x8B, 0xCB, 0xCB, 0xCB,
+        0xCB, 0xCB, 0xCB, 0xCB, 0xCB, 0xEB, 0xCB, 0xCB
+    };
+    static const uint8_t b2_hi_tbl[16] = {
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0xD6, 0x9E, 0xBA, 0xBA, 0x01, 0x01, 0x01, 0x01
+    };
+
+    const uint8x16_t t_b1_hi = vld1q_u8(b1_hi_tbl);
+    const uint8x16_t t_b1_lo = vld1q_u8(b1_lo_tbl);
+    const uint8x16_t t_b2_hi = vld1q_u8(b2_hi_tbl);
+    const uint8x16_t v_0f    = vdupq_n_u8(0x0F);
+    const uint8x16_t v_df    = vdupq_n_u8(0xDF);
+    const uint8x16_t v_ef    = vdupq_n_u8(0xEF);
+    const uint8x16_t v_80    = vdupq_n_u8(0x80);
+
+    uint8x16_t prev  = vdupq_n_u8(0);
+    uint8x16_t error = vdupq_n_u8(0);
+    bool prev_ascii  = true;
+
+    size_t i = 0;
+    while (i + 16U <= len) {
+        /* 64-byte ASCII fast path when previous chunk ended cleanly on ASCII */
+        if (prev_ascii && i + 64U <= len) {
+            uint8x16_t v0 = vld1q_u8(&data[i +  0]);
+            uint8x16_t v1 = vld1q_u8(&data[i + 16]);
+            uint8x16_t v2 = vld1q_u8(&data[i + 32]);
+            uint8x16_t v3 = vld1q_u8(&data[i + 48]);
+            uint8x16_t any = vorrq_u8(vorrq_u8(v0, v1), vorrq_u8(v2, v3));
+            if (vmaxvq_u8(any) < 0x80U) {
+                prev = vdupq_n_u8(0);
+                i += 64U;
+                continue;
+            }
+        }
+
+        uint8x16_t curr = vld1q_u8(&data[i]);
+        if (prev_ascii && vmaxvq_u8(curr) < 0x80U) {
+            prev = vdupq_n_u8(0);
+            i += 16U;
+            continue;
+        }
+
+        /* Keiser-Lemire vectorized 3-table UTF-8 validation */
+        uint8x16_t prev1 = vextq_u8(prev, curr, 15);
+        uint8x16_t prev2 = vextq_u8(prev, curr, 14);
+        uint8x16_t prev3 = vextq_u8(prev, curr, 13);
+
+        uint8x16_t e1 = vqtbl1q_u8(t_b1_hi, vshrq_n_u8(prev1, 4));
+        uint8x16_t e2 = vqtbl1q_u8(t_b1_lo, vandq_u8(prev1, v_0f));
+        uint8x16_t e3 = vqtbl1q_u8(t_b2_hi, vshrq_n_u8(curr, 4));
+        uint8x16_t err = vandq_u8(vandq_u8(e1, e2), e3);
+
+        uint8x16_t is_23 = vorrq_u8(vqsubq_u8(prev2, v_df), vqsubq_u8(prev3, v_ef));
+        uint8x16_t must23 = vandq_u8(vtstq_u8(is_23, is_23), v_80);
+        err = veorq_u8(err, must23);
+        error = vorrq_u8(error, err);
+
+        prev = curr;
+        uint8_t last1 = data[i + 15U];
+        uint8_t last2 = data[i + 14U];
+        uint8_t last3 = data[i + 13U];
+        prev_ascii = (last1 < 0xC0U) && (last2 < 0xE0U) && (last3 < 0xF0U);
+        i += 16U;
+    }
+
+    if (vmaxvq_u8(error) != 0) {
+        return false;
+    }
+
+    /* Rewind over any incomplete 1..3-byte prefix at the last SIMD boundary */
+    if (!prev_ascii && i >= 16U) {
+        if (data[i - 1U] >= 0xC0U)      i -= 1U;
+        else if (data[i - 2U] >= 0xE0U) i -= 2U;
+        else if (data[i - 3U] >= 0xF0U) i -= 3U;
+    }
+    return rcre_scalar_utf8_validate(data + i, len - i);
+#else
+    return rcre_scalar_utf8_validate(data, len);
+#endif
+}
+
+size_t rcre_neon_find_substr(const uint8_t* hay, size_t hay_len,
+                             const uint8_t* needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return RCRE_NPOS;
+    if (needle_len == 1U) {
+        return rcre_neon_find_byte(hay, hay_len, needle[0]);
+    }
+
+#if defined(__aarch64__)
+    const uint8x16_t vfirst = vdupq_n_u8(needle[0]);
+    const uint8x16_t vlast  = vdupq_n_u8(needle[needle_len - 1U]);
+    size_t i = 0;
+
+    for (; i + 16U + needle_len - 1U <= hay_len; i += 16U) {
+        uint8x16_t h0 = vld1q_u8(&hay[i]);
+        uint8x16_t h1 = vld1q_u8(&hay[i + needle_len - 1U]);
+        uint8x16_t cmp = vandq_u8(vceqq_u8(h0, vfirst), vceqq_u8(h1, vlast));
+        if (vmaxvq_u8(cmp) != 0) {
+            uint8x8_t narrowed = vshrn_n_u16(vreinterpretq_u16_u8(cmp), 4);
+            uint64_t mask = vget_lane_u64(vreinterpret_u64_u8(narrowed), 0);
+            while (mask != 0) {
+                size_t lane = (size_t)(__builtin_ctzll(mask) >> 2);
+                if (needle_len == 2U || memcmp(hay + i + lane + 1U, needle + 1U, needle_len - 2U) == 0) {
+                    return i + lane;
+                }
+                mask &= ~(0xFULL << (lane * 4U));
+            }
+        }
+    }
+
+    size_t tail = rcre_scalar_find_substr(hay + i, hay_len - i, needle, needle_len);
+    return (tail == RCRE_NPOS) ? RCRE_NPOS : (i + tail);
+#else
+    return rcre_scalar_find_substr(hay, hay_len, needle, needle_len);
+#endif
+}
+
+void rcre_neon_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const uint8x16_t vA   = vdupq_n_u8((uint8_t)'A');
+    const uint8x16_t v25  = vdupq_n_u8(25);
+    const uint8x16_t v20  = vdupq_n_u8(0x20);
+    size_t i = 0;
+
+    for (; i + 64U <= len; i += 64U) {
+        uint8x16_t s0 = vld1q_u8(&src[i +  0]);
+        uint8x16_t s1 = vld1q_u8(&src[i + 16]);
+        uint8x16_t s2 = vld1q_u8(&src[i + 32]);
+        uint8x16_t s3 = vld1q_u8(&src[i + 48]);
+
+        uint8x16_t m0 = vcleq_u8(vsubq_u8(s0, vA), v25);
+        uint8x16_t m1 = vcleq_u8(vsubq_u8(s1, vA), v25);
+        uint8x16_t m2 = vcleq_u8(vsubq_u8(s2, vA), v25);
+        uint8x16_t m3 = vcleq_u8(vsubq_u8(s3, vA), v25);
+
+        vst1q_u8(&dst[i +  0], vorrq_u8(s0, vandq_u8(m0, v20)));
+        vst1q_u8(&dst[i + 16], vorrq_u8(s1, vandq_u8(m1, v20)));
+        vst1q_u8(&dst[i + 32], vorrq_u8(s2, vandq_u8(m2, v20)));
+        vst1q_u8(&dst[i + 48], vorrq_u8(s3, vandq_u8(m3, v20)));
+    }
+    for (; i + 16U <= len; i += 16U) {
+        uint8x16_t s0 = vld1q_u8(&src[i]);
+        uint8x16_t m0 = vcleq_u8(vsubq_u8(s0, vA), v25);
+        vst1q_u8(&dst[i], vorrq_u8(s0, vandq_u8(m0, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'A') <= 25U) ? (uint8_t)(c | 0x20U) : c;
+    }
+}
+
+void rcre_neon_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    const uint8x16_t va   = vdupq_n_u8((uint8_t)'a');
+    const uint8x16_t v25  = vdupq_n_u8(25);
+    const uint8x16_t v20  = vdupq_n_u8(0x20);
+    size_t i = 0;
+
+    for (; i + 64U <= len; i += 64U) {
+        uint8x16_t s0 = vld1q_u8(&src[i +  0]);
+        uint8x16_t s1 = vld1q_u8(&src[i + 16]);
+        uint8x16_t s2 = vld1q_u8(&src[i + 32]);
+        uint8x16_t s3 = vld1q_u8(&src[i + 48]);
+
+        uint8x16_t m0 = vcleq_u8(vsubq_u8(s0, va), v25);
+        uint8x16_t m1 = vcleq_u8(vsubq_u8(s1, va), v25);
+        uint8x16_t m2 = vcleq_u8(vsubq_u8(s2, va), v25);
+        uint8x16_t m3 = vcleq_u8(vsubq_u8(s3, va), v25);
+
+        vst1q_u8(&dst[i +  0], veorq_u8(s0, vandq_u8(m0, v20)));
+        vst1q_u8(&dst[i + 16], veorq_u8(s1, vandq_u8(m1, v20)));
+        vst1q_u8(&dst[i + 32], veorq_u8(s2, vandq_u8(m2, v20)));
+        vst1q_u8(&dst[i + 48], veorq_u8(s3, vandq_u8(m3, v20)));
+    }
+    for (; i + 16U <= len; i += 16U) {
+        uint8x16_t s0 = vld1q_u8(&src[i]);
+        uint8x16_t m0 = vcleq_u8(vsubq_u8(s0, va), v25);
+        vst1q_u8(&dst[i], veorq_u8(s0, vandq_u8(m0, v20)));
+    }
+    for (; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'a') <= 25U) ? (uint8_t)(c & (uint8_t)~0x20U) : c;
+    }
 }
 
 #endif /* __ARM_NEON || __aarch64__ */

@@ -35,10 +35,11 @@ RCRE_NODISCARD int rcre_df_create(
 
     for (size_t c = 0; c < num_cols; ++c) {
         if (col_names && col_names[c]) {
-            strncpy(cols[c].name, col_names[c], RCRE_DF_MAX_NAME - 1);
-            cols[c].name[RCRE_DF_MAX_NAME - 1] = '\0';
+            (void)rcre_cstr_copy_bounded(cols[c].name, sizeof(cols[c].name),
+                                         rcre_slice_from_cstr(col_names[c]));
         } else {
-            snprintf(cols[c].name, sizeof(cols[c].name), "col_%zu", c);
+            RCRE_StrBuf name_buf = RCRE_STRBUF_WRAP(cols[c].name);
+            (void)rcre_strbuf_fmt(&name_buf, "col_%zu", c);
         }
 
         cols[c].dtype = col_dtypes[c];

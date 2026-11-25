@@ -6,6 +6,7 @@
  */
 
 #include "hal_internal.h"
+#include <string.h>
 
 float rcre_scalar_dot_f32(const float* x, const float* y, size_t n) {
     float acc0 = 0.0f;
@@ -321,5 +322,83 @@ void rcre_scalar_gemm_f64(size_t M, size_t N, size_t K, double alpha,
                 }
             }
         }
+    }
+}
+
+/* ========================================================================= */
+/* STR-REQ-05: Scalar Reference String & UTF-8 Micro-Kernels                 */
+/* ========================================================================= */
+
+bool rcre_scalar_utf8_validate(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        return true;
+    }
+    size_t i = 0;
+    while (i < len) {
+        uint8_t b0 = data[i];
+        if (b0 < 0x80U) {
+            i += 1U;
+            continue;
+        }
+        if (b0 >= 0xC2U && b0 <= 0xDFU) {
+            if (i + 1U >= len || (data[i + 1U] & 0xC0U) != 0x80U) return false;
+            i += 2U;
+        } else if (b0 >= 0xE0U && b0 <= 0xEFU) {
+            if (i + 2U >= len) return false;
+            uint8_t b1 = data[i + 1U];
+            uint8_t b2 = data[i + 2U];
+            if ((b1 & 0xC0U) != 0x80U || (b2 & 0xC0U) != 0x80U) return false;
+            if (b0 == 0xE0U && b1 < 0xA0U) return false;
+            if (b0 == 0xEDU && b1 >= 0xA0U) return false;
+            i += 3U;
+        } else if (b0 >= 0xF0U && b0 <= 0xF4U) {
+            if (i + 3U >= len) return false;
+            uint8_t b1 = data[i + 1U];
+            uint8_t b2 = data[i + 2U];
+            uint8_t b3 = data[i + 3U];
+            if ((b1 & 0xC0U) != 0x80U || (b2 & 0xC0U) != 0x80U || (b3 & 0xC0U) != 0x80U) return false;
+            if (b0 == 0xF0U && b1 < 0x90U) return false;
+            if (b0 == 0xF4U && b1 >= 0x90U) return false;
+            i += 4U;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+size_t rcre_scalar_find_substr(const uint8_t* hay, size_t hay_len,
+                               const uint8_t* needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return RCRE_NPOS;
+    if (needle_len == 1U) {
+        return rcre_scalar_find_byte(hay, hay_len, needle[0]);
+    }
+    uint8_t first = needle[0];
+    uint8_t last = needle[needle_len - 1U];
+    size_t limit = hay_len - needle_len + 1U;
+    for (size_t i = 0; i < limit; ++i) {
+        if (hay[i] == first && hay[i + needle_len - 1U] == last) {
+            if (needle_len == 2U || memcmp(hay + i + 1U, needle + 1U, needle_len - 2U) == 0) {
+                return i;
+            }
+        }
+    }
+    return RCRE_NPOS;
+}
+
+void rcre_scalar_ascii_to_lower(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'A') <= 25U) ? (uint8_t)(c | 0x20U) : c;
+    }
+}
+
+void rcre_scalar_ascii_to_upper(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (!src || !dst || len == 0) return;
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t c = src[i];
+        dst[i] = ((uint8_t)(c - (uint8_t)'a') <= 25U) ? (uint8_t)(c & (uint8_t)~0x20U) : c;
     }
 }

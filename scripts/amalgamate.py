@@ -28,6 +28,7 @@ C_FILES = [
     SRC_DIR / "hal" / "hal_dispatch.c",
     SRC_DIR / "core" / "arena.c",
     SRC_DIR / "core" / "slice.c",
+    SRC_DIR / "core" / "str.c",
     SRC_DIR / "core" / "tensor.c",
     SRC_DIR / "core" / "linalg.c",
     SRC_DIR / "core" / "reduce.c",
@@ -83,7 +84,7 @@ def clean_file_content(content: str) -> str:
     for line in content.splitlines():
         # P4: also strip PATH-QUALIFIED local includes (e.g. "../core/rcre_rng.h")
         # that previously leaked into dist/rcre.h and broke out-of-tree builds.
-        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer)/)?(rcre\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|rcre_sparse\.h|rcre_io\.h|rcre_llm\.h|rcre_codec\.h|rcre_df\.h|rcre_stat\.h|rcre_prep\.h|rcre_metric\.h|rcre_vis_ds\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h|e_means_internal\.h)[">]', line):
+        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer)/)?(rcre\.h|rcre_str\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|rcre_sparse\.h|rcre_io\.h|rcre_llm\.h|rcre_codec\.h|rcre_df\.h|rcre_stat\.h|rcre_prep\.h|rcre_metric\.h|rcre_vis_ds\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h|e_means_internal\.h)[">]', line):
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -134,6 +135,9 @@ def main():
     verify_symbol_uniqueness(C_FILES)
 
     header_content = (INCLUDE_DIR / "rcre.h").read_text(encoding="utf-8")
+    str_header = (INCLUDE_DIR / "rcre_str.h").read_text(encoding="utf-8")
+    header_content = header_content.replace('#include "rcre_str.h"', clean_file_content(str_header))
+
     autograd_header = (INCLUDE_DIR / "rcre_autograd.h").read_text(encoding="utf-8")
     autograd_clean = clean_file_content(autograd_header)
     header_content = header_content.replace('#include "rcre_autograd.h"', autograd_clean)
