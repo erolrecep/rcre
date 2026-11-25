@@ -1,6 +1,6 @@
 # RCRE HPC — Scientific Computing Program
 
-Status: **Phase H2 complete** (RCRE 2.2.0). Phases H3–H9 per the game plan.
+Status: **Phases H0–H4 complete** (RCRE 2.2.0). Phases H5–H9 per the scientific roadmap.
 
 This document is the contract for RCRE's high-performance scientific
 computing direction: what exists, how it is measured, what it guarantees,

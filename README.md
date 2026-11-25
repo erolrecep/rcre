@@ -7,8 +7,9 @@
 <p align="center">
   <a href="https://erolrecep.github.io/rcre/"><img src="https://img.shields.io/badge/Demo-Live_Playground-00d2ff?logo=github&style=flat" alt="Live Demo"></a>
   <img src="https://img.shields.io/badge/Language-ISO_C23-00599C?logo=c&style=flat" alt="C23 Standard">
-  <img src="https://img.shields.io/badge/Sanitizers-ASan_%7C_UBSan-success?style=flat" alt="Sanitizers Clean">
+  <img src="https://img.shields.io/badge/Sanitizers-ASan_%7C_UBSan_%7C_LSan_Clean-success?style=flat" alt="Sanitizers Clean">
   <img src="https://img.shields.io/badge/OpenCV_Parity-0_LSB-brightgreen?logo=opencv&logoColor=white&style=flat" alt="OpenCV Parity">
+  <img src="https://img.shields.io/badge/Single_Header-34k_lines-blue?style=flat" alt="Single Header Amalgamation">
   <img src="https://img.shields.io/badge/Loop_Allocs-0-orange?style=flat" alt="Zero Heap Allocations">
   <a href="https://github.com/erolrecep/rcre-book"><img src="https://img.shields.io/badge/Textbook-rcre--book-red?logo=gitbook&style=flat" alt="Official Textbook"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL_3.0_%2F_Commercial-blue?style=flat" alt="AGPL-3.0 / Commercial License"></a>
@@ -26,17 +27,19 @@
 * **Unified Geometric, Feature, Codec & Motion Computer Vision**: Subpixel nearest/bilinear resizing, HSV $\leftrightarrow$ RGB, Harris & **FAST-9 + rotated 256-bit BRIEF (`ORB`)** binary feature matching, DLT/RANSAC homography & panorama stitching, optical flow, **zero-dependency PNG (DEFLATE/zlib), baseline JPEG (8x8 DCT), BMP, and PPM codecs (`rcre_codec.h`)**, plus a minimal **zero-dep ONNX Protobuf subset runner (`onnx_subset.c`)**.
 * **Dual Reverse-Mode Autograd & Deep Learning Suite**: Scalar DAGs + Tensor Tape VJP autograd supporting `matmul`, `conv2d` (`rcre_autograd_conv2d`), and scaled dot-product `attention` (`rcre_autograd_attention`), losses (MSE, BCE, Softmax Cross-Entropy, KL Divergence), and first-order optimizers (**Decoupled AdamW**, Momentum **SGD**, **Lion**, and factored **Adafactor**).
 * **Full-Stack Data Science, Statistics & Classical ML (`rcre_df.h`, `rcre_stat.h`, `rcre_prep.h`, `rcre_metric.h`, `rcre_vis_ds.h`)**: Columnar DataFrames with Arrow validity bitmaps, $\mathcal{O}(N)$ IEEE-754 float LSD radix sort & multi-threaded GroupBy; single-pass Welford higher moments, quickselect quantiles & PCA (`svd_flip` deflation); `StandardScaler`/`MinMaxScaler`/`RobustScaler`/Imputer/One-Hot; ROC-AUC/PR-AUC/MCC/Silhouette/K-Fold metrics; ANSI correlation heatmaps & boxplots; OLS, **L1 Sparse Linear**, Pegasos SVM, **Random Forest**, GBDT, HNSW, and **e-Means**.
-* **HPC Numerical Layer (2.1.0, `docs/hpc.md`)**: Double-precision scientific substrate — dispatched F64 `gemm/gemv/dot/axpy/scale/sum` across scalar / NEON / AVX2 / AVX-512 (F32 parity surface), Kahan-Neumaier compensated reductions (bit-exact on the `1e20 + 2^20·1` adversarial layout where naive drifts ~64 ulps; pairwise at exactly 1 ulp), and a measured-accuracy special function library (`erf/erfc` via the DLMF 8.9.8 incomplete-gamma CF with a cancellation-free prefactor ≤ 3e-15 rel, `lgamma`, `digamma`, `logsumexp`, `expit`, tail-accurate `norm_cdf`) — verified by a 12-suite / 11,665-assertion gate and a micro-benchmark with honest published bars.
-* **Reproducible Random & Quasi-Random Streams (2.2.0, `docs/hpc.md` §4)**: **PCG64** (PCG-XSL-RR-128/64) — **bit-exact** against numpy's engine from its `SeedSequence` 4-word parts (4 checked-in seeds × 512 draws), O(popcount(n)) **skip-ahead** via a precomputed 128-bit jump table (the closed-form LCG jump is not computable inside 128 bits: M − 1 has v2 = 2), and deterministic **substreams** — the slab determinism contract: worker i's stream depends only on (base, i), so pooled runs are bit-identical across pool sizes and machines. **Sobol'** (d = 1..20, new Joe-Kuo direction numbers as 64-bit fixed-point words) **bit-exact** against `scipy.stats.qmc.Sobol(scramble=False)` from two checked-in stream chunks (87,040 assertions) plus **Halton** (bases 2,3,5). All streams are pure functions of their seed; stateless `*_at(n, d, out)` accessors for slab-parallel / out-of-core code. Measured: 330.8 Ms/s raw draws (**1.10× numpy**'s C engine on the same machine), 4.08 Mpts/s Sobol' (d = 20). 7-test / 395,456-assertion conformance gate.
-* **General-Size F64 FFT, Blocked GEMM & Triangular Solve (2.2.0, `docs/hpc.md` §5)**: `rcre_fft_1d_f64` handles **any length** — mixed-radix Cooley-Tukey (small prime factors 2,3,5,7) with **Bluestein chirp-z** for primes/large-prime-factor lengths (exact 128-bit modular chirp phase), numpy sign convention, verified against a direct O(n²) DFT oracle across ~700 sizes (4,632-assertion gate; measured 8.0 Mpts/s at 2^20, 1.2 Mpts/s on 1M-scale primes). `rcre_linalg_gemm_blocked_f64` (one-sided 64³ A-panel blocking over the HAL micro-kernel, published at a measured 1.00× of the already-blocked H0 kernel — the stable BLIS composition point for later phases) and `rcre_linalg_trsm_f64`/`trsv_f64` (all four uplo/trans combinations, row-major multi-RHS, zero-diagonal detection — the H3 LU/QR primitive). H2's independent-reference GEMM test also caught and fixed an **H0 alpha/beta semantics bug** in all four F64 gemm cells (now BLAS-standard `alpha·A·B + beta·C`).
-* **Direct Factorizations & Symmetric Eigensystem (2.2.0, `docs/hpc.md` §6)**: dense F64 **LU** (partial pivoting, packed L·U, solve), **Cholesky** (in-place, dpotrf convention, semi-definite detection), **Householder QR** (in-place R + scaled vectors, explicit Q via right-multiplication accumulation, least squares), and **`rcre_linalg_syev_f64`** — symmetric eigensystem via Householder tridiagonalization + implicit QL (Wilkinson shift, 30n+10 sweep budget) with an **exact-similarity update** (`T⁺ = QᵀTQ` from the dense Givens product; the running similarity S, seeded by the tridiagonalization Q, *is* the eigenvector matrix — A·V = V·diag(w), no second pass). 7-test / 139-assertion gate incl. a 24×24 cyclic-Jacobi oracle (residual `‖AV − V·diag(w)‖∞ < 1e-10`). Measured (M5 Max, single-thread): LU 13.9 GF/s @ 2048, Cholesky 4.2, syev 4096² values+vector in 56 ms; the unblocked 3-term Householder QR is the published weak point (0.2 GF/s @ 2048, blocked version queued for H4).
-* **Iterative Solvers & 2D-Poisson Multigrid (2.2.0, `docs/hpc.md` §7)**: F64/F32 sparse (CSR) **PCG/FCG**, **BiCGStab** (van der Vorst shadow + least-squares ω — the best of 12 measured recurrence variants; gated on 40-step *trajectory parity* with an independent Python fixture at 1e-12 because its small-n convergence is a measured 1-ulp knife-edge, with **GMRES(m) carrying the nonsymmetric convergence gates**), and **restarted GMRES** with Householder Hessenberg updates; left preconditioning via **Jacobi / weighted-Jacobi / ILU(0)** (no-fill sparse LU, checked-in solve). True-residual convergence monitoring, telemetry-only callbacks (determinism is callback-independent). **2D Poisson multigrid** (red-black GS, 2:1 coarsening, exact coarsest solve): V-cycle and FAS cycles + `rcre_mg_solve_poisson2d_*` drivers, with the **honest h-dependent smoothest-mode floor documented** (V-cycle 300-cycle mode-1 bars: 32² → 3.0e-7, 128² → 3.5e-1) and the **measured recommendation — PCG + ILU(0) is the O(n) smooth-dominated workhorse** (65/149/285/556 iterations @ 64²/128²/256²/512², rel err ~1e-10; V-cycle per-cycle O(N): 1.2 ms @ 256²). 10-test / 1,097-assertion gate.
+* **Zero-Malloc, SIMD-Accelerated C23 Safe String Library (`rcre_str.h`)**: Length-prefixed zero-copy views (`RCRE_Slice` / `RCRE_StrView`) with `RCRE_STR(lit)` zero-cost compile-time literals (0 `strlen` overhead); stack/struct bounded buffers (`RCRE_StrBuf` and `rcre_cstr_copy_bounded`) replacing `strcpy`/`snprintf` with guaranteed NUL-termination and sticky truncation tracking; pull-based re-entrant token splitting (`RCRE_SplitIter`) replacing `strtok`; strict RFC 3629 UTF-8 validation (**44.5 GB/s** ASCII, **13.3 GB/s** multi-byte via NEON/AVX2), codepoint-boundary truncation, and zero-allocation parsers (`parse_f64`, `parse_hex_u64`, `parse_bool`); open-addressed arena string interning pool (`RCRE_StrPool`) delivering **68.9M lookups/s** (14.5 ns/op, 0 mallocs); safe path utilities (`rcre_path_*`); and optional compile-time legacy API poisoning via `#define RCRE_BAN_UNSAFE_CSTR` (`#pragma GCC poison`).
+* **HPC Numerical Layer (Phases H0–H4 Complete, `docs/hpc.md`)**:
+  - **H0 Scientific Substrate (2.1.0)**: Dispatched F64 `gemm/gemv/dot/axpy/scale/sum` across scalar / NEON / AVX2 / AVX-512, Kahan-Neumaier compensated reductions (bit-exact on adversarial layouts), and special function library (`erf/erfc` via DLMF 8.9.8 CF, `lgamma`, `digamma`, `logsumexp`, `expit`, tail-accurate `norm_cdf`).
+  - **H1 Reproducible Streams (2.2.0)**: **PCG64** bit-exact against NumPy's engine with $\mathcal{O}(\text{popcount}(n))$ skip-ahead and deterministic worker substreams; **Sobol'** ($d=1..20$) bit-exact against SciPy `scipy.stats.qmc.Sobol` (87,040 assertions) and **Halton** sequences.
+  - **H2 General-Size F64 FFT & Blocked BLAS (2.2.0)**: Mixed-radix Cooley-Tukey + **Bluestein chirp-z** arbitrary-length F64 FFT (verified against direct $\mathcal{O}(N^2)$ DFT oracle across ~700 sizes), cache-blocked F64 GEMM, and triangular solve (`trsm`/`trsv`).
+  - **H3 Direct Factorizations & Symmetric Eigensystem (2.2.0)**: Dense F64 **LU** (partial pivoting), **Cholesky** (`dpotrf`), **Householder QR**, and **`rcre_linalg_syev_f64`** symmetric eigensystem via Householder tridiagonalization + implicit QL with exact Givens similarity update (4096² in 53 ms).
+  - **H4 Iterative Krylov Solvers & 2D Multigrid (2.2.0)**: Sparse F64/F32 **PCG/FCG**, **BiCGStab** (verified on 40-step trajectory parity against independent Python fixture), restarted **GMRES** with **ILU(0)** and **Jacobi** preconditioning; 2D-Poisson multigrid (V-cycle & FAS cycles) with documented $h$-dependent smoothest-mode floor and **PCG + ILU(0)** workhorse.
 * **e-Means Mini-Batch Clustering Operator (`rcre_ml_emeans_*`)**: Faithful C23 port of the 2026 e-means algorithm (Bessa et al., arXiv 2611.09501) — exponential-moving-average centroid updates with a cosine-annealed step schedule, scaling-law batch/step auto-tuning (shipped-reference constants), and Gumbel-max dead-cluster revival with deterministic per-dimension splits. Dual-kernel exact assignment (per-row FP32 for $k \\cdot d \\le 16384$, HAL GEMM above), FP64 objective & finalization, and a pool-parallel slab partition that is **bit-identical across pool sizes and machines** (the partition depends only on the batch size). Verified: 205,790-assertion 0-ULP strict-parity replay against an independent Python oracle, plus statistical quality parity (C run at 0.589× the oracle's MSE). On an 8.3M-pixel palette workload (d=3, k=256) the pooled operator trains in ~1.1 s vs 34–78 s for 25-iteration Lloyd k-means; on 100K × 128-d embeddings with k=4096 it is 9× faster **and** 0.566× the final MSE.
 * **Isolated Camera Companion (`rcre_cam.h`)**: Native hardware ingestion using macOS AVFoundation (`CVPixelBuffer` zero-copy), Linux Video4Linux2 (`mmap`), and deterministic synthetic test generators for headless CI.
 * **High-Performance Scientific Data I/O (`rcre_io.h`)**: Zero-copy virtual memory mapping (`mmap` + `madvise` + `F_NOCACHE` + Win32 `MapViewOfFile`), 64-byte SIMD-aligned 8D **NumPy (`.npy` v1/v2)** and **Hugging Face (`.safetensors`)** containers, **2.61+ GB/s** multi-threaded SIMD CSV ingestion (with RFC-4180 quoted field support) and Clinger/Eisel–Lemire 0-ULP float32 parsing, **50.81 GB/s** ARM NEON byte-unshuffling with `"RCRZ"` LZ4-class lossless block compression, async `pthread` ping-pong `.npy` streaming, and zero-copy **DLPack v1.0** & **Apache Arrow C Data Interface** bridges. See [**io_benchmark.md**](io_benchmark.md) and [**docs/benchmarks_sota.md**](docs/benchmarks_sota.md).
 * **Modern LLM Inference & LoRA Training (`rcre_llm.h`)**: LLaMA-style decoder (RMSNorm, RoPE, SwiGLU, Grouped-Query Attention, tiled online-softmax Flash-Attention), `Q8_0`/`Q4_0` block quantization with NEON/SIMD dot kernels, zero-copy **GGUF v2/v3** reader/writer, hash-indexed `RCRE_ByteBPE`, thread-safe sampler (top-k/top-p/min-p/rep-penalty), LoRA fine-tuning, BF16 gradient-checkpointed training, sharded binary token streaming, plus local interactive CLI & OpenAI-compatible HTTP server (`bin/rcre_chat --serve`).
 * **Zero-Dependency Image Codecs, ORB Features, Minimal ONNX & Optional Metal/WebGPU (`rcre_codec.h`, `rcre_gpu.h`)**: Built-in PNG (DEFLATE/zlib), baseline JPEG, BMP, and PPM codecs; FAST-9 + rotated 256-bit BRIEF (`RCRE_ORBKeypoint`) feature matching; zero-dependency ONNX Protobuf subset graph runner; Random Forest, L1 Sparse Linear, Lion, Adafactor; optional macOS Metal compute offload, WebGPU bridge, freestanding no-malloc profile (`-DRCRE_FREESTANDING`), CMake/Homebrew/vcpkg packaging, and Python/Rust/Go/Zig/Julia bindings.
-* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (**1126.9 KB**, **31,092 lines**).
+* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (**1,236.2 KB**, **34,039 lines**).
 * **Native Hardware Profiling & Telemetry (`rcre_prof`)**: Microsecond-accurate cycle tracing (< 7 ns overhead per scope) on ARM64 (`cntvct_el0`) and x86 (`rdtsc`), tracking dual-layer RAM (Arena watermarks vs OS RSS), CPU time, engine storage I/O, and zero-dependency Chrome Tracing/Perfetto JSON and standalone HTML exports. See [**rcre_profiling.md**](rcre_profiling.md).
 * **Interactive Educational Visualizers**: Three.js 3D tensor stride visualizers, cache hierarchy simulators, and live in-browser webcam playgrounds in [`web/`](web/).
 
@@ -74,6 +77,16 @@
 | **Zero-Copy `.npy` / `.safetensors` View** (64 MB) | 64-Byte Padded `mmap` (`is_view=true`) | **9.26 GB/s sustained** | **49.07 µs** (`.npy`) / **9.5 ns** (lookup) | **0 bytes allocated (107x vs `fread`)** |
 | **SIMD Byte-Unshuffle & `RCRZ` Block Codec** (16 MB) | ARM NEON `vst4q_u8` + LZ4-Class Match | **50.81 GB/s** (unshuffle) / **3.50 GB/s** (codec) | **0.31 ms** / **4.47 ms** | **0-ULP Lossless** (254.56x ratio) |
 | **DLPack v1.0 & Arrow C Data Zero-Copy Handoff** | Plain C ABI Pointer & Stride Cast | **0 Bytes Copied** | **12.5 ns** / **12.5 ns** | Zero-Copy Stack Views |
+| **UTF-8 SIMD Validation (16 MB ASCII)** | `rcre_hal.utf8_validate` (NEON) | **44.50 GB/s** (**10.68x vs scalar**) | **0.36 ms** | Zero mallocs |
+| **UTF-8 SIMD Validation (16 MB Multi-Byte)** | `rcre_hal.utf8_validate` (NEON) | **13.26 GB/s** (**3.45x vs scalar**) | **1.21 ms** | Zero mallocs |
+| **Substring Search (16 MB `find_substr`)** | `rcre_hal.find_substr` (NEON) | **25.06 GB/s** (**9.40x vs scalar**) | **0.64 ms** | Zero mallocs |
+| **ASCII Lowercase Conversion (16 MB)** | `rcre_hal.ascii_to_lower` (NEON) | **34.18 GB/s** | **0.47 ms** | Zero mallocs |
+| **Arena StrPool Interning & Lookup** | `rcre_strpool_intern` (4096 keys) | **68.93M lookups / sec** | **14.5 ns** / op | Linear Arena (0 mallocs) |
+| **General-Size F64 FFT ($2^{20}$ points)** | `rcre_fft_1d_f64` (Mixed-Radix) | **7.4 Ms/s** (**735.7 Mflop/s**) | **141.7 ms** | Scoped Arena |
+| **Bluestein Prime F64 FFT ($10^6+3$ points)** | `rcre_fft_1d_f64` (Chirp-Z) | **1.1 Ms/s** (**110.9 Mflop/s**) | **899.8 ms** | Scoped Arena |
+| **Direct Dense LU Solve ($2048 \times 2048$ F64)** | `rcre_direct_lu_factor` (Partial Pivoting) | **13.9 GFLOP/s** | **413 ms** | Linear Arena |
+| **Symmetric Eigensystem ($4096 \times 4096$ F64)** | `rcre_linalg_syev_f64` (Tridiag + QL) | **865.7 GFLOP/s eq** (Values+Vec) | **53 ms** | Linear Arena |
+| **Poisson $512^2$ PCG + ILU(0) Solve** | `rcre_krylov_pcg` + `rcre_sparse_ilu0` | **$\mathcal{O}(N)$ 556 iters** (rel err 9.7e-11) | **1.79 s** solve | Scoped Arena |
 
 📊 *Full Roofline & SOTA hardware results: [**docs/benchmarks_sota.md**](docs/benchmarks_sota.md) and [`web/benchmarks.html`](web/benchmarks.html).*
 
@@ -107,7 +120,7 @@ In addition to modular core kernels and unit benchmarks, RCRE includes twelve se
 ```
 apps/rcre/
 ├── dist/
-│   └── rcre.h                  # Amalgamated single-header C23 release (1,031.3 KB, 29,072 lines)
+│   └── rcre.h                  # Amalgamated single-header C23 release (1,236.2 KB, 34,039 lines)
 ├── project-template/           # Turnkey starter project with rcre.h, main.c, tests, Makefile & docs
 │   ├── include/rcre.h          # Single-header engine distribution
 │   ├── src/main.c              # Pedagogical starter app with 1080p SIMD pipeline
@@ -118,7 +131,8 @@ apps/rcre/
 │   ├── MINI_EBOOK.md           # 10-page visual gentle guide for non-CS practitioners
 │   └── GUIDELINES.md           # Developer mini guideline & silicon best practices cheat sheet
 ├── include/
-│   ├── rcre.h                  # Core public C23 header (ABI v2.0.0, 8D broadcasting tensors, CV, ML)
+│   ├── rcre.h                  # Core public C23 header (ABI v2.0.0, 8D broadcasting tensors, CV, ML, HPC)
+│   ├── rcre_str.h              # Zero-malloc, SIMD-accelerated C23 safe string library (STR-REQ-01 to 06)
 │   ├── rcre_io.h               # Zero-copy mmap (POSIX/Win32), async POSIX prefetch, .npy/.safetensors, CSV, DLPack & Arrow
 │   ├── rcre_llm.h              # LLaMA (RMSNorm/RoPE/SwiGLU/GQA/Flash), Q8_0/Q4_0, GGUF v2/v3, ByteBPE, Sampler & LoRA
 │   ├── rcre_codec.h            # Zero-dep PNG (DEFLATE), JPEG, BMP, PPM codecs & ONNX Protobuf subset runner
@@ -150,7 +164,7 @@ apps/rcre/
 │   ├── rcre_manifold/          # rcre-manifold: UMAP, Barnes-Hut t-SNE & PaCMAP manifold learning
 │   └── README.md               # Production Projects Hub guide
 ├── src/
-│   ├── core/                   # Arena allocator (incl. freestanding), Slice, 8D Tensor, DataFrame, Prof, Sparse, I/O
+│   ├── core/                   # Arena, Slice, Str, 8D Tensor, Linalg, Reduce, SF, RNG, FFT, Direct, Krylov, Multigrid, I/O, DF
 │   ├── cv/                     # Color, Geom, Filter, FFT, Harris/FAST+ORB, Homography, Flow, CNN, Codecs, ONNX subset
 │   ├── ml/                     # OLS/Sparse-L1, Logistic, SVM, KMeans, E-Means, PCA, GBDT, Random Forest, HNSW, Stat/Prep/Metric
 │   ├── autograd/               # Scalar DAG autograd & Tensor tape VJP autograd (GEMM/Conv2D/Attention)
@@ -174,9 +188,9 @@ apps/rcre/
 │   ├── zig/                    # Zig @cImport bindings (bindings/zig/rcre.zig)
 │   └── julia/                  # Julia ccall module (bindings/julia/RCRE.jl)
 ├── packaging/                  # pkg-config template (rcre.pc.in), Homebrew formula & vcpkg portfile
-├── tests/                      # 35 Unit test suites (incl. test_sota, test_df, test_stat, test_metric) + tests/fuzz/fuzz_io.c
-├── benchmarks/                 # Micro-benchmarks: HAL (bench_hal), Roofline (bench_roofline), I/O (bench_io), Prof (bench_prof)
-├── docs/                       # SOTA benchmarks report (docs/benchmarks_sota.md) & technical notes
+├── tests/                      # 37 Unit test suites (Core, Strings, Factorizations, Krylov, Multigrid, SOTA) + fuzz_io/fuzz_str
+├── benchmarks/                 # Micro-benchmarks: HAL, Roofline, I/O, Strings (bench_str), HPC (bench_h2/h3/h4), Prof
+├── docs/                       # SOTA benchmarks (docs/benchmarks_sota.md) & HPC Program manual (docs/hpc.md)
 ├── web/                        # Visualizers, API docs (api_data.json), benchmarks UI & WebGPU bridge (wasm/rcre_webgpu.js)
 ├── CMakeLists.txt              # CMake build, shared/static targets & pkg-config installation
 └── Makefile                    # Unified, self-contained, zero-dependency build system
@@ -252,6 +266,34 @@ clang -std=c2x -O3 -lm -lpthread main.c -o main
 ./main
 ```
 
+#### Safe, Zero-Malloc C23 String Processing (`include/rcre_str.h`)
+
+```c
+#define RCRE_BAN_UNSAFE_CSTR  // Poison strcpy, sprintf, strtok at compile time
+#include "rcre.h"
+#include "rcre_str.h"
+#include <stdio.h>
+
+int main(void) {
+    // 1. Zero-cost compile-time string literal view (0 strlen overhead)
+    RCRE_Slice greeting = RCRE_STR("Hello, High-Performance C23!");
+
+    // 2. Stack-allocated bounded buffer (guaranteed NUL-terminated, sticky truncation)
+    RCRE_STRBUF_STACK(buf, 64);
+    rcre_strbuf_copy(&buf, greeting);
+    rcre_strbuf_fmt(&buf, " [Sensor #%d]", 7);
+
+    // 3. Strict RFC 3629 UTF-8 validation (SIMD accelerated up to 44.5 GB/s)
+    size_t err_offset = 0;
+    bool valid = rcre_utf8_validate(rcre_strbuf_as_slice(&buf), &err_offset);
+
+    // 4. Safe printing using length-delimited macro pair (no heap allocation)
+    printf("Message: " RCRE_STR_FMT " (Valid UTF-8: %s)\n",
+           RCRE_STR_ARG(rcre_strbuf_as_slice(&buf)), valid ? "true" : "false");
+    return 0;
+}
+```
+
 ---
 
 ### Option 2: Building & Running from the `Makefile` Command Center
@@ -307,13 +349,13 @@ make project_omnisearch_bench # SIMD & Hash Table Micro-Benchmarks
 # 🚀 Build librcre.a, librcre.dylib, dist/rcre.h, and all example binaries
 make all
 
-# 🧪 Run full 35-test unit test suite (Core, DataFrames, Stats, Metrics, I/O, SOTA)
+# 🧪 Run full 37-test unit test suite (Core, Strings, Factorizations, Krylov, Multigrid, I/O, SOTA)
 make test
 
-# 🛡️ Run AddressSanitizer & UndefinedBehaviorSanitizer checks across all 35 suites
+# 🛡️ Run AddressSanitizer & UndefinedBehaviorSanitizer checks across all 37 suites (0 leaks, 0 UB)
 make test-sanitizers
 
-# 🐛 Run deterministic ASan+UBSan fuzz regression suite over I/O & codec parsers
+# 🐛 Run deterministic ASan+UBSan fuzz regression suite over I/O, codecs & string parsers
 make test-fuzz
 
 # 🐍 Run Python numerical parity tests against OpenCV, SciPy & Scikit-Learn + FFI tests
@@ -322,8 +364,9 @@ make test-parity
 # 🎉 Run unit tests, sanitizers & Python parity layers together
 make test-all
 
-# 📊 Run HAL GEMM, Roofline (SGEMM/GEMV/I8/BF16), Scientific I/O & Profiler workloads
+# 📊 Run HAL GEMM, Roofline, Scientific I/O, Strings & HPC micro-benchmarks
 make bench
+make bench_str
 make bench_roofline
 make bench_io
 make profile

@@ -1,4 +1,4 @@
-# RCRE v2.0.0 Empirical Roofline & I/O Benchmarks
+# RCRE v2.2.0 Empirical Roofline, String & HPC Benchmarks
 
 **Host Hardware Verified On:** Apple M5 Max (`18` Logical Cores: `6P + 12E`, `128.0 GB` Unified RAM)  
 **Active SIMD Dispatch Backend:** `ARM NEON 128-bit` (with x86 `AVX2`/`AVX-512F`, `WASM SIMD128`, and Apple `Metal` backends)  
@@ -30,3 +30,31 @@
 | **RCRZ Block Codec (`16 MB` F32)** | Lossless 0-ULP compress / decompress | `3.50 GB/s` comp / `2.76 GB/s` decomp (`254.56x` ratio) |
 | **Zero-Copy C ABI Interop** | DLPack v1.0 / Arrow C Data round-trip | `12.5 ns` / `12.5 ns` (`0` bytes copied) |
 | **Half-Precision SIMD Dequant (16M elems)** | `FP16 -> F32` / `BF16 -> F32` | `71.93 GB/s` / `71.31 GB/s` |
+
+---
+
+## 3. Zero-Malloc String Engine Throughput (`make bench_str`)
+
+| Benchmark Kernel | Workload Size | Scalar Baseline | Active HAL (NEON) | Hardware Speedup |
+| :--- | :--- | :---: | :---: | :---: |
+| **UTF-8 Validation (ASCII)** | `16 MB` contiguous buffer | `4.17 GB/s` | **`44.50 GB/s`** | **`10.68x`** |
+| **UTF-8 Validation (Multi-byte)** | `16 MB` (`ü`, `世`, `🚀` pattern) | `3.84 GB/s` | **`13.26 GB/s`** | **`3.45x`** |
+| **Substring Search (`find_substr`)** | `16 MB` needle scan | `2.67 GB/s` | **`25.06 GB/s`** | **`9.40x`** |
+| **ASCII Lowercase (`ascii_to_lower`)** | `16 MB` ASCII text | `29.37 GB/s` | **`34.18 GB/s`** | **`1.16x`** |
+| **StrPool Interning & Lookup** | `4,096` unique interned keys | — | **`68.93M ops/s`** (`14.5 ns`/op) | **Zero mallocs** |
+
+---
+
+## 4. HPC Factorizations & Solvers (`make bench_h2`, `make bench_h3`, `make bench_h4`)
+
+| Kernel / Routine | Problem Configuration | Execution Throughput / Metric | Measured Wall Time |
+| :--- | :--- | :--- | :--- |
+| **General-Size F64 FFT** | $N = 2^{20} = 1,048,576$ (mixed-radix) | **`7.4 Ms/s`** (`735.69 Mflop/s`) | `141.7 ms` |
+| **Bluestein Prime F64 FFT** | $N = 1,000,003$ (prime chirp-z) | **`1.1 Ms/s`** (`110.92 Mflop/s`) | `899.8 ms` |
+| **Triangular Solve (`trsm_f64`)** | $N = 8192$, `nrhs = 8` | **`1,295.6 Mflop/s`** | — |
+| **Dense LU Factorization** | $N = 2048$ (F64, partial pivoting) | **`13.9 GFLOP/s`** | `413 ms` |
+| **Dense Cholesky Factorization** | $N = 2048$ (F64, in-place `dpotrf`) | **`4.4 GFLOP/s`** | `656 ms` |
+| **Symmetric Eigensystem (`syev`)**| $4096 \times 4096$ (tridiag + implicit QL) | **`865.7 GFLOP/s`** equivalent | **`53 ms`** (values + eigenvectors) |
+| **PCG + ILU(0) Poisson Solve** | $512 \times 512$ grid ($262,144$ unknowns) | **`556 iterations`**, rel err $9.7 \times 10^{-11}$ | `1.79 s` solve (`15.5 s` ILU0 fac) |
+| **GMRES(32) + ILU(0) Poisson** | $256 \times 256$ grid ($65,536$ unknowns) | **`660 matvecs`** | `1.41 s` solve (`0.91 s` ILU0 fac) |
+| **2D-Poisson Multigrid Cycle** | $256 \times 256$ grid ($N=65,536$) | V-cycle: **`1.239 ms`** / FAS: **`1.258 ms`** | $\mathcal{O}(N)$ per-cycle linear scaling |
