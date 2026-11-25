@@ -7095,8 +7095,6 @@ void rcre_avx2_gemm_i8(size_t M, size_t N, size_t K,
     }
 }
 
-#if defined(RCRE_NEED_POP_AVX2)
-  #if RCRE_NEED_POP_AVX2 == 2
 /* H0 (2.1.0): F64 cells — AVX2 256-bit / 4-wide doubles                     */
 /* =========================================================================
  * Same 4x4 micro-kernel shape as NEON; __m256d holds 4 doubles. _mm256_fmadd_pd
@@ -7229,14 +7227,8 @@ double rcre_avx2_sum_f64(const double* x, size_t n) {
     return s;
 }
 
-#if !defined(__AVX2__)
-  #if defined(__clang__)
-    #pragma clang attribute pop
-  #elif defined(__GNUC__)
-    #pragma GCC pop_options
-  #endif
-#endif
-
+#if defined(RCRE_NEED_POP_AVX2)
+  #if RCRE_NEED_POP_AVX2 == 2
     #pragma clang attribute pop
   #elif RCRE_NEED_POP_AVX2 == 1
     #pragma GCC pop_options
@@ -7403,8 +7395,6 @@ void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
     }
 }
 
-#if defined(RCRE_NEED_POP_AVX512)
-  #if RCRE_NEED_POP_AVX512 == 2
 /* 8x8 micro-kernel: eight row accumulators (__m512d = 8 doubles each);
  * each k-step broadcasts A[i,k] against the 8-wide B columns. */
 static void avx512_gemm64_microkernel_8x8(size_t K, double alpha,
@@ -7544,6 +7534,8 @@ double rcre_avx512_sum_f64(const double* x, size_t n) {
     return s;
 }
 
+#if defined(RCRE_NEED_POP_AVX512)
+  #if RCRE_NEED_POP_AVX512 == 2
     #pragma clang attribute pop
   #elif RCRE_NEED_POP_AVX512 == 1
     #pragma GCC pop_options

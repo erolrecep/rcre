@@ -155,8 +155,6 @@ void rcre_avx512_gemm_f32(size_t M, size_t N, size_t K, float alpha,
     }
 }
 
-#if defined(RCRE_NEED_POP_AVX512)
-  #if RCRE_NEED_POP_AVX512 == 2
 /* 8x8 micro-kernel: eight row accumulators (__m512d = 8 doubles each);
  * each k-step broadcasts A[i,k] against the 8-wide B columns. */
 static void avx512_gemm64_microkernel_8x8(size_t K, double alpha,
@@ -296,6 +294,8 @@ double rcre_avx512_sum_f64(const double* x, size_t n) {
     return s;
 }
 
+#if defined(RCRE_NEED_POP_AVX512)
+  #if RCRE_NEED_POP_AVX512 == 2
     #pragma clang attribute pop
   #elif RCRE_NEED_POP_AVX512 == 1
     #pragma GCC pop_options
