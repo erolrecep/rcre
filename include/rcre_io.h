@@ -27,10 +27,11 @@ extern "C" {
 /* ========================================================================= */
 
 typedef enum {
-    RCRE_IO_HINT_DEFAULT    = 0, /* Standard OS page cache behavior               */
-    RCRE_IO_HINT_SEQUENTIAL = 1, /* Aggressive sequential prefetch (MADV_WILLNEED)*/
-    RCRE_IO_HINT_RANDOM     = 2, /* Random access (disable readahead thrashing)   */
-    RCRE_IO_HINT_STREAMING  = 3  /* Out-of-core streaming (evict/bypass cache)    */
+    RCRE_IO_HINT_DEFAULT    = 0, /* Standard OS page cache behavior                     */
+    RCRE_IO_HINT_SEQUENTIAL = 1, /* Non-blocking sequential readahead (MADV_SEQUENTIAL) */
+    RCRE_IO_HINT_RANDOM     = 2, /* Random access (disable readahead thrashing)         */
+    RCRE_IO_HINT_STREAMING  = 3, /* Out-of-core streaming (evict/bypass cache)          */
+    RCRE_IO_HINT_PREFETCH   = 4  /* Eager upfront page population (MADV_WILLNEED + SEQ) */
 } RCRE_IOHint;
 
 typedef struct RCRE_MappedFile {

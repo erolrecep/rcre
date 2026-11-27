@@ -250,6 +250,13 @@ def main():
     out_lines.append("")
 
     full_amalgamated = "\n".join(out_lines)
+    leaked = [
+        (idx + 1, ln.strip())
+        for idx, ln in enumerate(full_amalgamated.splitlines())
+        if re.match(r'^\s*#include\s*"', ln)
+    ]
+    if leaked:
+        raise ValueError(f"Un-inlined local #include directives leaked into dist/rcre.h: {leaked[:10]}")
     out_file.write_text(full_amalgamated, encoding="utf-8")
 
     file_size_kb = len(full_amalgamated.encode('utf-8')) / 1024

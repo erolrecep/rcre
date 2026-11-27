@@ -312,6 +312,239 @@ static void test_df_arrow_c_interface(void) {
     rcre_arena_destroy(arena);
 }
 
+typedef struct {
+    int64_t* partial_sums;
+} IndexedTestCtx;
+
+static void test_indexed_sum_task(void* arg, size_t task_id, size_t worker_id) {
+    IndexedTestCtx* ctx = (IndexedTestCtx*)arg;
+    ctx->partial_sums[worker_id] += (int64_t)(task_id + 1U);
+}
+
+static void test_threadpool_indexed_reduction(void) {
+    RCRE_ThreadPool* pool = rcre_threadpool_create_ex(3, RCRE_QOS_DEFAULT);
+    ASSERT_NOT_NULL(pool);
+
+    size_t nworkers = rcre_threadpool_worker_count(pool);
+    ASSERT_UINT_EQ(4, nworkers); /* 3 workers + participating main thread */
+
+    int64_t partials[4] = {0, 0, 0, 0};
+    IndexedTestCtx ctx = { .partial_sums = partials };
+
+    constexpr size_t N = 10000U;
+    rcre_threadpool_parallel_for_indexed(pool, N, test_indexed_sum_task, &ctx);
+
+    int64_t total = 0;
+    for (size_t w = 0; w < nworkers; ++w) {
+        total += partials[w];
+    }
+    int64_t expected = (int64_t)(N * (N + 1U) / 2U);
+    ASSERT_TRUE(total == expected);
+
+    rcre_threadpool_destroy(pool);
+}
+
+static void test_df_str_id_column_and_groupby(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+
+    const char* names[] = {"city", "temp"};
+    RCRE_DType types[] = {RCRE_DTYPE_STR_ID, RCRE_DTYPE_F32};
+    RCRE_DataFrame df;
+    int rc = rcre_df_create(names, types, 2, 5, arena, &df);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_NOT_NULL(df.columns[0].str_pool);
+
+    ASSERT_INT_EQ(RCRE_OK, rcre_col_set_str(&df.columns[0], 0, RCRE_STR("Hamburg")));
+    ASSERT_INT_EQ(RCRE_OK, rcre_col_set_str(&df.columns[0], 1, RCRE_STR("Abéché")));
+    ASSERT_INT_EQ(RCRE_OK, rcre_col_set_str(&df.columns[0], 2, RCRE_STR("Hamburg")));
+    ASSERT_INT_EQ(RCRE_OK, rcre_col_set_str(&df.columns[0], 3, RCRE_STR("Abéché")));
+    ASSERT_INT_EQ(RCRE_OK, rcre_col_set_str(&df.columns[0], 4, RCRE_STR("Tokyo")));
+
+    float* temps = (float*)df.columns[1].data;
+    temps[0] = 10.0f; temps[1] = 30.0f; temps[2] = 20.0f; temps[3] = 40.0f; temps[4] = 15.0f;
+
+    ASSERT_TRUE(rcre_slice_eq(rcre_col_get_str(&df.columns[0], 1), RCRE_STR("Abéché")));
+
+    RCRE_AggSpec specs[2] = {
+        { .target_col_idx = 1, .op = RCRE_AGG_MEAN,  .out_name = "mean_temp" },
+        { .target_col_idx = 1, .op = RCRE_AGG_COUNT, .out_name = "n" }
+    };
+    RCRE_DataFrame grp;
+    rc = rcre_df_groupby(&df, 0, specs, 2, arena, &grp);
+    ASSERT_INT_EQ(RCRE_OK, rc);
+    ASSERT_UINT_EQ(3, grp.num_rows);
+    ASSERT_UINT_EQ(3, grp.num_cols);
+
+    for (size_t r = 0; r < grp.num_rows; ++r) {
+        RCRE_Slice city = rcre_col_get_str(&grp.columns[0], r);
+        float mean_v = ((const float*)grp.columns[1].data)[r];
+        int32_t cnt  = ((const int32_t*)grp.columns[2].data)[r];
+        if (rcre_slice_eq(city, RCRE_STR("Hamburg"))) {
+            ASSERT_FLOAT_NEAR(15.0f, mean_v, 1e-4f);
+            ASSERT_INT_EQ(2, cnt);
+        } else if (rcre_slice_eq(city, RCRE_STR("Abéché"))) {
+            ASSERT_FLOAT_NEAR(35.0f, mean_v, 1e-4f);
+            ASSERT_INT_EQ(2, cnt);
+        } else if (rcre_slice_eq(city, RCRE_STR("Tokyo"))) {
+            ASSERT_FLOAT_NEAR(15.0f, mean_v, 1e-4f);
+            ASSERT_INT_EQ(1, cnt);
+        } else {
+            ASSERT_TRUE(false);
+        }
+    }
+
+    rcre_df_print(&grp, 5);
+    rcre_arena_destroy(arena);
+}
+
+static void test_df_stream_csv_groupby(void) {
+    rcre_hal_init();
+    const char* path2 = "/tmp/rcre_test_stream_2col.csv";
+    const char* data2 =
+        "Hamburg;10.0\n"
+        "Abéché;-5.5\n"
+        "Hamburg;20.0\r\n"
+        "Abéché;15.5\n"
+        "Tokyo;12.3\n"
+        "Hamburg;30.0\n";
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_write_atomic(path2, data2, strlen(data2)));
+
+    RCRE_Arena* arena = rcre_arena_create(4 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+    RCRE_ThreadPool* pool = rcre_threadpool_create_ex(3, RCRE_QOS_DEFAULT);
+    ASSERT_NOT_NULL(pool);
+
+    RCRE_AggSpec specs[6] = {
+        { .target_col_idx = 1, .op = RCRE_AGG_MIN,   .out_name = "min"   },
+        { .target_col_idx = 1, .op = RCRE_AGG_MEAN,  .out_name = "mean"  },
+        { .target_col_idx = 1, .op = RCRE_AGG_MAX,   .out_name = "max"   },
+        { .target_col_idx = 1, .op = RCRE_AGG_SUM,   .out_name = "sum"   },
+        { .target_col_idx = 1, .op = RCRE_AGG_COUNT, .out_name = "count" },
+        { .target_col_idx = 1, .op = RCRE_AGG_STD,   .out_name = "std"   }
+    };
+
+    /* Test both mmap and bounded_ram streaming modes with tiny 32B slabs */
+    for (int mode = 0; mode < 2; ++mode) {
+        rcre_arena_reset(arena);
+        RCRE_StreamGroupByOpts opts = {
+            .delimiter      = ';',
+            .has_header     = false,
+            .key_col_idx    = 0,
+            .val_col_idx    = 1,
+            .specs          = specs,
+            .num_specs      = 6,
+            .pool           = pool,
+            .slab_bytes     = 32,
+            .table_cap      = 256,
+            .bounded_ram    = (mode == 1),
+            .sort_by_key    = true,
+            .use_f64_output = true,
+            .key_col_name   = "station"
+        };
+        RCRE_DataFrame out;
+        int rc = rcre_df_stream_csv_groupby(path2, &opts, arena, &out);
+        ASSERT_INT_EQ(RCRE_OK, rc);
+        ASSERT_UINT_EQ(3, out.num_rows);
+        ASSERT_UINT_EQ(7, out.num_cols);
+
+        /* Sorted lexicographically: Abéché, Hamburg, Tokyo */
+        ASSERT_TRUE(rcre_slice_eq(rcre_col_get_str(&out.columns[0], 0), RCRE_STR("Abéché")));
+        ASSERT_TRUE(rcre_slice_eq(rcre_col_get_str(&out.columns[0], 1), RCRE_STR("Hamburg")));
+        ASSERT_TRUE(rcre_slice_eq(rcre_col_get_str(&out.columns[0], 2), RCRE_STR("Tokyo")));
+
+        const double* mins   = (const double*)out.columns[1].data;
+        const double* means  = (const double*)out.columns[2].data;
+        const double* maxs   = (const double*)out.columns[3].data;
+        const double* sums   = (const double*)out.columns[4].data;
+        const int64_t* cnts  = (const int64_t*)out.columns[5].data;
+        const double* stds   = (const double*)out.columns[6].data;
+
+        ASSERT_FLOAT_NEAR(-5.5f, (float)mins[0],  1e-5f);
+        ASSERT_FLOAT_NEAR(5.0f,  (float)means[0], 1e-5f);
+        ASSERT_FLOAT_NEAR(15.5f, (float)maxs[0],  1e-5f);
+        ASSERT_TRUE(cnts[0] == 2);
+
+        ASSERT_FLOAT_NEAR(10.0f, (float)mins[1],  1e-5f);
+        ASSERT_FLOAT_NEAR(20.0f, (float)means[1], 1e-5f);
+        ASSERT_FLOAT_NEAR(30.0f, (float)maxs[1],  1e-5f);
+        ASSERT_FLOAT_NEAR(60.0f, (float)sums[1],  1e-5f);
+        ASSERT_TRUE(cnts[1] == 3);
+        ASSERT_FLOAT_NEAR(10.0f, (float)stds[1],  1e-4f); /* sample std of {10,20,30} == 10 */
+
+        ASSERT_FLOAT_NEAR(12.3f, (float)means[2], 1e-5f);
+        ASSERT_TRUE(cnts[2] == 1);
+    }
+
+    /* Also test multi-column CSV with header and non-adjacent key/val columns */
+    const char* path4 = "/tmp/rcre_test_stream_4col.csv";
+    const char* data4 =
+        "id,region,notes,revenue\n"
+        "1,EMEA,ok,100.5\n"
+        "2,APAC,ok,250.25\n"
+        "3,EMEA,ok,49.5\n";
+    ASSERT_INT_EQ(RCRE_OK, rcre_io_write_atomic(path4, data4, strlen(data4)));
+
+    rcre_arena_reset(arena);
+    RCRE_AggSpec rev_specs[2] = {
+        { .target_col_idx = 3, .op = RCRE_AGG_SUM,   .out_name = "total_rev" },
+        { .target_col_idx = 3, .op = RCRE_AGG_COUNT, .out_name = "orders"    }
+    };
+    RCRE_StreamGroupByOpts opts4 = {
+        .delimiter      = ',',
+        .has_header     = true,
+        .key_col_idx    = 1,
+        .val_col_idx    = 3,
+        .specs          = rev_specs,
+        .num_specs      = 2,
+        .pool           = pool,
+        .slab_bytes     = 64,
+        .table_cap      = 256,
+        .bounded_ram    = false,
+        .sort_by_key    = true,
+        .use_f64_output = true
+    };
+    RCRE_DataFrame out4;
+    ASSERT_INT_EQ(RCRE_OK, rcre_df_stream_csv_groupby(path4, &opts4, arena, &out4));
+    ASSERT_STR_EQ("region", out4.columns[0].name);
+    ASSERT_UINT_EQ(2, out4.num_rows);
+    ASSERT_TRUE(rcre_slice_eq(rcre_col_get_str(&out4.columns[0], 0), RCRE_STR("APAC")));
+    ASSERT_TRUE(rcre_slice_eq(rcre_col_get_str(&out4.columns[0], 1), RCRE_STR("EMEA")));
+    ASSERT_FLOAT_NEAR(250.25f, (float)((const double*)out4.columns[1].data)[0], 1e-4f);
+    ASSERT_FLOAT_NEAR(150.0f,  (float)((const double*)out4.columns[1].data)[1], 1e-4f);
+
+    /* Test hash table saturation guard (tiny table_cap vs many distinct keys) */
+    {
+        rcre_arena_reset(arena);
+        const char* path_overflow = "/tmp/rcre_test_overflow.csv";
+        char buf[2048] = {0};
+        size_t off = 0;
+        for (int k = 0; k < 120; ++k) {
+            off += snprintf(buf + off, sizeof(buf) - off, "city_%03d;%d.0\n", k, k);
+        }
+        ASSERT_INT_EQ(RCRE_OK, rcre_io_write_atomic(path_overflow, buf, off));
+
+        RCRE_StreamGroupByOpts opts_overflow = {
+            .delimiter   = ';',
+            .has_header  = false,
+            .key_col_idx = 0,
+            .val_col_idx = 1,
+            .table_cap   = 64, /* max 64 slots, 75% load = 48 entries, 120 keys must fail gracefully */
+            .pool        = nullptr,
+            .bounded_ram = false
+        };
+        RCRE_DataFrame out_of;
+        int rc_overflow = rcre_df_stream_csv_groupby(path_overflow, &opts_overflow, arena, &out_of);
+        ASSERT_INT_EQ(RCRE_ERR_OUT_OF_MEMORY, rc_overflow);
+        remove(path_overflow);
+    }
+
+    remove(path2);
+    remove(path4);
+    rcre_threadpool_destroy(pool);
+    rcre_arena_destroy(arena);
+}
+
 int main(void) {
     test_suite_begin("RCRE High-Performance Columnar DataFrame Engine (Phase 1)");
 
@@ -323,6 +556,9 @@ int main(void) {
     TEST_RUN(test_df_radix_sort);
     TEST_RUN(test_df_groupby_aggregation);
     TEST_RUN(test_df_arrow_c_interface);
+    TEST_RUN(test_threadpool_indexed_reduction);
+    TEST_RUN(test_df_str_id_column_and_groupby);
+    TEST_RUN(test_df_stream_csv_groupby);
 
     return test_suite_report();
 }

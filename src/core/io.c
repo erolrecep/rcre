@@ -174,7 +174,7 @@ RCRE_NODISCARD int rcre_io_mmap_open(
     }
 #endif
 
-    void* addr = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* addr = mmap(nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
     if (addr == MAP_FAILED) {
         close(fd);
         return RCRE_ERR_IO;
@@ -347,6 +347,9 @@ RCRE_NODISCARD int rcre_io_madvise_range(
     int advice = POSIX_MADV_NORMAL;
     switch (hint) {
         case RCRE_IO_HINT_SEQUENTIAL:
+            advice = POSIX_MADV_SEQUENTIAL;
+            break;
+        case RCRE_IO_HINT_PREFETCH:
             advice = POSIX_MADV_SEQUENTIAL;
             (void)posix_madvise((void*)(uintptr_t)(map->data + aligned_off), aligned_len, POSIX_MADV_WILLNEED);
             break;

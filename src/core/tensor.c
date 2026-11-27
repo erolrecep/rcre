@@ -14,9 +14,10 @@ RCRE_NODISCARD size_t rcre_dtype_size(RCRE_DType dtype) {
         case RCRE_DTYPE_I8:   return 1;
         case RCRE_DTYPE_F16:  return 2;
         case RCRE_DTYPE_BF16: return 2;
-        case RCRE_DTYPE_I32:  return 4;
-        case RCRE_DTYPE_F32:  return 4;
-        case RCRE_DTYPE_I64:  return 8;
+        case RCRE_DTYPE_I32:    return 4;
+        case RCRE_DTYPE_F32:    return 4;
+        case RCRE_DTYPE_STR_ID: return 4;
+        case RCRE_DTYPE_I64:    return 8;
         case RCRE_DTYPE_F64:  return 8;
         default:              return 0;
     }

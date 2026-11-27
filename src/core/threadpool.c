@@ -27,24 +27,31 @@
 #endif
 
 typedef struct RCRE_WorkBatch {
-    rcre_task_fn task_fn;
-    void*        arg;
-    size_t       total_tasks;
-    atomic_size_t next_task;
-    atomic_size_t completed_tasks;
+    rcre_task_fn         task_fn;
+    rcre_task_indexed_fn task_indexed_fn;
+    void*                arg;
+    size_t               total_tasks;
+    atomic_size_t        next_task;
+    atomic_size_t        completed_tasks;
 } RCRE_WorkBatch;
 
+typedef struct RCRE_WorkerSlotArg {
+    RCRE_ThreadPool* pool;
+    size_t           worker_id;
+} RCRE_WorkerSlotArg;
+
 struct RCRE_ThreadPool {
-    pthread_t*      threads;
-    size_t          num_threads;
-    RCRE_QoSClass   qos;
-    pthread_mutex_t lock;
-    pthread_cond_t  work_cond;
-    pthread_cond_t  done_cond;
-    RCRE_WorkBatch  batch;
-    size_t          active_workers;
-    bool            has_batch;
-    bool            stop;
+    pthread_t*          threads;
+    RCRE_WorkerSlotArg* worker_args;
+    size_t              num_threads;
+    RCRE_QoSClass       qos;
+    pthread_mutex_t     lock;
+    pthread_cond_t      work_cond;
+    pthread_cond_t      done_cond;
+    RCRE_WorkBatch      batch;
+    size_t              active_workers;
+    bool                has_batch;
+    bool                stop;
 };
 
 static void tp_apply_worker_qos(RCRE_QoSClass qos) {
@@ -80,7 +87,9 @@ static void tp_apply_worker_qos(RCRE_QoSClass qos) {
 }
 
 static void* worker_routine(void* arg) {
-    RCRE_ThreadPool* pool = (RCRE_ThreadPool*)arg;
+    RCRE_WorkerSlotArg* slot = (RCRE_WorkerSlotArg*)arg;
+    RCRE_ThreadPool* pool = slot->pool;
+    size_t worker_id = slot->worker_id;
     tp_apply_worker_qos(pool->qos);
 
     while (true) {
@@ -98,6 +107,7 @@ static void* worker_routine(void* arg) {
         pool->active_workers++;
         size_t total = pool->batch.total_tasks;
         rcre_task_fn fn = pool->batch.task_fn;
+        rcre_task_indexed_fn fn_idx = pool->batch.task_indexed_fn;
         void* fn_arg = pool->batch.arg;
         pthread_mutex_unlock(&pool->lock);
 
@@ -108,7 +118,11 @@ static void* worker_routine(void* arg) {
                 break;
             }
 
-            fn(fn_arg, task_id);
+            if (fn_idx) {
+                fn_idx(fn_arg, task_id, worker_id);
+            } else if (fn) {
+                fn(fn_arg, task_id);
+            }
             atomic_fetch_add(&pool->batch.completed_tasks, 1);
         }
 
@@ -151,13 +165,18 @@ RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create_ex(size_t num_threads, RC
     pthread_cond_init(&pool->done_cond, NULL);
 
     pool->threads = (pthread_t*)malloc(sizeof(pthread_t) * num_threads);
-    if (!pool->threads) {
+    pool->worker_args = (RCRE_WorkerSlotArg*)malloc(sizeof(RCRE_WorkerSlotArg) * num_threads);
+    if (!pool->threads || !pool->worker_args) {
+        free(pool->threads);
+        free(pool->worker_args);
         free(pool);
         return NULL;
     }
 
     for (size_t i = 0; i < num_threads; ++i) {
-        if (pthread_create(&pool->threads[i], NULL, worker_routine, pool) != 0) {
+        pool->worker_args[i].pool = pool;
+        pool->worker_args[i].worker_id = i;
+        if (pthread_create(&pool->threads[i], NULL, worker_routine, &pool->worker_args[i]) != 0) {
             pool->num_threads = i;
             rcre_threadpool_destroy(pool);
             return NULL;
@@ -171,19 +190,36 @@ RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads) {
     return rcre_threadpool_create_ex(num_threads, RCRE_QOS_DEFAULT);
 }
 
-void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task_fn task, void* arg) {
-    if (count == 0 || !task) return;
+RCRE_NODISCARD size_t rcre_threadpool_worker_count(const RCRE_ThreadPool* pool) {
+    if (!pool || pool->num_threads <= 1) {
+        return 1U;
+    }
+    return pool->num_threads + 1U;
+}
+
+static void rcre_tp__dispatch_batch(
+    RCRE_ThreadPool* pool,
+    size_t count,
+    rcre_task_fn task,
+    rcre_task_indexed_fn task_indexed,
+    void* arg
+) {
+    if (count == 0 || (!task && !task_indexed)) return;
 
     if (!pool || pool->num_threads <= 1) {
-        /* Run serially on single-threaded fallback */
         for (size_t i = 0; i < count; ++i) {
-            task(arg, i);
+            if (task_indexed) {
+                task_indexed(arg, i, 0);
+            } else {
+                task(arg, i);
+            }
         }
         return;
     }
 
     pthread_mutex_lock(&pool->lock);
     pool->batch.task_fn = task;
+    pool->batch.task_indexed_fn = task_indexed;
     pool->batch.arg = arg;
     pool->batch.total_tasks = count;
     atomic_init(&pool->batch.next_task, 0);
@@ -191,7 +227,8 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
     pool->has_batch = true;
     pthread_cond_broadcast(&pool->work_cond);
 
-    /* Main thread participates in task execution */
+    /* Main thread participates as worker_id = pool->num_threads */
+    size_t main_worker_id = pool->num_threads;
     pthread_mutex_unlock(&pool->lock);
 
     while (true) {
@@ -199,7 +236,11 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
         if (task_id >= count) {
             break;
         }
-        task(arg, task_id);
+        if (task_indexed) {
+            task_indexed(arg, task_id, main_worker_id);
+        } else {
+            task(arg, task_id);
+        }
         atomic_fetch_add(&pool->batch.completed_tasks, 1);
     }
 
@@ -210,6 +251,15 @@ void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task
     }
     pool->has_batch = false;
     pthread_mutex_unlock(&pool->lock);
+}
+
+void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task_fn task, void* arg) {
+    rcre_tp__dispatch_batch(pool, count, task, nullptr, arg);
+}
+
+void rcre_threadpool_parallel_for_indexed(RCRE_ThreadPool* pool, size_t count,
+                                          rcre_task_indexed_fn task, void* arg) {
+    rcre_tp__dispatch_batch(pool, count, nullptr, task, arg);
 }
 
 typedef struct {
@@ -275,6 +325,7 @@ void rcre_threadpool_destroy(RCRE_ThreadPool* pool) {
     }
 
     free(pool->threads);
+    free(pool->worker_args);
     pthread_mutex_destroy(&pool->lock);
     pthread_cond_destroy(&pool->work_cond);
     pthread_cond_destroy(&pool->done_cond);

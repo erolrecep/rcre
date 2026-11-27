@@ -11,6 +11,7 @@
 #define RCRE_DF_H
 
 #include "rcre.h"
+#include "rcre_str.h"
 #include "rcre_io.h"
 
 #ifdef __cplusplus
@@ -24,14 +25,17 @@ extern "C" {
 /* 1. Columnar Memory Model & Apache Arrow Validity Bitmaps                  */
 /* ========================================================================= */
 
+struct RCRE_StrPool;
+
 typedef struct RCRE_Column {
-    char          name[RCRE_DF_MAX_NAME]; /* Column header identifier        */
-    RCRE_DType    dtype;                  /* F32, F64, F16, BF16, I32, I64, U8*/
-    void*         data;                   /* 64-byte aligned data elements   */
-    uint8_t*      validity;               /* Arrow null bitmap (1=valid, 0=null) */
-    size_t        length;                 /* Row count                        */
-    size_t        null_count;             /* Count of null/missing entries   */
-    bool          is_view;                /* true if data points elsewhere   */
+    char                 name[RCRE_DF_MAX_NAME]; /* Column header identifier                      */
+    RCRE_DType           dtype;                  /* F32, F64, F16, BF16, I32, I64, U8, STR_ID     */
+    void*                data;                   /* 64-byte aligned data elements                 */
+    uint8_t*             validity;               /* Arrow null bitmap (1=valid, 0=null)           */
+    size_t               length;                 /* Row count                                     */
+    size_t               null_count;             /* Count of null/missing entries                 */
+    bool                 is_view;                /* true if data points elsewhere                 */
+    struct RCRE_StrPool* str_pool;               /* Dictionary pool when dtype==RCRE_DTYPE_STR_ID */
 } RCRE_Column;
 
 typedef struct RCRE_DataFrame {
@@ -70,6 +74,17 @@ static inline void rcre_col_set_valid(RCRE_Column* col, size_t row_idx, bool is_
         }
     }
 }
+
+/**
+ * @brief Retrieves the UTF-8 string view at row_idx from a dictionary-encoded
+ *        RCRE_DTYPE_STR_ID column. Returns empty slice if invalid or null.
+ */
+RCRE_NODISCARD RCRE_Slice rcre_col_get_str(const RCRE_Column* col, size_t row_idx);
+
+/**
+ * @brief Interns a UTF-8 string into col->str_pool and assigns its ID at row_idx.
+ */
+RCRE_NODISCARD int rcre_col_set_str(RCRE_Column* col, size_t row_idx, RCRE_Slice val);
 
 /* ========================================================================= */
 /* 3. DataFrame Lifecycle & Construction                                     */
@@ -243,6 +258,48 @@ RCRE_NODISCARD int rcre_df_groupby(
     size_t group_col_idx,
     const RCRE_AggSpec* specs,
     size_t num_specs,
+    RCRE_Arena* arena,
+    RCRE_DataFrame* out_df
+);
+
+/* ========================================================================= */
+/* 5b. Morsel-Driven Streaming CSV GroupBy (Out-of-Core / Multi-GB ETL)      */
+/* ========================================================================= */
+
+typedef struct RCRE_StreamGroupByOpts {
+    uint8_t             delimiter;      /* Field separator (',', ';', '\t'; 0 = ',')      */
+    bool                has_header;     /* Skip first row & capture column names if true  */
+    size_t              key_col_idx;    /* 0-based text group-key column index            */
+    size_t              val_col_idx;    /* 0-based numeric value column index             */
+    const RCRE_AggSpec* specs;          /* Aggregations to compute (NULL -> MIN/MEAN/MAX/COUNT) */
+    size_t              num_specs;      /* Number of aggregation specs (0 -> default 4)   */
+    RCRE_ThreadPool*    pool;           /* Optional threadpool for parallel morsels       */
+    size_t              slab_bytes;     /* Morsel size (0 = 8 MiB mmap / 4 MiB stream)    */
+    size_t              table_cap;      /* Power-of-2 hash slots (0 = 16384)              */
+    bool                bounded_ram;    /* true = pread streaming (~84 MB RSS); false = mmap */
+    bool                sort_by_key;    /* Sort output groups lexicographically by key    */
+    bool                use_f64_output; /* true = F64/I64 outputs; false = F32/I32        */
+    const char*         key_col_name;   /* Optional custom name for output key column     */
+} RCRE_StreamGroupByOpts;
+
+/**
+ * @brief Executes a parallel, morsel-driven streaming GroupBy directly over a
+ *        delimited CSV/TSV file of arbitrary size (including multi-GB / 1B+ rows)
+ *        without materializing raw rows into memory.
+ *
+ * Output DataFrame schema:
+ *   col[0]: RCRE_DTYPE_STR_ID (dictionary-encoded group key backed by RCRE_StrPool)
+ *   col[1..num_specs]: requested aggregations (F64/I64 when use_f64_output, else F32/I32)
+ *
+ * @param filepath Path to delimited text file on disk.
+ * @param opts Streaming GroupBy options (NULL uses sensible defaults).
+ * @param arena Arena owning the resulting DataFrame and its RCRE_StrPool.
+ * @param out_df Output aggregated DataFrame (one row per unique group key).
+ * @return RCRE_OK on success, error code otherwise.
+ */
+RCRE_NODISCARD int rcre_df_stream_csv_groupby(
+    const char* filepath,
+    const RCRE_StreamGroupByOpts* opts,
     RCRE_Arena* arena,
     RCRE_DataFrame* out_df
 );

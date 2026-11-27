@@ -87,8 +87,9 @@ typedef enum {
     RCRE_DTYPE_F32  = 3, /* 32-bit single precision float                         */
     RCRE_DTYPE_F16  = 4, /* 16-bit IEEE 754-2008 half precision float             */
     RCRE_DTYPE_BF16 = 5, /* 16-bit Google Brain bfloat16 format                   */
-    RCRE_DTYPE_I8   = 6, /* 8-bit signed quantized integer                        */
-    RCRE_DTYPE_F64  = 7  /* 64-bit IEEE-754 double precision (HPC scientific, H0) */
+    RCRE_DTYPE_I8     = 6, /* 8-bit signed quantized integer                        */
+    RCRE_DTYPE_F64    = 7, /* 64-bit IEEE-754 double precision (HPC scientific, H0) */
+    RCRE_DTYPE_STR_ID = 8  /* 32-bit dictionary-encoded string ID (RCRE_StrPool)    */
 } RCRE_DType;
 
 typedef enum {
@@ -404,6 +405,7 @@ typedef enum {
 } RCRE_QoSClass;
 
 typedef void (*rcre_task_fn)(void* arg, size_t task_id);
+typedef void (*rcre_task_indexed_fn)(void* arg, size_t task_id, size_t worker_id);
 typedef void (*rcre_tile_fn)(void* arg, size_t y_start, size_t y_end, size_t x_start, size_t x_end);
 
 /**
@@ -420,9 +422,24 @@ RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create(size_t num_threads);
 RCRE_NODISCARD RCRE_ThreadPool* rcre_threadpool_create_ex(size_t num_threads, RCRE_QoSClass qos);
 
 /**
+ * @brief Returns total concurrent participant slots for rcre_threadpool_parallel_for_indexed.
+ *        When pool is NULL or single-threaded, returns 1 (main thread = worker_id 0).
+ *        Otherwise returns pool->num_threads + 1 (workers 0..N-1 + participating main thread N).
+ */
+RCRE_NODISCARD size_t rcre_threadpool_worker_count(const RCRE_ThreadPool* pool);
+
+/**
  * @brief Executes a 1D parallel-for loop across threadpool workers.
  */
 void rcre_threadpool_parallel_for(RCRE_ThreadPool* pool, size_t count, rcre_task_fn task, void* arg);
+
+/**
+ * @brief Executes a 1D work-stealing parallel-for loop supplying each participant a
+ *        deterministic worker_id in [0, rcre_threadpool_worker_count(pool)).
+ *        Ideal for lock-free thread-local reductions (GroupBy, histograms, k-means).
+ */
+void rcre_threadpool_parallel_for_indexed(RCRE_ThreadPool* pool, size_t count,
+                                          rcre_task_indexed_fn task, void* arg);
 
 /**
  * @brief Partitions 2D spatial dimensions into cache-friendly rectangular tiles.
