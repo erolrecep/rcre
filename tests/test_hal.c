@@ -214,6 +214,27 @@ static void test_cpu_topology_and_pressure(void) {
     ASSERT_TRUE(pressure >= 0 && pressure <= 2);
 }
 
+static void hal_mt_init_task(void* arg, size_t task_id) {
+    atomic_size_t* ok_count = (atomic_size_t*)arg;
+    rcre_hal_init();
+    float a[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    float b[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    float d = rcre_hal.dot_f32(a, b, 8);
+    if (fabsf(d - 36.0f) < 1e-4f && rcre_hal.backend_name != nullptr) {
+        (void)task_id;
+        atomic_fetch_add(ok_count, 1);
+    }
+}
+
+static void test_hal_concurrent_init_and_dispatch(void) {
+    RCRE_ThreadPool* pool = rcre_threadpool_create(8);
+    ASSERT_NOT_NULL(pool);
+    atomic_size_t ok_count = 0;
+    rcre_threadpool_parallel_for(pool, 64, hal_mt_init_task, &ok_count);
+    ASSERT_UINT_EQ(64, atomic_load(&ok_count));
+    rcre_threadpool_destroy(pool);
+}
+
 int main(void) {
     test_suite_begin("RCRE Hardware Abstraction Layer & SIMD (HAL-REQ-01 to 04)");
     TEST_RUN(test_cpu_probe_and_backend);
@@ -223,5 +244,6 @@ int main(void) {
     TEST_RUN(test_hal_rgb_to_gray_u8);
     TEST_RUN(test_hal_simd_byte_scanners);
     TEST_RUN(test_cpu_topology_and_pressure);
+    TEST_RUN(test_hal_concurrent_init_and_dispatch);
     return test_suite_report();
 }

@@ -10776,13 +10776,16 @@ RCRE_HalDispatch rcre_hal = {
     .ascii_to_upper  = rcre_scalar_ascii_to_upper
 };
 
-static atomic_bool s_hal_initialized = false;
+/*
+ * Thread-safe, freestanding initialization state machine:
+ *   0 = uninitialized, 1 = initializing, 2 = initialized & published.
+ * Uses pure ISO C23 <stdatomic.h> (no <pthread.h> dependency) so it remains
+ * 100% compatible with -DRCRE_FREESTANDING and WebAssembly builds while being
+ * race-free under ThreadSanitizer (TSan).
+ */
+static atomic_int s_hal_state = 0;
 
-void rcre_hal_init(void) {
-    if (atomic_load(&s_hal_initialized)) {
-        return;
-    }
-
+static void rcre_hal_select_backend(void) {
     uint32_t feats = rcre_cpu_get_features();
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
@@ -10811,7 +10814,6 @@ void rcre_hal_init(void) {
         rcre_hal.find_substr    = rcre_neon_find_substr;
         rcre_hal.ascii_to_lower = rcre_neon_ascii_to_lower;
         rcre_hal.ascii_to_upper = rcre_neon_ascii_to_upper;
-        atomic_store(&s_hal_initialized, true);
         return;
     }
 #endif
@@ -10844,7 +10846,6 @@ void rcre_hal_init(void) {
         rcre_hal.find_substr    = rcre_avx2_find_substr;
         rcre_hal.ascii_to_lower = rcre_avx2_ascii_to_lower;
         rcre_hal.ascii_to_upper = rcre_avx2_ascii_to_upper;
-        atomic_store(&s_hal_initialized, true);
         return;
     }
 #endif
@@ -10875,7 +10876,6 @@ void rcre_hal_init(void) {
         rcre_hal.find_substr    = rcre_avx2_find_substr;
         rcre_hal.ascii_to_lower = rcre_avx2_ascii_to_lower;
         rcre_hal.ascii_to_upper = rcre_avx2_ascii_to_upper;
-        atomic_store(&s_hal_initialized, true);
         return;
     }
 #endif
@@ -10898,7 +10898,6 @@ void rcre_hal_init(void) {
         rcre_hal.find_substr    = rcre_wasm_find_substr;
         rcre_hal.ascii_to_lower = rcre_wasm_ascii_to_lower;
         rcre_hal.ascii_to_upper = rcre_wasm_ascii_to_upper;
-        atomic_store(&s_hal_initialized, true);
         return;
     }
 #endif
@@ -10919,7 +10918,24 @@ void rcre_hal_init(void) {
     rcre_hal.find_substr    = rcre_scalar_find_substr;
     rcre_hal.ascii_to_lower = rcre_scalar_ascii_to_lower;
     rcre_hal.ascii_to_upper = rcre_scalar_ascii_to_upper;
-    atomic_store(&s_hal_initialized, true);
+}
+
+void rcre_hal_init(void) {
+    if (atomic_load_explicit(&s_hal_state, memory_order_acquire) == 2) {
+        return;
+    }
+
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &s_hal_state, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) {
+        rcre_hal_select_backend();
+        atomic_store_explicit(&s_hal_state, 2, memory_order_release);
+    } else {
+        while (atomic_load_explicit(&s_hal_state, memory_order_acquire) != 2) {
+            /* Brief one-time startup spin while winning thread populates rcre_hal */
+        }
+    }
 }
 
 typedef struct {
