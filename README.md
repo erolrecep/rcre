@@ -614,6 +614,17 @@ make up_web_app
 
 ---
 
+## 🛡️ Target Platforms & Module Stability Tiers
+
+RCRE focuses on **Apple Silicon (macOS ARM64)**, **Linux x86_64 scientific/HPC clusters**, and **Linux ARM64 edge devices (Raspberry Pi, NVIDIA Jetson)** (plus WebAssembly and `-DRCRE_FREESTANDING` embedded targets).
+
+- **Tier 1 (Production-Stable Core)**: `RCRE_Arena`, `RCRE_Tensor`/`RCRE_Slice`, `rcre_str.h`, race-free `rcre_hal` + `RCRE_ThreadPool`, `rcre_io.h`, `rcre_nlp.h` (incl. `RCRE_BM25Scratch`), `rcre_sparse.h`, `rcre_df.h`, `rcre_stat.h`/`prep`/`metric`, HPC H0–H4 math, GBDT/HNSW/e-Means/classical ML, core CV, and `rcre_prof.h`.
+- **Tier 2 (Preview / Hardening)**: `rcre_codec.h` (PNG/JPEG/BMP/PPM & ONNX subset — fuzz-tested via `fuzz_codec` & `fuzz_onnx`), `rcre_llm.h` (GGUF v2/v3 — fuzz-tested via `fuzz_gguf`), `rcre_autograd.h`, OS extras (`include/extras/rcre_http.h`, `rcre_cam.h`, `rcre_gpu.h`), and starter polyglot bindings.
+
+See the full platform matrix, fuzzing coverage, and ABI policy in [**docs/STABILITY.md**](docs/STABILITY.md).
+
+---
+
 ## 📜 Licensing & Commercial Use
 
 RCRE is licensed under a **Dual-Licensing Model**:

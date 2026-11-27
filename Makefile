@@ -575,6 +575,31 @@ test-fuzz: $(LIB)
 	@bin/fuzz_str_standalone
 	$(CC) $(SANITIZER_FLAGS) -DFUZZ_STANDALONE $(SRCS) tests/fuzz/fuzz_nlp.c -lm -lpthread -o bin/fuzz_nlp_standalone
 	@bin/fuzz_nlp_standalone
+	$(CC) $(SANITIZER_FLAGS) -DFUZZ_STANDALONE $(SRCS) tests/fuzz/fuzz_codec.c -lm -lpthread -o bin/fuzz_codec_standalone
+	@bin/fuzz_codec_standalone
+	$(CC) $(SANITIZER_FLAGS) -DFUZZ_STANDALONE $(SRCS) tests/fuzz/fuzz_gguf.c -lm -lpthread -o bin/fuzz_gguf_standalone
+	@bin/fuzz_gguf_standalone
+	$(CC) $(SANITIZER_FLAGS) -DFUZZ_STANDALONE $(SRCS) tests/fuzz/fuzz_onnx.c -lm -lpthread -o bin/fuzz_onnx_standalone
+	@bin/fuzz_onnx_standalone
+
+test-http: $(LIB)
+	@mkdir -p bin
+	@echo "🌐 Running RCRE Extras HTTP/1.1 Reactor Tests (Release + ASan/UBSan)..."
+	$(CC) $(CFLAGS) tests/test_http.c src/extras/http_server.c $(LIB) -lm -lpthread -o bin/test_http
+	@bin/test_http
+	$(CC) $(SANITIZER_FLAGS) tests/test_http.c src/extras/http_server.c $(SRCS) -lm -lpthread -o bin/test_http_asan
+	@bin/test_http_asan
+
+TSAN_FLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O1 -g -fsanitize=thread -Iinclude -Isrc/hal -Isrc/core -Isrc/ml
+test-tsan:
+	@mkdir -p bin
+	@echo "🧵 Running ThreadSanitizer (TSan) Concurrency Verification..."
+	$(CC) $(TSAN_FLAGS) tests/test_hal.c $(SRCS) -lm -lpthread -o bin/test_hal_tsan
+	@bin/test_hal_tsan
+	$(CC) $(TSAN_FLAGS) tests/test_threadpool.c $(SRCS) -lm -lpthread -o bin/test_threadpool_tsan
+	@bin/test_threadpool_tsan
+	$(CC) $(TSAN_FLAGS) tests/test_http.c src/extras/http_server.c $(SRCS) -lm -lpthread -o bin/test_http_tsan
+	@bin/test_http_tsan
 
 # =============================================================================
 # Profiling & Telemetry (rcre_prof) — CI threshold gate + trace export

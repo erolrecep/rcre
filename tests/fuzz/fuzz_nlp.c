@@ -98,9 +98,22 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     RCRE_ArenaTemp m2 = rcre_arena_temp_begin(&arena);
     RCRE_BM25Index bm25;
     if (rcre_bm25_build(&bm25, mini_docs, 2, nullptr, &arena, &scratch) == RCRE_OK) {
-        RCRE_SearchHit hits[2];
-        size_t nh = 0;
-        (void)rcre_bm25_search(&bm25, a, 2, hits, &nh, &scratch);
+        RCRE_SearchHit hits[2], hits_fast[2];
+        size_t nh = 0, nh_fast = 0;
+        if (rcre_bm25_search(&bm25, a, 2, hits, &nh, &scratch) == RCRE_OK) {
+            RCRE_BM25Scratch bm_sc;
+            if (rcre_bm25_scratch_init(&bm_sc, &bm25, &scratch) == RCRE_OK &&
+                rcre_bm25_search_scratch(&bm25, a, 2, hits_fast, &nh_fast, &bm_sc) == RCRE_OK) {
+                if (nh != nh_fast) {
+                    fuzz_nlp_abort("rcre_bm25_search_scratch count mismatch");
+                }
+                for (size_t hi = 0; hi < nh; ++hi) {
+                    if (hits[hi].doc_id != hits_fast[hi].doc_id) {
+                        fuzz_nlp_abort("rcre_bm25_search_scratch doc_id mismatch");
+                    }
+                }
+            }
+        }
     }
     RCRE_TfidfVectorizer tfidf;
     if (rcre_tfidf_fit(&tfidf, mini_docs, 2, nullptr, &arena, &scratch) == RCRE_OK) {

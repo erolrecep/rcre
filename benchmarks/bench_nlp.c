@@ -117,8 +117,18 @@ int main(void) {
         sink += nh;
     }
     double dt_bm_q = nlp_now_sec() - t0;
-    printf("BM25 Index (10k docs):          Build %6.2f ms | Top-10 Query %6.2f us/q\n",
-           dt_bm_build * 1e3, (dt_bm_q * 1e6) / (double)q_iters);
+
+    RCRE_BM25Scratch bm_sc;
+    (void)rcre_bm25_scratch_init(&bm_sc, &bm25, arena);
+    t0 = nlp_now_sec();
+    for (int q = 0; q < q_iters; ++q) {
+        (void)rcre_bm25_search_scratch(&bm25, RCRE_STR("sparse simd neon transformer"), 10, hits, &nh, &bm_sc);
+        sink += nh;
+    }
+    double dt_bm_q_fast = nlp_now_sec() - t0;
+    printf("BM25 Index (10k docs):          Build %6.2f ms | Arena Query %6.2f us/q | Reusable-Scratch %6.2f us/q (%.2fx)\n",
+           dt_bm_build * 1e3, (dt_bm_q * 1e6) / (double)q_iters,
+           (dt_bm_q_fast * 1e6) / (double)q_iters, dt_bm_q / dt_bm_q_fast);
 
     /* 5. TF-IDF -> RCRE_CSRMatrix (10k docs) */
     RCRE_TfidfVectorizer tfidf;

@@ -69,6 +69,12 @@ jobs:
         run: |
           make -C "${{ steps.locate.outputs.rcre_dir }}" test-fuzz
 
+      - name: Run Extras HTTP Reactor & ThreadSanitizer (TSan) Suite
+        if: matrix.compiler == 'clang'
+        run: |
+          make -C "${{ steps.locate.outputs.rcre_dir }}" test-http
+          make -C "${{ steps.locate.outputs.rcre_dir }}" test-tsan
+
       - name: Run Profiler Workload (make profile)
         run: |
           make -C "${{ steps.locate.outputs.rcre_dir }}" profile

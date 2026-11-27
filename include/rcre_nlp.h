@@ -144,7 +144,7 @@ RCRE_NODISCARD int rcre_bm25_build(
 );
 
 /**
- * @brief Executes Okapi BM25 top-k search.
+ * @brief Executes Okapi BM25 top-k search using a transient scratch arena.
  * @param out_hits Caller array of capacity top_k.
  * @param out_count Actual number of hits written (<= top_k).
  */
@@ -155,6 +155,40 @@ RCRE_NODISCARD int rcre_bm25_search(
     RCRE_SearchHit* out_hits,
     size_t* out_count,
     RCRE_Arena* scratch
+);
+
+/**
+ * @brief Reusable per-worker BM25 query scratchpad for high-QPS online serving.
+ *
+ * Allocated once from a caller RCRE_Arena via rcre_bm25_scratch_init() (zero
+ * malloc). Avoids O(num_docs) memset per query via O(touched) cleanup and uses
+ * partial top-k selection when top_k << touched.
+ */
+typedef struct RCRE_BM25Scratch {
+    float*          scores;
+    uint32_t*       touched;
+    RCRE_SearchHit* hits;
+    size_t          num_docs;
+} RCRE_BM25Scratch;
+
+RCRE_NODISCARD int rcre_bm25_scratch_init(
+    RCRE_BM25Scratch* scratch,
+    const RCRE_BM25Index* index,
+    RCRE_Arena* arena
+);
+
+/**
+ * @brief High-throughput Okapi BM25 top-k search over a reusable RCRE_BM25Scratch.
+ *        Produces identical rankings and scores to rcre_bm25_search() with
+ *        O(touched) reset overhead and zero allocations per query.
+ */
+RCRE_NODISCARD int rcre_bm25_search_scratch(
+    const RCRE_BM25Index* index,
+    RCRE_Slice query,
+    size_t top_k,
+    RCRE_SearchHit* out_hits,
+    size_t* out_count,
+    RCRE_BM25Scratch* scratch
 );
 
 /**

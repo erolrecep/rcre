@@ -75,6 +75,28 @@ static void test_nlp_bm25_and_rrf(void) {
     ASSERT_INT_EQ(RCRE_OK, rcre_bm25_search(&idx, RCRE_STR("quantum_unobtainium"), 3, hits, &n_hits, scratch));
     ASSERT_UINT_EQ(0, n_hits);
 
+    /* Reusable RCRE_BM25Scratch: exact parity across multiple sequential queries */
+    RCRE_BM25Scratch bm_sc;
+    ASSERT_INT_EQ(RCRE_OK, rcre_bm25_scratch_init(&bm_sc, &idx, arena));
+    RCRE_SearchHit fast_hits[5];
+    size_t n_fast = 0;
+    ASSERT_INT_EQ(RCRE_OK, rcre_bm25_search_scratch(&idx, RCRE_STR("BM25 lexical search"), 3, fast_hits, &n_fast, &bm_sc));
+    ASSERT_UINT_EQ(2, n_fast);
+    ASSERT_UINT_EQ(3, fast_hits[0].doc_id);
+    ASSERT_UINT_EQ(2, fast_hits[1].doc_id);
+    /* Second query with completely different terms proves O(touched) cleanup zeroed previous scores */
+    RCRE_SearchHit ref_hits2[5];
+    size_t n_ref2 = 0;
+    ASSERT_INT_EQ(RCRE_OK, rcre_bm25_search(&idx, RCRE_STR("arena simd"), 3, ref_hits2, &n_ref2, scratch));
+    ASSERT_INT_EQ(RCRE_OK, rcre_bm25_search_scratch(&idx, RCRE_STR("arena simd"), 3, fast_hits, &n_fast, &bm_sc));
+    ASSERT_UINT_EQ(n_ref2, n_fast);
+    for (size_t i = 0; i < n_ref2; ++i) {
+        ASSERT_UINT_EQ(ref_hits2[i].doc_id, fast_hits[i].doc_id);
+        ASSERT_FLOAT_NEAR(ref_hits2[i].score, fast_hits[i].score, 1e-5f);
+    }
+    ASSERT_INT_EQ(RCRE_OK, rcre_bm25_search_scratch(&idx, RCRE_STR("quantum_unobtainium"), 3, fast_hits, &n_fast, &bm_sc));
+    ASSERT_UINT_EQ(0, n_fast);
+
     /* Hybrid Reciprocal Rank Fusion (BM25 + HNSW mock) */
     RCRE_SearchHit bm25_list[3] = { { 3, 4.2f }, { 2, 3.1f }, { 0, 1.0f } };
     RCRE_SearchHit hnsw_list[3] = { { 0, 0.95f }, { 3, 0.91f }, { 4, 0.80f } };

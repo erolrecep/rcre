@@ -578,6 +578,130 @@ int rcre_bm25_search(
     return RCRE_OK;
 }
 
+int rcre_bm25_scratch_init(
+    RCRE_BM25Scratch* scratch,
+    const RCRE_BM25Index* index,
+    RCRE_Arena* arena
+) {
+    if (!scratch || !index || !arena) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(scratch, 0, sizeof(*scratch));
+    size_t n = (size_t)index->num_docs;
+    if (n == 0) {
+        return RCRE_OK;
+    }
+    scratch->scores  = (float*)rcre_arena_alloc(arena, n * sizeof(float), 64);
+    scratch->touched = (uint32_t*)rcre_arena_alloc(arena, n * sizeof(uint32_t), 64);
+    scratch->hits    = (RCRE_SearchHit*)rcre_arena_alloc(arena, n * sizeof(RCRE_SearchHit), alignof(RCRE_SearchHit));
+    if (!scratch->scores || !scratch->touched || !scratch->hits) {
+        memset(scratch, 0, sizeof(*scratch));
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(scratch->scores, 0, n * sizeof(float));
+    scratch->num_docs = n;
+    return RCRE_OK;
+}
+
+int rcre_bm25_search_scratch(
+    const RCRE_BM25Index* index,
+    RCRE_Slice query,
+    size_t top_k,
+    RCRE_SearchHit* out_hits,
+    size_t* out_count,
+    RCRE_BM25Scratch* scratch
+) {
+    if (!index || !out_count || !scratch || (top_k > 0 && !out_hits)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    if (index->num_docs == 0 || index->num_terms == 0 || top_k == 0 || query.len == 0) {
+        return RCRE_OK;
+    }
+    if (scratch->num_docs < (size_t)index->num_docs || !scratch->scores || !scratch->touched || !scratch->hits) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    float* scores = scratch->scores;
+    uint32_t* touched = scratch->touched;
+    size_t num_touched = 0;
+
+    const float k1    = index->k1;
+    const float k1p1  = k1 + 1.0f;
+    const float b     = index->b;
+    const float avgdl = (index->avg_doc_len > 0.0f) ? index->avg_doc_len : 1.0f;
+    const float k1_1mb = k1 * (1.0f - b);
+    const float k1_b_inv_avgdl = k1 * (b / avgdl);
+
+    const uint32_t* doc_lens = index->doc_lens;
+    const uint32_t* postings_doc = index->postings_doc;
+    const uint32_t* postings_tf  = index->postings_tf;
+
+    uint8_t low_buf[256];
+    RCRE_WordIter it = rcre_nlp_word_iter_init(query, &index->tok_opts);
+    RCRE_Slice tok;
+    while (rcre_nlp_word_iter_next(&it, &tok)) {
+        RCRE_Slice norm = rcre_nlp__normalize_tok(tok, index->lowercase, low_buf, sizeof(low_buf), nullptr);
+        RCRE_StrId tid = rcre_strpool_find(&index->vocab, norm);
+        if (tid == RCRE_STR_ID_INVALID) continue;
+
+        float idf_k1p1 = index->term_idf[tid] * k1p1;
+        uint32_t p0 = index->term_offsets[tid];
+        uint32_t p1 = index->term_offsets[tid + 1U];
+        for (uint32_t p = p0; p < p1; ++p) {
+            uint32_t d = postings_doc[p];
+            float tf = (float)postings_tf[p];
+            float dl = (float)doc_lens[d];
+            float denom = tf + k1_1mb + k1_b_inv_avgdl * dl;
+            float contrib = (idf_k1p1 * tf) / denom;
+            float prev = scores[d];
+            if (prev == 0.0f && contrib > 0.0f) {
+                touched[num_touched++] = d;
+            }
+            scores[d] = prev + contrib;
+        }
+    }
+
+    if (num_touched == 0) {
+        return RCRE_OK;
+    }
+
+    RCRE_SearchHit* all_hits = scratch->hits;
+    for (size_t i = 0; i < num_touched; ++i) {
+        uint32_t d = touched[i];
+        all_hits[i].doc_id = d;
+        all_hits[i].score  = scores[d];
+        scores[d] = 0.0f; /* O(touched) cleanup */
+    }
+
+    size_t n_emit = (num_touched < top_k) ? num_touched : top_k;
+    if (n_emit * 8U < num_touched) {
+        /* Partial top-k selection: O(num_touched * top_k) */
+        for (size_t i = 0; i < n_emit; ++i) {
+            size_t best = i;
+            RCRE_SearchHit bh = all_hits[i];
+            for (size_t j = i + 1U; j < num_touched; ++j) {
+                RCRE_SearchHit h = all_hits[j];
+                if (h.score > bh.score || (h.score == bh.score && h.doc_id < bh.doc_id)) {
+                    best = j;
+                    bh = h;
+                }
+            }
+            if (best != i) {
+                all_hits[best] = all_hits[i];
+                all_hits[i] = bh;
+            }
+            out_hits[i] = bh;
+        }
+    } else {
+        rcre_nlp__sort_hits_desc(all_hits, num_touched);
+        memcpy(out_hits, all_hits, n_emit * sizeof(RCRE_SearchHit));
+    }
+
+    *out_count = n_emit;
+    return RCRE_OK;
+}
+
 int rcre_nlp_rrf_fuse(
     const RCRE_SearchHit* const* lists,
     const size_t* list_counts,
