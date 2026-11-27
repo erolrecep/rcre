@@ -437,12 +437,20 @@ static void test_phase5_freestanding_gpu(void) {
         A[i] = (float)((i % 11) - 5) * 0.1f;
         B[i] = (float)((i % 7) - 3) * 0.1f;
     }
-    assert(rcre_gpu_gemm_f32(N, N, N, 1.0f, A, N, B, N, 0.0f, C_gpu, N) == RCRE_OK);
+    /* H6 bridge: best available backend (cuda -> metal -> cpu). The cpu
+     * backend delegates to the core HAL, so this cross-checks the bridge
+     * on every platform and runs real GPU GEMM where one is present. */
+    RCRE_GpuCtx* gctx = rcre_gpu_open();
+    assert(gctx != NULL);
+    assert(rcre_gpu_gemm_f32_host(gctx, N, N, N, 1.0f, A, N, B, N,
+                                  0.0f, C_gpu, N) == RCRE_OK);
     rcre_hal.gemm_f32(N, N, N, 1.0f, A, N, B, N, 0.0f, C_cpu, N);
     for (size_t i = 0; i < N * N; ++i) {
         assert(fabsf(C_gpu[i] - C_cpu[i]) < 1e-3f);
     }
-    printf("  ✓ [PASS] test_phase5_freestanding_gpu (%s)\n", rcre_gpu_device_name());
+    printf("  ✓ [PASS] test_phase5_freestanding_gpu (gpu bridge backend: %s)\n",
+           rcre_gpu_backend_name(gctx));
+    rcre_gpu_close(gctx);
     rcre_arena_destroy(a);
 }
 

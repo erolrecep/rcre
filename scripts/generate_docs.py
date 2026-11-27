@@ -88,6 +88,10 @@ def parse_header(header_path):
             category = "Data I/O & Interop"
         elif name.startswith("rcre_sparse"):
             category = "Sparse Matrices"
+        elif name.startswith("rcre_str") or name.startswith("rcre_slice") or name.startswith("rcre_sb_") or name.startswith("rcre_utf8") or name.startswith("rcre_path") or name.startswith("rcre_cstr") or name.startswith("rcre_split"):
+            category = "Safe Strings & UTF-8"
+        elif name.startswith("rcre_nlp") or name.startswith("rcre_bm25") or name.startswith("rcre_tfidf") or name.startswith("rcre_ac_") or name.startswith("rcre_nmf") or name.startswith("rcre_lda") or name.startswith("rcre_sparse_clf") or name.startswith("rcre_summarize"):
+            category = "HPC Natural Language Processing"
 
         functions.append({
             "name": name,
@@ -104,6 +108,8 @@ def parse_header(header_path):
 def main():
     root = Path(__file__).resolve().parent.parent
     rcre_h = root / "include" / "rcre.h"
+    rcre_str_h = root / "include" / "rcre_str.h"
+    rcre_nlp_h = root / "include" / "rcre_nlp.h"
     rcre_prof_h = root / "include" / "rcre_prof.h"
     rcre_autograd_h = root / "include" / "rcre_autograd.h"
     rcre_transformer_h = root / "include" / "rcre_transformer.h"
@@ -115,7 +121,7 @@ def main():
     rcre_cam_h = root / "include" / "extras" / "rcre_cam.h"
 
     all_funcs = []
-    for h in [rcre_h, rcre_prof_h, rcre_autograd_h, rcre_transformer_h, rcre_sparse_h, rcre_io_h, rcre_llm_h, rcre_codec_h, rcre_gpu_h, rcre_cam_h]:
+    for h in [rcre_h, rcre_str_h, rcre_nlp_h, rcre_prof_h, rcre_autograd_h, rcre_transformer_h, rcre_sparse_h, rcre_io_h, rcre_llm_h, rcre_codec_h, rcre_gpu_h, rcre_cam_h]:
         if h.exists():
             all_funcs.extend(parse_header(h))
 

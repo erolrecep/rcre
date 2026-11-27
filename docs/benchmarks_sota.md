@@ -1,4 +1,4 @@
-# RCRE v2.2.0 Empirical Roofline, String & HPC Benchmarks
+# RCRE v2.2.0 Empirical Roofline, String, NLP & HPC Benchmarks
 
 **Host Hardware Verified On:** Apple M5 Max (`18` Logical Cores: `6P + 12E`, `128.0 GB` Unified RAM)  
 **Active SIMD Dispatch Backend:** `ARM NEON 128-bit` (with x86 `AVX2`/`AVX-512F`, `WASM SIMD128`, and Apple `Metal` backends)  
@@ -45,7 +45,25 @@
 
 ---
 
-## 4. HPC Factorizations & Solvers (`make bench_h2`, `make bench_h3`, `make bench_h4`)
+## 4. HPC Natural Language Processing Engine (`make bench_nlp`)
+
+| Benchmark Kernel | Workload Configuration | Measured Throughput / Latency | Notes |
+| :--- | :--- | :---: | :--- |
+| **Zero-Copy Word Tokenization** | `16 MB` corpus (`RCRE_WordIter`) | **`663.94 MB/s`** (`92.76M tokens/s`) | Zero copies, 0 `malloc`s |
+| **Aho–Corasick Flat DFA Scan** | `16 MB` corpus, 16 case-insensitive patterns | **`550.78 MB/s`** (`1,172,843` hits) | 1 array load/byte, compile-time folding |
+| **Levenshtein Edit Distance** | `61`-byte strings (`Myers64` vs scalar DP) | Scalar `0.35M/s` → **`7.69M ops/s`** | **`22.27x` speedup** (64-bit bit-parallel) |
+| **BM25 Inverted Index** | `10,000` docs (flat CSR arena postings) | Build **`11.33 ms`** / Top-10 **`252.73 µs/q`** | Two-pass $\mathcal{O}(\text{tokens})$, 0 `malloc`s |
+| **TF-IDF → `RCRE_CSRMatrix`** | `10,000` docs (`nnz = 109,912`) | **`17.80 ms`** (**`561.7k docs/s`**) | 64B-aligned CSR, `sklearn`-matching IDF |
+| **Sparse HALS NMF** | `10,000` docs, $K = 8$, `20` HALS iters | **`22.94 ms`** | PCG64 deterministic, 0 `malloc`s |
+| **Collapsed Gibbs LDA** | `2,000` docs, $K = 8$, `20` sweeps | **`11.69 ms`** (`logPPL = 3.46`) | PCG64 deterministic, flat arena counts |
+| **Sparse Multinomial Naive Bayes** | `10,000` docs, `4` classes (CSR direct) | Fit **`0.09 ms`** / Predict **`0.20 ms`** | **`49.5M docs/s`** predict, 0 dense alloc |
+| **Sparse Multi-Class Softmax SGD** | `10,000` docs, `4` classes, `10` epochs | **`6.76 ms`** (**`14.78M docs/s/ep`**) | PCG64 shuffled sparse SGD |
+| **LexRank + MMR Summarization** | `64` sentences → top-`3` summary | **`0.13 ms / doc`** | Zero-copy sentence slices, doc order |
+| **SimHash64 Fingerprinting** | `10,000` docs (`rcre_nlp_simhash64`) | **`3.34 ms`** (**`3.00M docs/s`**) | Hardware `popcnt`, 0 allocations |
+
+---
+
+## 5. HPC Factorizations & Solvers (`make bench_h2`, `make bench_h3`, `make bench_h4`)
 
 | Kernel / Routine | Problem Configuration | Execution Throughput / Metric | Measured Wall Time |
 | :--- | :--- | :--- | :--- |

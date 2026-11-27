@@ -27,6 +27,7 @@ set(RCRE_CORE_SRCS
     src/core/threadpool.c
     src/core/prof.c
     src/core/sparse.c
+    src/core/nlp.c
     src/core/io.c
     src/cv/color.c
     src/cv/geom.c

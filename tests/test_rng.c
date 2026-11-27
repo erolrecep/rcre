@@ -26,6 +26,10 @@
 
 #include "test_framework.h"
 #include "rng_fixtures/rng_fixture_data.h"
+#include "rng_fixtures/philox_stream_a.h"
+#include "rng_fixtures/philox_stream_b.h"
+#include "rng_fixtures/philox_corners.h"
+#include "rng_fixtures/philox_corner_inputs.h"
 
 /* ------------------------------- PCG64 ---------------------------------- */
 
@@ -275,6 +279,60 @@ static void test_halton_conformance(void) {
     }
 }
 
+/* ------------------------------- Philox-4x32 (H6) ------------------------- */
+
+/* Bit-exact against the independent pure-Python oracle
+ * (ref_philox_oracle.py): two 1024-word streams + corner (counter,key) */
+static void test_philox_conformance_oracle(void) {
+    uint32_t a[1024], b[1024];
+    ASSERT_TRUE(rcre_rng_philox4x32_fill(a, 1024, 0,
+                                         0x9E3779B9C0FFEE53ull) == RCRE_OK);
+    ASSERT_TRUE(memcmp(a, RCRE_PHILOX_STREAM_A, sizeof a) == 0);
+    ASSERT_TRUE(rcre_rng_philox4x32_fill(b, 1024, 1000, 0) == RCRE_OK);
+    ASSERT_TRUE(memcmp(b, RCRE_PHILOX_STREAM_B, sizeof b) == 0);
+
+    for (int i = 0; i < 6; ++i) {
+        uint32_t w[4];
+        rcre_rng_philox4x32(RCRE_PHILOX_CORNER_CTR[i], RCRE_PHILOX_CORNER_KEY[i], w);
+        ASSERT_TRUE(memcmp(w, RCRE_PHILOX_CORNERS + 4 * i, 16) == 0);
+    }
+
+    /* determinism: repeat calls are bit-identical */
+    uint32_t a2[1024];
+    ASSERT_TRUE(rcre_rng_philox4x32_fill(a2, 1024, 0,
+                                         0x9E3779B9C0FFEE53ull) == RCRE_OK);
+    ASSERT_TRUE(memcmp(a, a2, sizeof a) == 0);
+
+    /* counter contiguity: a single-shot at counter c equals word 4c of
+     * a fill starting at c */
+    uint32_t one[4], tail[8];
+    rcre_rng_philox4x32(77, 1234, one);
+    ASSERT_TRUE(rcre_rng_philox4x32_fill(tail, 8, 77, 1234) == RCRE_OK);
+    ASSERT_TRUE(memcmp(one, tail, 16) == 0);
+}
+
+/* Light distribution sanity (guards against constant/multiplier typos
+ * that still pass a hand-rolled oracle if the oracle were derived from
+ * the C code — the curand cross-check on dlbox is the strong anchor). */
+static void test_philox_distribution_sanity(void) {
+    enum { N = 1 << 20 };
+    uint32_t* w = (uint32_t*)malloc(N * sizeof(uint32_t));
+    ASSERT_TRUE(w != NULL);
+    ASSERT_TRUE(rcre_rng_philox4x32_fill(w, N, 0, 0xC0FFEEC0FFEEull) == RCRE_OK);
+    uint32_t distinct = 0;
+    int zero_count = 0;
+    for (int i = 0; i < N; ++i) {
+        if (i == 0 || w[i] != w[i - 1]) distinct++;
+        if (w[i] == 0) zero_count++;
+    }
+    /* 1M distinct 32-bit draws: adjacent-equal rate ~2^-32, so run
+     * distinctness must be ~N; require > 99.99% */
+    ASSERT_TRUE(distinct > N - (N / 100));  /* > 99% runs (expect ~100%: P(adj equal)=2^-32) */
+    /* P(zero) = 2^-32: expect ~0, allow 4 */
+    ASSERT_TRUE(zero_count <= 4);
+    free(w);
+}
+
 int main(void) {
     test_suite_begin("RCRE Reproducible Streams (H1, 2.2.0)");
     TEST_RUN(test_pcg64_conformance_numpy);
@@ -284,5 +342,7 @@ int main(void) {
     TEST_RUN(test_sobol_conformance_scipy);
     TEST_RUN(test_sobol_stateful_and_properties);
     TEST_RUN(test_halton_conformance);
+    TEST_RUN(test_philox_conformance_oracle);
+    TEST_RUN(test_philox_distribution_sanity);
     return test_suite_report();
 }

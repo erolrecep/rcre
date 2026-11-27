@@ -2859,6 +2859,2036 @@
     "header": "rcre.h"
   },
   {
+    "name": "rcre_linalg_gemm_f32",
+    "return_type": "void",
+    "brief": "Double-precision substrate, compensated reductions, and the special",
+    "params": [
+      {
+        "name": "M",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "N",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "K",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "alpha",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "A",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "B",
+        "type": "const float*",
+        "description": ""
+      },
+      {
+        "name": "ldb",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "beta",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "C",
+        "type": "float*",
+        "description": ""
+      },
+      {
+        "name": "ldc",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_gemm_blocked_f64",
+    "return_type": "void",
+    "brief": "BLIS-style blocked GEMM, f64 (H2, 2.2.0).",
+    "params": [
+      {
+        "name": "M",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "N",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "K",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "alpha",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "A",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "B",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "ldb",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "beta",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "C",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "ldc",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_trsm_f64",
+    "return_type": "int",
+    "brief": "Triangular solve, f64 (H2, 2.2.0). Solve A*X = alpha*X in",
+    "params": [
+      {
+        "name": "uplo",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "trans",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "diag",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "alpha",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "A",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "X",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "ldx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "nrhs",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_fft_1d_f64",
+    "return_type": "int",
+    "brief": "General-size 1-D FFT, F64 (H2, 2.2.0).",
+    "params": [
+      {
+        "name": "in_re",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "in_im",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "out_re",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "out_im",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "invert",
+        "type": "int",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_lu_factor_f64",
+    "return_type": "int",
+    "brief": "LU factorization with partial pivoting, F64 (H3, 2.2.0).",
+    "params": [
+      {
+        "name": "A",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "piv",
+        "type": "size_t*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_lu_solve_f64",
+    "return_type": "int",
+    "brief": "Solve A\u00b7X = B from a packed LU factor (getrs-class).",
+    "params": [
+      {
+        "name": "A",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "piv",
+        "type": "const size_t*",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "B",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "ldx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "nrhs",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_solve_f64",
+    "return_type": "int",
+    "brief": "One-shot dense solve A\u00b7X = B (A not modified; factor + solve).",
+    "params": [
+      {
+        "name": "A",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "B",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "ldx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "nrhs",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_cholesky_f64",
+    "return_type": "int",
+    "brief": "In-place Cholesky factorization of an SPD matrix, F64 (H3).",
+    "params": [
+      {
+        "name": "A",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "lower",
+        "type": "int",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_cholesky_solve_f64",
+    "return_type": "int",
+    "brief": "Solve A\u00b7X = B from a Cholesky factor (row-major, multi-RHS).",
+    "params": [
+      {
+        "name": "F",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "B",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "ldx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "nrhs",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "lower",
+        "type": "int",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_qr_factor_f64",
+    "return_type": "int",
+    "brief": "In-place Householder QR, F64 (H3): A (m\u00d7n row-major, m >= n,",
+    "params": [
+      {
+        "name": "A",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "m",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "tau",
+        "type": "double*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_qr_q_f64",
+    "return_type": "void",
+    "brief": "Explicit Q (m\u00d7m row-major out) from a packed QR factorization.",
+    "params": [
+      {
+        "name": "A",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "m",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "tau",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "Q",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "ldq",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_qr_lsolve_f64",
+    "return_type": "int",
+    "brief": "Least squares min ||A\u00b7x - b|| per column of B via QR (H3).",
+    "params": [
+      {
+        "name": "A",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "m",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "tau",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "B",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "ldx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "nrhs",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_linalg_syev_f64",
+    "return_type": "int",
+    "brief": "Symmetric eigendecomposition, F64 (H3, dsyev-class).",
+    "params": [
+      {
+        "name": "A",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "lda",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "compute_vectors",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "w",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "V",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "ldv",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "void",
+    "return_type": "typedef",
+    "brief": "Krylov convergence callback (H4).",
+    "params": [
+      {
+        "name": "iter",
+        "type": "*RCRE_KrylovCallback)(size_t",
+        "description": ""
+      },
+      {
+        "name": "rel_res",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "user",
+        "type": "void*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_csr_f64_from_dense",
+    "return_type": "int",
+    "brief": "Dense (row-major) to CSR conversion, F64 (H4).",
+    "params": [
+      {
+        "name": "A",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "rows",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "cols",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "threshold",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "row_ptr",
+        "type": "size_t**",
+        "description": ""
+      },
+      {
+        "name": "col_idx",
+        "type": "size_t**",
+        "description": ""
+      },
+      {
+        "name": "values",
+        "type": "double**",
+        "description": ""
+      },
+      {
+        "name": "nnz",
+        "type": "size_t*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_pc_jacobi_f64",
+    "return_type": "int",
+    "brief": "Jacobi preconditioner: inv_diag[i] = 1/A[i,i] (H4).",
+    "params": [
+      {
+        "name": "A",
+        "type": "const RCRE_CSR_F64*",
+        "description": ""
+      },
+      {
+        "name": "inv_diag",
+        "type": "double*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_pc_ilu0_f64",
+    "return_type": "int",
+    "brief": "Incomplete LU factorization, zero fill (ILU(0)), F64 (H4).",
+    "params": [
+      {
+        "name": "A",
+        "type": "const RCRE_CSR_F64*",
+        "description": ""
+      },
+      {
+        "name": "fac",
+        "type": "RCRE_CSR_F64*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_pc_ilu0_solve_f64",
+    "return_type": "void",
+    "brief": "Apply an ILU(0) preconditioner: z = (L\u00b7U)\u207b\u00b9\u00b7r (H4).",
+    "params": [
+      {
+        "name": "fac",
+        "type": "const RCRE_CSR_F64*",
+        "description": ""
+      },
+      {
+        "name": "r",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "z",
+        "type": "double*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_krylov_pcg_f64",
+    "return_type": "int",
+    "brief": "Preconditioned conjugate gradients for SPD A\u00b7x = b, F64 (H4).",
+    "params": [
+      {
+        "name": "A",
+        "type": "const RCRE_CSR_F64*",
+        "description": ""
+      },
+      {
+        "name": "b",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "x",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "tol",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "max_iter",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "pc",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "pc_data",
+        "type": "const void*",
+        "description": ""
+      },
+      {
+        "name": "fcg",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "cb",
+        "type": "RCRE_KrylovCallback",
+        "description": ""
+      },
+      {
+        "name": "user",
+        "type": "void*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_krylov_bicgstab_f64",
+    "return_type": "int",
+    "brief": "BiCGStab for general (non-symmetric) A\u00b7x = b, F64 (H4).",
+    "params": [
+      {
+        "name": "A",
+        "type": "const RCRE_CSR_F64*",
+        "description": ""
+      },
+      {
+        "name": "b",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "x",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "tol",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "max_iter",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "pc",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "pc_data",
+        "type": "const void*",
+        "description": ""
+      },
+      {
+        "name": "cb",
+        "type": "RCRE_KrylovCallback",
+        "description": ""
+      },
+      {
+        "name": "user",
+        "type": "void*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_krylov_gmres_f64",
+    "return_type": "int",
+    "brief": "Restored GMRES(m) with Householder QR on the Hessenberg,",
+    "params": [
+      {
+        "name": "A",
+        "type": "const RCRE_CSR_F64*",
+        "description": ""
+      },
+      {
+        "name": "b",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "x",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "tol",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "max_iter",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "m",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "pc",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "pc_data",
+        "type": "const void*",
+        "description": ""
+      },
+      {
+        "name": "cb",
+        "type": "RCRE_KrylovCallback",
+        "description": ""
+      },
+      {
+        "name": "user",
+        "type": "void*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_mg_vcycle_poisson2d_f64",
+    "return_type": "int",
+    "brief": "Classic geometric multigrid V-cycle, 2D Poisson (Dirichlet),",
+    "params": [
+      {
+        "name": "nx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "ny",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "f",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "x",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "pre",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "post",
+        "type": "int",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_mg_fas_poisson2d_f64",
+    "return_type": "int",
+    "brief": "Geometric multigrid FAS cycle, 2D Poisson (Dirichlet), structured",
+    "params": [
+      {
+        "name": "nx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "ny",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "f",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "x",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "pre",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "post",
+        "type": "int",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_mg_solve_poisson2d_f64",
+    "return_type": "int",
+    "brief": "Repeat V-cycles until the true relative residual ||f - A x||/||f||",
+    "params": [
+      {
+        "name": "nx",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "ny",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "f",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "x",
+        "type": "double*",
+        "description": ""
+      },
+      {
+        "name": "tol",
+        "type": "double",
+        "description": ""
+      },
+      {
+        "name": "max_cycles",
+        "type": "int",
+        "description": ""
+      },
+      {
+        "name": "cb",
+        "type": "RCRE_KrylovCallback",
+        "description": ""
+      },
+      {
+        "name": "user",
+        "type": "void*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_sum_neumaier_f64",
+    "return_type": "double",
+    "brief": "Neumaier-compensated sum (high-accuracy, deterministic).",
+    "params": [
+      {
+        "name": "x",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_dot_neumaier_f64",
+    "return_type": "double",
+    "brief": "Neumaier-compensated dot product (high-accuracy, deterministic).",
+    "params": [
+      {
+        "name": "x",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "y",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_sum_pairwise_f64",
+    "return_type": "double",
+    "brief": "Two-way (recursive) split sum \u2014 the fast error-floor reference.",
+    "params": [
+      {
+        "name": "x",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_sf_erf_f64",
+    "return_type": "double",
+    "brief": "C99-style special functions for statistics and physics.",
+    "params": [
+      {
+        "name": "x",
+        "type": "double",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_sf_logsumexp_f64",
+    "return_type": "double",
+    "brief": "Numerically stable log-sum-exp: log(sum(exp(x_i))).",
+    "params": [
+      {
+        "name": "x",
+        "type": "const double*",
+        "description": ""
+      },
+      {
+        "name": "n",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_sf_norm_cdf_f64",
+    "return_type": "double",
+    "brief": "Standard normal CDF Phi(x) = 0.5*erfc(-x/sqrt(2)).",
+    "params": [
+      {
+        "name": "x",
+        "type": "double",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_rng_pcg_init_parts",
+    "return_type": "void",
+    "brief": "Seed from four 64-bit parts \u2014 numpy-compatible.",
+    "params": [
+      {
+        "name": "r",
+        "type": "RCRE_RNG*",
+        "description": ""
+      },
+      {
+        "name": "s0",
+        "type": "uint64_t",
+        "description": ""
+      },
+      {
+        "name": "s1",
+        "type": "uint64_t",
+        "description": ""
+      },
+      {
+        "name": "s2",
+        "type": "uint64_t",
+        "description": ""
+      },
+      {
+        "name": "s3",
+        "type": "uint64_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_rng_pcg_substream",
+    "return_type": "void",
+    "brief": "Deterministic substream for worker `id` of base RNG.",
+    "params": [
+      {
+        "name": "base",
+        "type": "const RCRE_RNG*",
+        "description": ""
+      },
+      {
+        "name": "id",
+        "type": "uint64_t",
+        "description": ""
+      },
+      {
+        "name": "out",
+        "type": "RCRE_RNG*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Core",
+    "header": "rcre.h"
+  },
+  {
+    "name": "rcre_cstr_copy_bounded",
+    "return_type": "bool",
+    "brief": "One-call UTF-8-safe bounded copy into a legacy char[N] struct field.",
+    "params": [
+      {
+        "name": "dst",
+        "type": "char*",
+        "description": ""
+      },
+      {
+        "name": "dst_cap",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "src",
+        "type": "RCRE_Slice",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Safe Strings & UTF-8",
+    "header": "rcre_str.h"
+  },
+  {
+    "name": "rcre_utf8_validate",
+    "return_type": "bool",
+    "brief": "Validates strict RFC 3629 UTF-8 (rejects overlongs, UTF-16 surrogates,",
+    "params": [
+      {
+        "name": "s",
+        "type": "RCRE_Slice",
+        "description": ""
+      },
+      {
+        "name": "out_err_offset",
+        "type": "size_t*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "Safe Strings & UTF-8",
+    "header": "rcre_str.h"
+  },
+  {
+    "name": "rcre_utf8_decode_next",
+    "return_type": "int",
+    "brief": "Decodes next UTF-8 codepoint from *cursor and advances *cursor.",
+    "params": [
+      {
+        "name": "cursor",
+        "type": "RCRE_Slice*",
+        "description": ""
+      },
+      {
+        "name": "out_cp",
+        "type": "uint32_t*",
+        "description": ""
+      }
+    ],
+    "returns": "1..4 (bytes consumed) on valid codepoint, 0 on empty cursor,",
+    "category": "Safe Strings & UTF-8",
+    "header": "rcre_str.h"
+  },
+  {
+    "name": "rcre_utf8_decode_prev",
+    "return_type": "int",
+    "brief": "Decodes last UTF-8 codepoint from *cursor and shrinks cursor->len.",
+    "params": [
+      {
+        "name": "cursor",
+        "type": "RCRE_Slice*",
+        "description": ""
+      },
+      {
+        "name": "out_cp",
+        "type": "uint32_t*",
+        "description": ""
+      }
+    ],
+    "returns": "1..4 (bytes consumed) on valid codepoint, 0 on empty cursor,",
+    "category": "Safe Strings & UTF-8",
+    "header": "rcre_str.h"
+  },
+  {
+    "name": "rcre_nlp_word_ngram_next",
+    "return_type": "bool",
+    "brief": "RCRE HPC-Native, Zero-Malloc C23 Natural Language Processing Engine",
+    "params": [
+      {
+        "name": "it",
+        "type": "RCRE_WordNGramIter*",
+        "description": ""
+      },
+      {
+        "name": "out_span",
+        "type": "RCRE_Slice*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_bm25_build",
+    "return_type": "int",
+    "brief": "Builds a flat CSR-layout BM25 inverted index in two O(tokens) linear passes.",
+    "params": [
+      {
+        "name": "index",
+        "type": "RCRE_BM25Index*",
+        "description": "Output initialized index."
+      },
+      {
+        "name": "docs",
+        "type": "const RCRE_Slice*",
+        "description": "Array of document slices [num_docs]."
+      },
+      {
+        "name": "num_docs",
+        "type": "size_t",
+        "description": "Number of documents."
+      },
+      {
+        "name": "opts",
+        "type": "const RCRE_BM25Opts*",
+        "description": "Optional BM25 options (nullptr => defaults)."
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": "Persistent arena owning the index buffers."
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": "Ephemeral scratch arena (rewound before return; may equal arena)."
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_bm25_search",
+    "return_type": "int",
+    "brief": "Executes Okapi BM25 top-k search.",
+    "params": [
+      {
+        "name": "index",
+        "type": "const RCRE_BM25Index*",
+        "description": ""
+      },
+      {
+        "name": "query",
+        "type": "RCRE_Slice",
+        "description": ""
+      },
+      {
+        "name": "top_k",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "out_hits",
+        "type": "RCRE_SearchHit*",
+        "description": "Caller array of capacity top_k."
+      },
+      {
+        "name": "out_count",
+        "type": "size_t*",
+        "description": "Actual number of hits written (<= top_k)."
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_rrf_fuse",
+    "return_type": "int",
+    "brief": "Reciprocal Rank Fusion (RRF): fuses multiple ranked hit lists",
+    "params": [
+      {
+        "name": "lists",
+        "type": "const RCRE_SearchHit* const*",
+        "description": ""
+      },
+      {
+        "name": "list_counts",
+        "type": "const size_t*",
+        "description": ""
+      },
+      {
+        "name": "num_lists",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "k_rrf",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "top_k",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "out_hits",
+        "type": "RCRE_SearchHit*",
+        "description": ""
+      },
+      {
+        "name": "out_count",
+        "type": "size_t*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_tfidf_transform",
+    "return_type": "int",
+    "brief": "Transforms documents into a 64-byte aligned RCRE_CSRMatrix",
+    "params": [
+      {
+        "name": "vec",
+        "type": "const RCRE_TfidfVectorizer*",
+        "description": ""
+      },
+      {
+        "name": "docs",
+        "type": "const RCRE_Slice*",
+        "description": ""
+      },
+      {
+        "name": "num_docs",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "out_csr",
+        "type": "RCRE_CSRMatrix*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_hash_vectorize",
+    "return_type": "int",
+    "brief": "Lock-free signed Feature Hashing (Weinberger trick) directly into",
+    "params": [
+      {
+        "name": "docs",
+        "type": "const RCRE_Slice*",
+        "description": ""
+      },
+      {
+        "name": "num_docs",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "n_features",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "lowercase",
+        "type": "bool",
+        "description": ""
+      },
+      {
+        "name": "norm",
+        "type": "RCRE_NlpNorm",
+        "description": ""
+      },
+      {
+        "name": "tok_opts",
+        "type": "const RCRE_TokenizeOpts*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "out_tensor",
+        "type": "RCRE_Tensor*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_levenshtein",
+    "return_type": "size_t",
+    "brief": "Exact Levenshtein edit distance using 64-bit word-parallel Myers",
+    "params": [
+      {
+        "name": "a",
+        "type": "RCRE_Slice",
+        "description": ""
+      },
+      {
+        "name": "b",
+        "type": "RCRE_Slice",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_minhash_compute",
+    "return_type": "int",
+    "brief": "Computes a K-permutation MinHash signature over word n-grams",
+    "params": [
+      {
+        "name": "text",
+        "type": "RCRE_Slice",
+        "description": ""
+      },
+      {
+        "name": "ngram_n",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "out_sig",
+        "type": "uint64_t*",
+        "description": ""
+      },
+      {
+        "name": "num_hashes",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "opts",
+        "type": "const RCRE_TokenizeOpts*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_chunk_utf8",
+    "return_type": "int",
+    "brief": "Zero-copy UTF-8 & word-boundary-safe RAG document chunker.",
+    "params": [
+      {
+        "name": "text",
+        "type": "RCRE_Slice",
+        "description": ""
+      },
+      {
+        "name": "max_bytes",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "overlap_bytes",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "out_chunks",
+        "type": "RCRE_Slice**",
+        "description": ""
+      },
+      {
+        "name": "out_count",
+        "type": "size_t*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nmf_fit",
+    "return_type": "int",
+    "brief": "Fits Non-Negative Matrix Factorization X ~ W * H directly on a",
+    "params": [
+      {
+        "name": "model",
+        "type": "RCRE_NmfModel*",
+        "description": ""
+      },
+      {
+        "name": "X_csr",
+        "type": "const RCRE_CSRMatrix*",
+        "description": ""
+      },
+      {
+        "name": "opts",
+        "type": "const RCRE_NmfOpts*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nmf_transform",
+    "return_type": "int",
+    "brief": "Projects unseen documents X_new onto a fitted NMF basis H (fixed H,",
+    "params": [
+      {
+        "name": "model",
+        "type": "const RCRE_NmfModel*",
+        "description": ""
+      },
+      {
+        "name": "X_new",
+        "type": "const RCRE_CSRMatrix*",
+        "description": ""
+      },
+      {
+        "name": "max_iter",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "out_W",
+        "type": "float*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_lda_fit",
+    "return_type": "int",
+    "brief": "Fits Latent Dirichlet Allocation via deterministic PCG64 Collapsed",
+    "params": [
+      {
+        "name": "model",
+        "type": "RCRE_LdaModel*",
+        "description": ""
+      },
+      {
+        "name": "docs",
+        "type": "const RCRE_Slice*",
+        "description": ""
+      },
+      {
+        "name": "num_docs",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "opts",
+        "type": "const RCRE_LdaOpts*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_lda_infer",
+    "return_type": "int",
+    "brief": "Infers normalized topic distribution out_theta[num_topics] for a new",
+    "params": [
+      {
+        "name": "model",
+        "type": "const RCRE_LdaModel*",
+        "description": ""
+      },
+      {
+        "name": "doc",
+        "type": "RCRE_Slice",
+        "description": ""
+      },
+      {
+        "name": "num_iters",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "seed",
+        "type": "uint64_t",
+        "description": ""
+      },
+      {
+        "name": "out_theta",
+        "type": "float*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_nb_fit",
+    "return_type": "int",
+    "brief": "Trains Multinomial or Complement Naive Bayes directly on RCRE_CSRMatrix",
+    "params": [
+      {
+        "name": "model",
+        "type": "RCRE_NaiveBayesModel*",
+        "description": ""
+      },
+      {
+        "name": "X_csr",
+        "type": "const RCRE_CSRMatrix*",
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "type": "const uint32_t*",
+        "description": ""
+      },
+      {
+        "name": "num_classes",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "alpha",
+        "type": "float",
+        "description": ""
+      },
+      {
+        "name": "complement",
+        "type": "bool",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_nb_predict",
+    "return_type": "int",
+    "brief": "Predicts class labels (and optional calibrated softmax probs [N*C])",
+    "params": [
+      {
+        "name": "model",
+        "type": "const RCRE_NaiveBayesModel*",
+        "description": ""
+      },
+      {
+        "name": "X_csr",
+        "type": "const RCRE_CSRMatrix*",
+        "description": ""
+      },
+      {
+        "name": "out_labels",
+        "type": "uint32_t*",
+        "description": ""
+      },
+      {
+        "name": "out_probs",
+        "type": "float*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_sparse_clf_fit",
+    "return_type": "int",
+    "brief": "Trains an L2-regularized multi-class Softmax classifier directly on",
+    "params": [
+      {
+        "name": "clf",
+        "type": "RCRE_SparseLinearClf*",
+        "description": ""
+      },
+      {
+        "name": "X_csr",
+        "type": "const RCRE_CSRMatrix*",
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "type": "const uint32_t*",
+        "description": ""
+      },
+      {
+        "name": "num_classes",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "opts",
+        "type": "const RCRE_SparseClfOpts*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_summarize_extractive",
+    "return_type": "int",
+    "brief": "Extractive text summarization via TF-IDF sentence graph + LexRank",
+    "params": [
+      {
+        "name": "text",
+        "type": "RCRE_Slice",
+        "description": ""
+      },
+      {
+        "name": "top_k",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "opts",
+        "type": "const RCRE_SummarizeOpts*",
+        "description": ""
+      },
+      {
+        "name": "out_sents",
+        "type": "RCRE_SummarySent*",
+        "description": ""
+      },
+      {
+        "name": "out_count",
+        "type": "size_t*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_extract_keywords",
+    "return_type": "int",
+    "brief": "Extracts top-k keywords via sliding-window word co-occurrence",
+    "params": [
+      {
+        "name": "text",
+        "type": "RCRE_Slice",
+        "description": ""
+      },
+      {
+        "name": "top_k",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "window_size",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "out_keywords",
+        "type": "RCRE_Keyword*",
+        "description": ""
+      },
+      {
+        "name": "out_count",
+        "type": "size_t*",
+        "description": ""
+      },
+      {
+        "name": "arena",
+        "type": "RCRE_Arena*",
+        "description": ""
+      },
+      {
+        "name": "scratch",
+        "type": "RCRE_Arena*",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
+    "name": "rcre_nlp_csr_row_cosine",
+    "return_type": "float",
+    "brief": "Exact O(nnz_a + nnz_b) cosine similarity between two sorted CSR rows.",
+    "params": [
+      {
+        "name": "csr_a",
+        "type": "const RCRE_CSRMatrix*",
+        "description": ""
+      },
+      {
+        "name": "row_a",
+        "type": "size_t",
+        "description": ""
+      },
+      {
+        "name": "csr_b",
+        "type": "const RCRE_CSRMatrix*",
+        "description": ""
+      },
+      {
+        "name": "row_b",
+        "type": "size_t",
+        "description": ""
+      }
+    ],
+    "returns": "",
+    "category": "HPC Natural Language Processing",
+    "header": "rcre_nlp.h"
+  },
+  {
     "name": "rcre_prof_now_ns",
     "return_type": "uint64_t",
     "brief": "RCRE Native Profiling & Telemetry Subsystem (ISO C23, zero-dependency)",

@@ -28,18 +28,25 @@
 * **Dual Reverse-Mode Autograd & Deep Learning Suite**: Scalar DAGs + Tensor Tape VJP autograd supporting `matmul`, `conv2d` (`rcre_autograd_conv2d`), and scaled dot-product `attention` (`rcre_autograd_attention`), losses (MSE, BCE, Softmax Cross-Entropy, KL Divergence), and first-order optimizers (**Decoupled AdamW**, Momentum **SGD**, **Lion**, and factored **Adafactor**).
 * **Full-Stack Data Science, Statistics & Classical ML (`rcre_df.h`, `rcre_stat.h`, `rcre_prep.h`, `rcre_metric.h`, `rcre_vis_ds.h`)**: Columnar DataFrames with Arrow validity bitmaps, $\mathcal{O}(N)$ IEEE-754 float LSD radix sort & multi-threaded GroupBy; single-pass Welford higher moments, quickselect quantiles & PCA (`svd_flip` deflation); `StandardScaler`/`MinMaxScaler`/`RobustScaler`/Imputer/One-Hot; ROC-AUC/PR-AUC/MCC/Silhouette/K-Fold metrics; ANSI correlation heatmaps & boxplots; OLS, **L1 Sparse Linear**, Pegasos SVM, **Random Forest**, GBDT, HNSW, and **e-Means**.
 * **Zero-Malloc, SIMD-Accelerated C23 Safe String Library (`rcre_str.h`)**: Length-prefixed zero-copy views (`RCRE_Slice` / `RCRE_StrView`) with `RCRE_STR(lit)` zero-cost compile-time literals (0 `strlen` overhead); stack/struct bounded buffers (`RCRE_StrBuf` and `rcre_cstr_copy_bounded`) replacing `strcpy`/`snprintf` with guaranteed NUL-termination and sticky truncation tracking; pull-based re-entrant token splitting (`RCRE_SplitIter`) replacing `strtok`; strict RFC 3629 UTF-8 validation (**44.5 GB/s** ASCII, **13.3 GB/s** multi-byte via NEON/AVX2), codepoint-boundary truncation, and zero-allocation parsers (`parse_f64`, `parse_hex_u64`, `parse_bool`); open-addressed arena string interning pool (`RCRE_StrPool`) delivering **68.9M lookups/s** (14.5 ns/op, 0 mallocs); safe path utilities (`rcre_path_*`); and optional compile-time legacy API poisoning via `#define RCRE_BAN_UNSAFE_CSTR` (`#pragma GCC poison`).
-* **HPC Numerical Layer (Phases H0–H4 Complete, `docs/hpc.md`)**:
+* **HPC Zero-Malloc Natural Language Processing Engine (`rcre_nlp.h`)**: Built directly on `rcre_str.h` and `rcre_sparse.h` with **0 `malloc`s** — zero-copy pull tokenizers & UTF-8/word $n$-grams (`663.9 MB/s`, `92.8M tokens/s`); two-pass $\mathcal{O}(\text{tokens})$ flat CSR-layout **BM25 inverted index** (`11.3 ms` build / `253 µs` top-10 query on 10k docs) + deterministic **Reciprocal Rank Fusion (`rcre_nlp_rrf_fuse`)** for hybrid lexical + HNSW vector search; **Scikit-Learn-parity `RCRE_TfidfVectorizer`** emitting 64-byte-aligned `RCRE_CSRMatrix` (`561.7k docs/s`) + lock-free signed Feature Hashing; flat-table **Aho–Corasick DFA** multi-pattern matcher & single-pass redactor (`550.8 MB/s`, 1 load/byte); **64-bit word-parallel Myers Levenshtein** (**22.27×** over scalar DP) + Jaro–Winkler & Jaccard; **SimHash64** (`3.00M docs/s`), **MinHash**, and UTF-8-safe zero-copy **RAG chunking**; **Topic Modeling** via **Sparse HALS NMF** (`22.9 ms` for 10k docs, $K=8$) and deterministic PCG64 **Collapsed Gibbs LDA** (`11.7 ms` for 2k docs, 20 sweeps); **Native Sparse Text Classification** directly on `RCRE_CSRMatrix` via **Multinomial / Complement Naive Bayes** (`0.09 ms` fit / **`49.5M docs/s`** predict) and **Multi-Class Softmax SGD** (`6.76 ms` for 10 epochs); plus **Zero-Copy Sentence Splitting**, **LexRank/TextRank + MMR Extractive Summarization** (`0.13 ms/doc`), and **Graph Keyword Extraction**.
+* **HPC Numerical Layer (Phases H0–H9 Complete, `docs/hpc.md`)**:
   - **H0 Scientific Substrate (2.1.0)**: Dispatched F64 `gemm/gemv/dot/axpy/scale/sum` across scalar / NEON / AVX2 / AVX-512, Kahan-Neumaier compensated reductions (bit-exact on adversarial layouts), and special function library (`erf/erfc` via DLMF 8.9.8 CF, `lgamma`, `digamma`, `logsumexp`, `expit`, tail-accurate `norm_cdf`).
   - **H1 Reproducible Streams (2.2.0)**: **PCG64** bit-exact against NumPy's engine with $\mathcal{O}(\text{popcount}(n))$ skip-ahead and deterministic worker substreams; **Sobol'** ($d=1..20$) bit-exact against SciPy `scipy.stats.qmc.Sobol` (87,040 assertions) and **Halton** sequences.
   - **H2 General-Size F64 FFT & Blocked BLAS (2.2.0)**: Mixed-radix Cooley-Tukey + **Bluestein chirp-z** arbitrary-length F64 FFT (verified against direct $\mathcal{O}(N^2)$ DFT oracle across ~700 sizes), cache-blocked F64 GEMM, and triangular solve (`trsm`/`trsv`).
   - **H3 Direct Factorizations & Symmetric Eigensystem (2.2.0)**: Dense F64 **LU** (partial pivoting), **Cholesky** (`dpotrf`), **Householder QR**, and **`rcre_linalg_syev_f64`** symmetric eigensystem via Householder tridiagonalization + implicit QL with exact Givens similarity update (4096² in 53 ms).
   - **H4 Iterative Krylov Solvers & 2D Multigrid (2.2.0)**: Sparse F64/F32 **PCG/FCG**, **BiCGStab** (verified on 40-step trajectory parity against independent Python fixture), restarted **GMRES** with **ILU(0)** and **Jacobi** preconditioning; 2D-Poisson multigrid (V-cycle & FAS cycles) with documented $h$-dependent smoothest-mode floor and **PCG + ILU(0)** workhorse.
+* **Out-of-core Zarr v3 Chunked Arrays (2.2.0, `docs/hpc.md` §8)**: `rcre_zarr_*` — chunked 1–8D arrays on the POSIX file store in the canonical **Zarr v3** format (12 numpy-compatible dtypes incl. f16/bool, fill-value semantics for missing chunks — NaN/±inf as JSON strings, identity `bytes` codec + **opt-in zstd** via a separate bridge TU (hook-dispatched registration, link-order immune; the single-header amalgamation excludes it and runs identity-only)). Slab-parallel whole-array I/O, `write_block` (strided sub-blocks, read-modify-write edge chunks), `for_each_chunk`, and a deterministic `reduce_sum` (per-chunk Neumaier/integral partials combined in fixed chunk order → **bit-identical across pool sizes**). Conformance: `make conformance-zarr` round-trips **13 fixed arrays bit-identical C ↔ zarr-python in both directions** (FNV-1a 64 gates + golden metadata + NaN fill survival; skips clean without a zarr venv). Measured (M5 Max): pooled 8-thread write ~550 MB/s (2.1–2.7x serial), read ~4.6 GB/s (page-cache-warm) at 16 MB; zstd L3 ~720 MB/s pooled write with 292x ratio on structured data. 9-test / 135-assertion unit gate + the cross-tooling conformance bar.
+* **GPU Bridge: Context ABI + CUDA Backend (2.3.0, `docs/hpc.md` §9)**: `rcre_gpu_*` — one C ABI over self-registering backend TUs (the arrow/dlpack/zstd bridge pattern). The **`cpu` backend is always linked** and is the conformance oracle: its ops delegate to the core/HAL, so CPU-backend results are bit-identical to the CPU reference by construction. The **CUDA backend** is an opt-in TU pair (`gpu_cuda.c` + nvcc `gpu_kernels.cu`, Makefile auto-detect, infra-immune) with fixed launch configurations (no auto-tuning) and a no-atomics reduction design. **Philox-4x32-10** (core + device kernels) is **bit-identical across backends by construction** — the H6 RNG determinism bar (65,536-word gate). Device ops: GEMM f32/f64 (row-major, `alpha·A·B + beta·C`), SpMV f32/f64 (CSR), AXPY, DOT, Philox fill, host-pointer convenience. Measured on an **RTX 5060 Ti (sm_120, CUDA 13.3)**: SpMV up to 19x, GEMM f32 547 GF/s (9–19x) / f64 359 GF/s (19–26x), Philox fill **495x** (106 Gwords/s); the honest end-to-end CG+ILU(0) bar at n=4096 is 0.65x (per-iteration transfer floor — published, not hidden). 5-test / 363-assertion gate (device gates skip clean without CUDA).
+* **Domain Layer: PDE, N-body, MCMC & Streaming Statistics (2.4.0, `docs/hpc.md` §10)**: F64 structured-grid **2-D Poisson** (separable DST-I spectral solver via the H2 FFT + the H4 V-cycle multigrid behind one AUTO driver, both paths on the H4 layout), **2-D heat FTCS** (stability-gated), **1-D Burgers MUSCL-upwind** (minmod + Roe-split face flux, `dt·max|u|/dx` CFL gate) with **Shu-Osher + Hopf-Lax** reference, and **1-D wave DDK leapfrog**; **2-D Barnes-Hut N-body** (single-global-permutation tree, point-mass `r^-3` law, slab-parallel force, velocity-Verlet, energy) — pool(8) bit-identical to serial on both; **MH / HMC / NUTS** samplers (exact slice-HMC; NUTS = H-G tree growth + exact uniform slice sampling over the nodes under the slice, acceptance-based dual averaging with a divergence guard after the measured retirement of the Stan-form DA on easy targets) with a Geyer initial-monotone-sequence **ESS** and plain/antithetic/stratified/Sobol'/Halton **quasi-MC integrators** — every chain bit-identical under a fixed PCG64 seed; and **streaming statistics** (Chan-merge Welford moments with bias-corrected Fisher skew/kurtosis, **P²** online quantile — rank error 0.0005 measured on 1e6 uniforms vs a 0.02 bar — and PCG64-substream **bootstrap** (ordinary + moving block), slab-parallel by construction). 37-test gate (`test_pde`, `test_nbody`, `test_mcmc`, `test_stream`); measured bars: Poisson AUTO 61.3 ms @ 1023² (residual 1e-13), Barnes-Hut 100k bodies 11.1 ms pooled (5.46x), NUTS 8-D anisotropic Gaussian per-dim sd within 4% (0 divergences).
+* **Optimization Polish: L-BFGS, FISTA, CD-LASSO, SPSA (2.5.0, `docs/hpc.md` §11)**: F64 **two-loop L-BFGS** (Armijo backtracking, scipy-matching ftol/gtol tests, optional box bounds) measured against scipy 1.18.1 L-BFGS-B on an 8-problem fixture — final f within 1e-10 relative on every converged run (measured 1e-13..1e-16) and accepted iterations within 1.25x; **FISTA** (Beck-Teboulle, backtracking L) and **cyclic coordinate descent** for LASSO agree to 1e-16 relative objective on a 2000x500 instance (KKT 3e-9); **SPSA** zeroth-order (2-point and 4-point sign estimates, PCG64 perturbations — fixed-seed bit-identical runs). 98-check gate (`test_h8`); measured bars: L-BFGS rosenbrock-100 0.04 ms, CD-LASSO 2000x500 259.5 ms, FISTA-L1 318.4 ms (objective == CD to printed digits), SPSA-4 0.42 M evals/s (95.9% of the drop on quad-100 in 10k steps).
+* **HPC Wave: MPI shim, distributed ops, 3-D Poisson 256³, pow2 FFT (2.6.0, `docs/hpc.md` §12)**: a **12-function MPI shim** over self-registering backends (`loopback` always present as the conformance oracle; real MPI optional behind a make probe — the H6 CUDA pattern), with the **first distributed operations**: a row-block distributed SpMV (+ all-to-all gather) and a **halo-exchange 5-point stencil** — bit-identical to the core serial operators (the 2-process gate runs under `mpirun -np 2` where MPI exists; skips clean without). A **3-D PDE layer** (7-point stencil + the separable DST-I 3-D Poisson solver) with the game-plan **256³ full run measured bit-reproducible** across pool sizes {NULL,1,2,4,8,18} (6/6 FNV-1a hashes identical; residual 1.8e-14 vs bar 1e-13) — 46 s serial / 4.1 s pooled (M5 Max, 18 cores); an irregular 33×31×29 cross-check against an independent numpy DST-I reference matches to 1.1e-15 relative. The H2 bar-gated FFT optimization ships as `rcre_fft_pow2_f64` (in-place pow2 F64 FFT, per-call twiddle table — 512-pt 8.6 µs vs 40.1 µs recursion, 4.7×) and `-ffp-contract=off` is now library-wide (measured: FMA contraction across code shapes broke the 256³ bit-identity). SVE2/AMX/RVV silicon validation and the cross-machine half of the reproducibility bar are deferred with the server silicon / RPi5 registration (documented, §12.4).
+
 * **e-Means Mini-Batch Clustering Operator (`rcre_ml_emeans_*`)**: Faithful C23 port of the 2026 e-means algorithm (Bessa et al., arXiv 2611.09501) — exponential-moving-average centroid updates with a cosine-annealed step schedule, scaling-law batch/step auto-tuning (shipped-reference constants), and Gumbel-max dead-cluster revival with deterministic per-dimension splits. Dual-kernel exact assignment (per-row FP32 for $k \\cdot d \\le 16384$, HAL GEMM above), FP64 objective & finalization, and a pool-parallel slab partition that is **bit-identical across pool sizes and machines** (the partition depends only on the batch size). Verified: 205,790-assertion 0-ULP strict-parity replay against an independent Python oracle, plus statistical quality parity (C run at 0.589× the oracle's MSE). On an 8.3M-pixel palette workload (d=3, k=256) the pooled operator trains in ~1.1 s vs 34–78 s for 25-iteration Lloyd k-means; on 100K × 128-d embeddings with k=4096 it is 9× faster **and** 0.566× the final MSE.
 * **Isolated Camera Companion (`rcre_cam.h`)**: Native hardware ingestion using macOS AVFoundation (`CVPixelBuffer` zero-copy), Linux Video4Linux2 (`mmap`), and deterministic synthetic test generators for headless CI.
 * **High-Performance Scientific Data I/O (`rcre_io.h`)**: Zero-copy virtual memory mapping (`mmap` + `madvise` + `F_NOCACHE` + Win32 `MapViewOfFile`), 64-byte SIMD-aligned 8D **NumPy (`.npy` v1/v2)** and **Hugging Face (`.safetensors`)** containers, **2.61+ GB/s** multi-threaded SIMD CSV ingestion (with RFC-4180 quoted field support) and Clinger/Eisel–Lemire 0-ULP float32 parsing, **50.81 GB/s** ARM NEON byte-unshuffling with `"RCRZ"` LZ4-class lossless block compression, async `pthread` ping-pong `.npy` streaming, and zero-copy **DLPack v1.0** & **Apache Arrow C Data Interface** bridges. See [**io_benchmark.md**](io_benchmark.md) and [**docs/benchmarks_sota.md**](docs/benchmarks_sota.md).
 * **Modern LLM Inference & LoRA Training (`rcre_llm.h`)**: LLaMA-style decoder (RMSNorm, RoPE, SwiGLU, Grouped-Query Attention, tiled online-softmax Flash-Attention), `Q8_0`/`Q4_0` block quantization with NEON/SIMD dot kernels, zero-copy **GGUF v2/v3** reader/writer, hash-indexed `RCRE_ByteBPE`, thread-safe sampler (top-k/top-p/min-p/rep-penalty), LoRA fine-tuning, BF16 gradient-checkpointed training, sharded binary token streaming, plus local interactive CLI & OpenAI-compatible HTTP server (`bin/rcre_chat --serve`).
 * **Zero-Dependency Image Codecs, ORB Features, Minimal ONNX & Optional Metal/WebGPU (`rcre_codec.h`, `rcre_gpu.h`)**: Built-in PNG (DEFLATE/zlib), baseline JPEG, BMP, and PPM codecs; FAST-9 + rotated 256-bit BRIEF (`RCRE_ORBKeypoint`) feature matching; zero-dependency ONNX Protobuf subset graph runner; Random Forest, L1 Sparse Linear, Lion, Adafactor; optional macOS Metal compute offload, WebGPU bridge, freestanding no-malloc profile (`-DRCRE_FREESTANDING`), CMake/Homebrew/vcpkg packaging, and Python/Rust/Go/Zig/Julia bindings.
-* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (**1,236.2 KB**, **34,039 lines**).
+* **Drop-in Single-Header Release**: Amalgamated into a single portable header file [`dist/rcre.h`](dist/rcre.h) (**1,714.5 KB**, **46,064 lines**).
 * **Native Hardware Profiling & Telemetry (`rcre_prof`)**: Microsecond-accurate cycle tracing (< 7 ns overhead per scope) on ARM64 (`cntvct_el0`) and x86 (`rdtsc`), tracking dual-layer RAM (Arena watermarks vs OS RSS), CPU time, engine storage I/O, and zero-dependency Chrome Tracing/Perfetto JSON and standalone HTML exports. See [**rcre_profiling.md**](rcre_profiling.md).
 * **Interactive Educational Visualizers**: Three.js 3D tensor stride visualizers, cache hierarchy simulators, and live in-browser webcam playgrounds in [`web/`](web/).
 
@@ -82,6 +89,17 @@
 | **Substring Search (16 MB `find_substr`)** | `rcre_hal.find_substr` (NEON) | **25.06 GB/s** (**9.40x vs scalar**) | **0.64 ms** | Zero mallocs |
 | **ASCII Lowercase Conversion (16 MB)** | `rcre_hal.ascii_to_lower` (NEON) | **34.18 GB/s** | **0.47 ms** | Zero mallocs |
 | **Arena StrPool Interning & Lookup** | `rcre_strpool_intern` (4096 keys) | **68.93M lookups / sec** | **14.5 ns** / op | Linear Arena (0 mallocs) |
+| **Zero-Copy Word Tokenization (16 MB)** | `RCRE_WordIter` (UTF-8 pull iter) | **663.94 MB/s** (**92.76M tok/s**) | **24.1 ms** | Zero allocations |
+| **Aho–Corasick 16-Pattern Flat DFA (16 MB)** | `rcre_ac_scan` (1 load/byte) | **550.78 MB/s** (1.17M hits) | **29.1 ms** | Flat Arena DFA (0 mallocs) |
+| **Myers64 Bit-Parallel Levenshtein (61 B)** | `rcre_nlp_levenshtein` (64-bit) | **7.69M ops / sec** (**22.27x vs DP**) | **130 ns** / op | Zero allocations (registers) |
+| **BM25 Inverted Index (10k docs)** | `rcre_bm25_build` / `search` (CSR) | **3,957 QPS** (top-10) | **11.33 ms** build / **253 µs** q | Linear Arena (0 mallocs) |
+| **TF-IDF → `RCRE_CSRMatrix` (10k docs)** | `rcre_tfidf_fit` + `transform` | **561.7k docs / sec** (`nnz=109k`) | **17.80 ms** | 64B-Aligned CSR Arena |
+| **Sparse HALS NMF Topic Modeling (10k, K=8)** | `rcre_nmf_fit` (20 HALS iters) | **436k doc-sweeps / sec** | **22.94 ms** | Linear Arena (0 mallocs) |
+| **Collapsed Gibbs LDA (2k docs, K=8)** | `rcre_lda_fit` (PCG64, 20 sweeps) | **3.42M doc-sweeps / sec** | **11.69 ms** | Linear Arena (0 mallocs) |
+| **Sparse Multinomial Naive Bayes (10k)** | `rcre_nlp_nb_fit` / `predict` | **49.5M docs / sec** predict | **0.09 ms** fit / **0.20 ms** pred | Zero dense expansion |
+| **Sparse Multi-Class Softmax SGD (10k)** | `rcre_nlp_sparse_clf_fit` (10 ep) | **14.78M docs / sec / ep** | **6.76 ms** | Zero dense expansion |
+| **LexRank + MMR Summarization (64 snt)** | `rcre_nlp_summarize_extractive` | **7,692 docs / sec** | **0.13 ms** / doc | Zero-copy sentence slices |
+| **SimHash64 Dataset Fingerprinting (10k)** | `rcre_nlp_simhash64` + `popcnt` | **3.00M docs / sec** | **3.34 ms** | Zero allocations |
 | **General-Size F64 FFT ($2^{20}$ points)** | `rcre_fft_1d_f64` (Mixed-Radix) | **7.4 Ms/s** (**735.7 Mflop/s**) | **141.7 ms** | Scoped Arena |
 | **Bluestein Prime F64 FFT ($10^6+3$ points)** | `rcre_fft_1d_f64` (Chirp-Z) | **1.1 Ms/s** (**110.9 Mflop/s**) | **899.8 ms** | Scoped Arena |
 | **Direct Dense LU Solve ($2048 \times 2048$ F64)** | `rcre_direct_lu_factor` (Partial Pivoting) | **13.9 GFLOP/s** | **413 ms** | Linear Arena |
@@ -120,7 +138,7 @@ In addition to modular core kernels and unit benchmarks, RCRE includes twelve se
 ```
 apps/rcre/
 ├── dist/
-│   └── rcre.h                  # Amalgamated single-header C23 release (1,236.2 KB, 34,039 lines)
+│   └── rcre.h                  # Amalgamated single-header C23 release (1,363.6 KB, 37,667 lines)
 ├── project-template/           # Turnkey starter project with rcre.h, main.c, tests, Makefile & docs
 │   ├── include/rcre.h          # Single-header engine distribution
 │   ├── src/main.c              # Pedagogical starter app with 1080p SIMD pipeline
@@ -133,6 +151,7 @@ apps/rcre/
 ├── include/
 │   ├── rcre.h                  # Core public C23 header (ABI v2.0.0, 8D broadcasting tensors, CV, ML, HPC)
 │   ├── rcre_str.h              # Zero-malloc, SIMD-accelerated C23 safe string library (STR-REQ-01 to 06)
+│   ├── rcre_nlp.h              # HPC zero-malloc C23 NLP engine: BM25, TF-IDF->CSR, NMF, LDA, Sparse NB/Softmax, TextRank, Aho-Corasick, Myers64 (NLP-REQ-01 to 10)
 │   ├── rcre_io.h               # Zero-copy mmap (POSIX/Win32), async POSIX prefetch, .npy/.safetensors, CSV, DLPack & Arrow
 │   ├── rcre_llm.h              # LLaMA (RMSNorm/RoPE/SwiGLU/GQA/Flash), Q8_0/Q4_0, GGUF v2/v3, ByteBPE, Sampler & LoRA
 │   ├── rcre_codec.h            # Zero-dep PNG (DEFLATE), JPEG, BMP, PPM codecs & ONNX Protobuf subset runner
@@ -294,6 +313,47 @@ int main(void) {
 }
 ```
 
+#### HPC Zero-Malloc NLP & Hybrid Lexical Search (`include/rcre_nlp.h`)
+
+```c
+#define RCRE_BAN_UNSAFE_CSTR
+#include "rcre_nlp.h"
+#include <stdio.h>
+
+int main(void) {
+    rcre_hal_init();
+    RCRE_Arena* arena   = rcre_arena_create(1024 * 1024);
+    RCRE_Arena* scratch = rcre_arena_create(256 * 1024);
+
+    const RCRE_Slice docs[3] = {
+        RCRE_STR("zero malloc c23 arena allocator simd neon"),
+        RCRE_STR("bm25 inverted index lexical search with csr postings"),
+        RCRE_STR("hybrid rag fuses bm25 lexical and hnsw vector search")
+    };
+
+    // 1. Flat CSR-layout BM25 inverted index (2 linear O(tokens) passes, 0 mallocs)
+    RCRE_BM25Index idx;
+    (void)rcre_bm25_build(&idx, docs, 3, nullptr, arena, scratch);
+
+    RCRE_SearchHit hits[3];
+    size_t n_hits = 0;
+    (void)rcre_bm25_search(&idx, RCRE_STR("bm25 lexical search"), 3, hits, &n_hits, scratch);
+
+    // 2. Scikit-Learn-parity TF-IDF directly into 64B-aligned RCRE_CSRMatrix
+    RCRE_TfidfVectorizer vec;
+    RCRE_CSRMatrix csr;
+    (void)rcre_tfidf_fit(&vec, docs, 3, nullptr, arena, scratch);
+    (void)rcre_tfidf_transform(&vec, docs, 3, arena, scratch, &csr);
+
+    printf("Top BM25 doc=%u (score=%.3f) | TF-IDF CSR: %zux%zu (nnz=%zu)\n",
+           hits[0].doc_id, hits[0].score, csr.rows, csr.cols, csr.nnz);
+
+    rcre_arena_destroy(scratch);
+    rcre_arena_destroy(arena);
+    return 0;
+}
+```
+
 ---
 
 ### Option 2: Building & Running from the `Makefile` Command Center
@@ -349,13 +409,13 @@ make project_omnisearch_bench # SIMD & Hash Table Micro-Benchmarks
 # 🚀 Build librcre.a, librcre.dylib, dist/rcre.h, and all example binaries
 make all
 
-# 🧪 Run full 37-test unit test suite (Core, Strings, Factorizations, Krylov, Multigrid, I/O, SOTA)
+# 🧪 Run full 42-test unit test suite (Core, Strings, NLP, Factorizations, Krylov, Multigrid, I/O, SOTA)
 make test
 
-# 🛡️ Run AddressSanitizer & UndefinedBehaviorSanitizer checks across all 37 suites (0 leaks, 0 UB)
+# 🛡️ Run AddressSanitizer & UndefinedBehaviorSanitizer checks across all 42 suites (0 leaks, 0 UB)
 make test-sanitizers
 
-# 🐛 Run deterministic ASan+UBSan fuzz regression suite over I/O, codecs & string parsers
+# 🐛 Run deterministic ASan+UBSan fuzz regression suite over I/O, codecs, strings & NLP differential oracles
 make test-fuzz
 
 # 🐍 Run Python numerical parity tests against OpenCV, SciPy & Scikit-Learn + FFI tests
@@ -364,9 +424,10 @@ make test-parity
 # 🎉 Run unit tests, sanitizers & Python parity layers together
 make test-all
 
-# 📊 Run HAL GEMM, Roofline, Scientific I/O, Strings & HPC micro-benchmarks
+# 📊 Run HAL GEMM, Roofline, Scientific I/O, Strings, NLP & HPC micro-benchmarks
 make bench
 make bench_str
+make bench_nlp
 make bench_roofline
 make bench_io
 make profile

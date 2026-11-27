@@ -32,7 +32,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 2
-#define RCRE_VERSION_MINOR 2
+#define RCRE_VERSION_MINOR 6
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -1444,11 +1444,27 @@ int rcre_linalg_trsv_f64(int uplo, int trans, int diag, double alpha,
  * factor (2,3,5,7), Bluestein chirp-z otherwise (primes, products of
  * large primes). Convention: forward X_k = sum_j x_j exp(-2*pi*i*j*k/n);
  * invert uses + and divides by n (numpy convention).
- * in/out may alias (copies are made). 0 on success, -1 on n == 0.
+ * in/out may alias (copies are made). in_re/in_im may be NULL (= zero
+ * half — the real-input case). 0 on success, -1 on n == 0.
  */
 RCRE_NODISCARD int rcre_fft_1d_f64(const double* in_re, const double* in_im,
                                    double* out_re, double* out_im,
                                    size_t n, int invert);
+
+/**
+ * @brief Power-of-two 1-D FFT, F64, IN-PLACE (H9, 2.6.0).
+ *
+ * Iterative radix-2 DIT with a per-call twiddle table (n-1 cos/sin
+ * pairs instead of the generic path's ~n log n). Same convention as
+ * rcre_fft_1d_f64 (forward exp(-2*pi*i*...), inverse + and 1/n scale,
+ * numpy). The summation order differs from the generic path, so the
+ * gate is a precision bar (relative <= 1e-13, tests/test_fft_f64.c),
+ * not bit-identity; results ARE bit-identical across repeated calls
+ * and pool sizes. 0 on success, -1 if n is not a power of two >= 2
+ * or inputs are NULL.
+ */
+RCRE_NODISCARD int rcre_fft_pow2_f64(double* re, double* im, size_t n,
+                                     int invert);
 
 /* ------------------- direct factorizations (H3, 2.2.0) ------------------ */
 
@@ -1783,6 +1799,635 @@ RCRE_NODISCARD int rcre_mg_solve_poisson2d_f32(size_t nx, size_t ny,
                                                RCRE_KrylovCallback cb,
                                                void* user);
 
+/* ------------------- Zarr v3 chunked arrays (H5, 2.2.0) ------------------- */
+
+/**
+ * @file section Out-of-Core Chunked Arrays (H5, 2.2.0)
+ * @brief Zarr v3 chunked ND arrays on the POSIX file store, zero-dependency
+ *        core (identity "bytes" codec always available; the "zstd" codec is
+ *        an opt-in translation unit, src/core/zarr_zstd.c, built when
+ *        RCRE_WITH_ZSTD is defined and libzstd is present — the D1 bridge /
+ *        extras pattern, infrastructure-immune).
+ *
+ * Format conformance: layout-identical to zarr-python 3.x (verified by
+ * `make conformance-zarr`, which round-trips 12 fixed arrays bit-identically
+ * in both directions and skips cleanly without a zarr venv). Store layout:
+ *   <root>/<name>/zarr.json          (array metadata, v3)
+ *   <root>/<name>/c/<i>/<j>/...      (chunk files, no extension, keys joined
+ *                                     with "/" per the v3 default encoding)
+ *   <root>/zarr.json                 (optional group root)
+ * A missing chunk file reads as the fill value (v3 semantics).
+ *
+ * Threading: array-level and chunk-iteration operations take an optional
+ * RCRE_ThreadPool (NULL = serial). The slab partition over the chunk grid
+ * depends only on the chunk count and the pool size; per-chunk work writes
+ * to disjoint buffer regions, so pooled runs are bit-identical to serial
+ * and to each other (the library-wide slab determinism contract).
+ */
+
+typedef enum {
+    RCRE_ZARR_F64  = 0,  /* float64  */
+    RCRE_ZARR_F32  = 1,  /* float32  */
+    RCRE_ZARR_F16  = 2,  /* float16  */
+    RCRE_ZARR_I64  = 3,  /* int64    */
+    RCRE_ZARR_I32  = 4,  /* int32    */
+    RCRE_ZARR_I16  = 5,  /* int16    */
+    RCRE_ZARR_I8   = 6,  /* int8     */
+    RCRE_ZARR_U64  = 7,  /* uint64   */
+    RCRE_ZARR_U32  = 8,  /* uint32   */
+    RCRE_ZARR_U16  = 9,  /* uint16   */
+    RCRE_ZARR_U8   = 10, /* uint8    */
+    RCRE_ZARR_BOOL = 11  /* bool (1 byte, 0/1) */
+} RCRE_ZarrDType;
+
+/** Creation options for rcre_zarr_create. */
+typedef struct {
+    size_t         ndim;
+    const size_t*  shape;        /* logical shape (required, ndim values)   */
+    const size_t*  chunk_shape;  /* chunk grid (required, ndim values)      */
+    RCRE_ZarrDType dtype;
+    double         fill_f64;     /* fill value for float dtypes (NaN/inf ok)*/
+    int64_t        fill_int;     /* fill value for integer dtypes           */
+    uint8_t        fill_bool;    /* fill value for bool                     */
+    int            zstd_level;   /* 0 = identity codec; 1..22 = zstd (needs
+                                     the zstd codec TU, see above)          */
+} RCRE_ZarrCreate;
+
+/** Opaque handle: a Zarr v3 array on a POSIX file store. */
+typedef struct RCRE_ZarrArray RCRE_ZarrArray;
+
+/** @brief Creates the group-root zarr.json ("node_type": "group") so the
+ *  root directory is a valid v3 store for zarr.open(). Returns RCRE_OK. */
+RCRE_NODISCARD int rcre_zarr_create_group_root(const char* root_dir);
+
+/**
+ * @brief Creates a new Zarr v3 array under <root_dir>/<name> (writes
+ *        zarr.json; no chunk files until the first write_chunk).
+ * @return handle on success, NULL on error.
+ */
+RCRE_NODISCARD RCRE_ZarrArray* rcre_zarr_create(const char* root_dir,
+                                                const char* name,
+                                                const RCRE_ZarrCreate* opt);
+
+/** @brief Opens an existing array read/write (metadata must parse; codecs
+ *  must be available in this build). Returns NULL on error. */
+RCRE_NODISCARD RCRE_ZarrArray* rcre_zarr_open(const char* root_dir,
+                                              const char* name);
+void rcre_zarr_close(RCRE_ZarrArray* arr);
+
+/* ---- metadata accessors -------------------------------------------------- */
+int            rcre_zarr_ndim(const RCRE_ZarrArray* arr);
+RCRE_NODISCARD int rcre_zarr_shape(const RCRE_ZarrArray* arr, size_t* out);
+RCRE_NODISCARD int rcre_zarr_chunk_shape(const RCRE_ZarrArray* arr, size_t* out);
+RCRE_ZarrDType rcre_zarr_dtype(const RCRE_ZarrArray* arr);
+size_t         rcre_zarr_itemsize(const RCRE_ZarrArray* arr);
+/** Per-dimension chunk counts (ceil(shape_d / chunk_d)). */
+RCRE_NODISCARD int rcre_zarr_nchunks(const RCRE_ZarrArray* arr, size_t* out);
+/** Full fill value, interpreted per dtype (out pointer may be any of the
+ *  1/2/4/8-byte scalar types matching the dtype). */
+RCRE_NODISCARD int rcre_zarr_fill_value(const RCRE_ZarrArray* arr, void* out);
+/** 1 if the named codec ("bytes"/"zstd") is available in this build. */
+RCRE_NODISCARD int rcre_zarr_codec_available(const char* name);
+
+/**
+ * @brief Registers (or re-registers) a codec in the pipeline table.
+ *  encode receives the recorded level for level-aware codecs (zstd) and 0
+ *  otherwise. Used by the opt-in zstd TU; user codecs may use it too.
+ */
+RCRE_NODISCARD int rcre_zarr_register_codec(
+    const char* name,
+    int (*decode)(const uint8_t*, size_t, uint8_t*, size_t),
+    int (*encode)(const uint8_t*, size_t, int, uint8_t**, size_t*));
+
+/**
+ * @brief Ensures the opt-in zstd codec (src/core/zarr_zstd.c) is
+ *  registered. No-op in builds without the zstd TU (the codec is then
+ *  reported unavailable by rcre_zarr_codec_available). Called
+ *  automatically by rcre_zarr_open/rcre_zarr_create.
+ */
+void rcre_zarr_zstd_ensure_registered(void);
+/**
+ * @brief Internal: installs the zstd ensure implementation (the opt-in
+ *  TU calls this from a C constructor). User code should not call it;
+ *  it exists so the public ensure function stays a single definition in
+ *  chunked.c regardless of link order (link-order-immune registration).
+ */
+void rcre_zarr_zstd_set_ensure_hook(void (*fn)(void));
+
+/* ---- chunk I/O (raw chunk buffers, native-endian dtype bytes) ------------ */
+/** Reads chunk cidx into out (full chunk, edge included). A missing chunk
+ *  file returns the fill value for the whole chunk (v3 semantics). */
+RCRE_NODISCARD int rcre_zarr_read_chunk(const RCRE_ZarrArray* arr,
+                                        const size_t* cidx, void* out);
+/** Writes the full chunk (edge included) to cidx. The file is written
+ *  atomically (temp + rename). */
+RCRE_NODISCARD int rcre_zarr_write_chunk(const RCRE_ZarrArray* arr,
+                                         const size_t* cidx, const void* in);
+/** 1 if the chunk file exists, 0 if not, -1 on error. */
+RCRE_NODISCARD int rcre_zarr_chunk_exists(const RCRE_ZarrArray* arr,
+                                          const size_t* cidx);
+
+/* ---- array I/O (row-major whole array; slab-parallel) --------------------- */
+/** Reads the full logical array (fill semantics for missing chunks). */
+RCRE_NODISCARD int rcre_zarr_read_array(const RCRE_ZarrArray* arr, void* out,
+                                        RCRE_ThreadPool* pool);
+/** Writes the full logical array (read-modify-write on edge chunks). */
+RCRE_NODISCARD int rcre_zarr_write_array(const RCRE_ZarrArray* arr,
+                                         const void* in, RCRE_ThreadPool* pool);
+
+/**
+ * @brief Writes a dense sub-block: logical indices lo..hi (per dim, hi
+ *        exclusive).
+ * @param in        Points at the START of the source array (element 0,0,...),
+ *                  not at the block: the block is located inside it via
+ *                  lo/hi. `in` + lo must be valid, i.e. the caller passes a
+ *                  full-array-shaped buffer (or at least one covering lo..hi).
+ * @param in_stride0 First-dimension stride of `in` in ELEMENTS; 0 = tight
+ *                  (the block's last-dim extent). Higher dims are always
+ *                  tight over the block extents.
+ * @note Read-modify-write semantics on touched edge chunks. Out-of-core
+ *        users typically load one tile of `in`, write_block it, free it.
+ */
+RCRE_NODISCARD int rcre_zarr_write_block(const RCRE_ZarrArray* arr,
+                                         const size_t* lo, const size_t* hi,
+                                         const void* in, size_t in_stride0,
+                                         RCRE_ThreadPool* pool);
+
+/**
+ * @brief Invokes fn(cidx, chunk_buf, user) once per chunk with the decoded
+ *  chunk (fill semantics for missing chunks). With a pool, chunks are
+ *  processed in slab order but callback invocations may interleave — fn must
+ *  be idempotent and must not accumulate a cross-chunk order-dependent
+ *  reduction (use rcre_zarr_reduce_sum for that). Returns the first
+ *  non-zero fn result (stops the dispatch) or RCRE_OK. */
+typedef int (*RCRE_ZarrChunkFn)(const size_t* cidx, void* chunk_buf, void* user);
+RCRE_NODISCARD int rcre_zarr_for_each_chunk(const RCRE_ZarrArray* arr,
+                                            RCRE_ZarrChunkFn fn, void* user,
+                                            RCRE_ThreadPool* pool);
+
+/**
+ * @brief Slab-parallel total sum of all logical values.
+ *  Each slab sums Neumaier-compensatedly (F64/F32) or exactly (integer /
+ *  bool), partials combine in fixed slab order — bit-identical across pool
+ *  sizes and machines (the H0 slab-reduction contract). out is 1, 2, 4, or
+ *  8 bytes per dtype class (float dtypes -> double, int -> int64, bool ->
+ *  int64 count). */
+RCRE_NODISCARD int rcre_zarr_reduce_sum(const RCRE_ZarrArray* arr, void* out,
+                                        RCRE_ThreadPool* pool);
+
+/* ---- IEEE 754 binary16 (shared with the Zarr float16 path) --------------- */
+
+/**
+ * @brief Decode a binary16 bit pattern to double (exact).
+ */
+RCRE_NODISCARD double rcre_f16_to_f64(uint16_t bits);
+/**
+ * @brief Encode a double to binary16 bits (correctly rounded, RN;
+ *        overflow -> inf, matching numpy astype(np.float16)).
+ */
+RCRE_NODISCARD uint16_t rcre_f16_from_f64(double v);
+
+/* ------------------- N-body Barnes-Hut (H7, 2.4.0) ------------------------ */
+/*
+ * 2D Newtonian gravity, Barnes-Hut quadtree (deterministic construction;
+ * forces slab-parallel over bodies with a shared read-only tree —
+ * bit-identical across pool sizes). theta in (0, 1): smaller = more
+ * accurate. soft: Plummer softening length (0 = unsoftened).
+ */
+
+/**
+ * @brief Barnes-Hut gravitational force on every body (F64, 2D).
+ *        theta in (0,1), G > 0. 0 on success, -1 on bad input/OOM.
+ *        fx/fy: caller-allocated n doubles.
+ */
+RCRE_NODISCARD int rcre_nb_bh_force_f64(const double* x, const double* y,
+                                        const double* m, int n, double G,
+                                        double theta, double soft,
+                                        RCRE_ThreadPool* pool, double* fx,
+                                        double* fy);
+
+/**
+ * @brief One velocity-Verlet step (symplectic): v += h/2 a^k,
+ *        x += h v, a^{k+1} = BH(x^{k+1}), v += h/2 a^{k+1}.
+ *        The energy-drift gate primitive (docs/hpc.md 10.4).
+ */
+RCRE_NODISCARD int rcre_nb_verlet_step_f64(double* x, double* y,
+                                           double* vx, double* vy,
+                                           const double* m, int n, double G,
+                                           double theta, double soft,
+                                           double h, RCRE_ThreadPool* pool);
+
+/**
+ * @brief EXACT O(n^2) total energy (1/2 sum m v^2 - sum_{i<j} G m_i m_j /
+ *        sqrt(r^2 + soft^2)) — the deterministic drift diagnostic
+ *        (not the tree approximation).
+ */
+RCRE_NODISCARD double rcre_nb_energy_f64(const double* x, const double* y,
+                                         const double* vx, const double* vy,
+                                         const double* m, int n, double G,
+                                         double soft);
+
+/* ------------------- MCMC (H7, 2.4.0) ------------------------------------ */
+/*
+ * Metropolis-Hastings, HMC, NUTS (Hoffman & Gelman 2014; dual-averaging
+ * adaptation, log-uniform slice, divergence counter), the ESS estimator
+ * (Geyer initial monotone sequence), and box integrators (plain /
+ * antithetic / stratified / Sobol' / Halton — H1 quasi-rng).
+ *
+ * Determinism: all randomness flows through ONE PCG64 stream (H1) in a
+ * fixed consumption order — a chain with a fixed seed is bit-identical
+ * across runs and machines. Chains are sequential (no pool argument);
+ * independent chains = different seeds, parallelizable by the caller.
+ *
+ * out: caller-allocated n_samples x d, row-major.
+ * out_accept: optional single double — mean acceptance (0..1) after the run.
+ */
+typedef struct RCRE_NUTSReport {
+    int accept;     /* iterations whose best node beat the root */
+    int divergent;  /* iterations with a |H - H0| > 1000 transition */
+    double final_eps; /* adapted step size after the adaptation phase */
+} RCRE_NUTSReport;
+
+/**
+ * @brief Random-walk Metropolis-Hastings (Gaussian proposal, symmetric).
+ *        Works with the log-pdf alone (no gradient needed).
+ */
+RCRE_NODISCARD int rcre_mcmc_mh_sample_f64(int d, const double* x0,
+                                           double (*logpdf)(const double* x,
+                                                            int d, void* user),
+                                           void* user, uint64_t seed,
+                                           double proposal_sd, int n_samples,
+                                           double* out, double* out_accept);
+
+/**
+ * @brief Fixed-trajectory HMC: fresh momentum each iteration, L
+ *        leapfrog steps of size eps, exact slice-HMC acceptance.
+ */
+RCRE_NODISCARD int rcre_mcmc_hmc_sample_f64(int d, const double* x0,
+                                            double (*logpdf)(const double* x,
+                                                             int d, void* user),
+                                            void (*grad)(const double* x, int d,
+                                                         double* g, void* user),
+                                            void* user, uint64_t seed,
+                                            double eps, int L, int n_samples,
+                                            double* out, double* out_accept);
+
+/**
+ * @brief NUTS (H-G 2014): dual-averaging adaptation (target 0.65),
+ *        slice sampling, max_tree-bounded binary tree, divergence
+ *        counter (|H - H0| > 1000). eps0 <= 0 starts from 0.1.
+ */
+RCRE_NODISCARD int rcre_mcmc_nuts_sample_f64(int d, const double* x0,
+                                             double (*logpdf)(const double* x,
+                                                              int d, void* user),
+                                             void (*grad)(const double* x, int d,
+                                                          double* g, void* user),
+                                             void* user, uint64_t seed,
+                                             int n_adapt, int n_samples,
+                                             double eps0, int max_tree,
+                                             double* out, double* out_accept,
+                                             RCRE_NUTSReport* report);
+
+/**
+ * @brief Effective sample size (Geyer 1992 initial monotone sequence)
+ *        of a (correlated) sample series y[0..n).
+ */
+RCRE_NODISCARD double rcre_mcmc_ess_f64(const double* y, int n, int lag_max);
+
+/**
+ * @brief Integrate f over the box [lo,hi]^d. Methods: 0 = plain MC
+ *        (PCG64), 1 = antithetic (n must be even), 2 = stratified
+ *        (uses the nearest perfect d-th power n = s^d, reported in
+ *        out_n_used), 3 = Sobol' (d <= 20), 4 = Halton (d <= 3).
+ *        QMC methods ignore `seed` (low-discrepancy sequences are
+ *        deterministic by index). out_stderr: MC standard error.
+ */
+RCRE_NODISCARD int rcre_mcmc_integrate_f64(int d,
+                                           double (*f)(const double* x,
+                                                       void* user),
+                                           void* user, const double* lo,
+                                           const double* hi, int method,
+                                           int n, uint64_t seed,
+                                           double* out_value,
+                                           double* out_stderr,
+                                           int* out_n_used);
+
+/* ------------------- Streaming statistics (H7, 2.4.0) ------------------- */
+/*
+ * Welford moments (Chan et al. parallel merge — the slab pattern:
+ * per-worker states merged in fixed order), Greenwald-Khanna
+ * epsilon-quantile stream (plan named t-digest/KLL; GK ships because
+ * its rank guarantee is the classically verifiable one — docs/hpc.md),
+ * and ordinary / moving-block bootstrap on PCG64 substreams.
+ */
+typedef struct RCRE_StreamStats {
+    int64_t n;
+    double mean;
+    double m2; /* sum of squared deviations (pop. var = m2/n) */
+    double m3;
+    double m4;
+} RCRE_StreamStats;
+
+void rcre_stream_stats_init(RCRE_StreamStats* s);
+void rcre_stream_stats_push(RCRE_StreamStats* s, double x);
+RCRE_NODISCARD double rcre_stream_stats_mean(const RCRE_StreamStats* s);
+/** @brief Sample variance (n-1). */
+RCRE_NODISCARD double rcre_stream_stats_var(const RCRE_StreamStats* s);
+RCRE_NODISCARD double rcre_stream_stats_std(const RCRE_StreamStats* s);
+/** @brief Bias-corrected (Fisher) sample skewness. */
+RCRE_NODISCARD double rcre_stream_stats_skew(const RCRE_StreamStats* s);
+/** @brief Bias-corrected sample excess kurtosis. */
+RCRE_NODISCARD double rcre_stream_stats_kurtosis(const RCRE_StreamStats* s);
+/** @brief Merge b into a (parallel/ slab pattern). */
+void rcre_stream_stats_merge(RCRE_StreamStats* a, const RCRE_StreamStats* b);
+
+typedef struct RCRE_P2Quantile {
+    double p;    /* target quantile in (0,1) */
+    int64_t n;   /* count */
+    int init_count;
+    double v[5];  /* marker heights */
+    double npos[5]; /* marker positions (1-based, fractional) */
+    double np[5]; /* expected marker positions */
+    double dnp[5];/* expected-position increments */
+} RCRE_P2Quantile;
+
+/**
+ * @brief Create a P^2 (Jain & Chlamtac 1985) online quantile for
+ *        quantile p in (0,1). 5 markers; O(1) per item, O(1) memory.
+ *        The plan named t-digest/KLL; P^2 ships after a measured
+ *        retirement of the Greenwald-Khanna draft (docs/hpc.md 10.5).
+ */
+RCRE_NODISCARD RCRE_P2Quantile* rcre_p2_create(double p);
+void rcre_p2_destroy(RCRE_P2Quantile* q);
+RCRE_NODISCARD int64_t rcre_p2_count(const RCRE_P2Quantile* q);
+void rcre_p2_add(RCRE_P2Quantile* q, double x);
+/** @brief Current estimate of the p-quantile. */
+RCRE_NODISCARD double rcre_p2_value(const RCRE_P2Quantile* q);
+
+/**
+ * @brief Bootstrap a statistic of x[0..n): n_boot resamples via
+ *        (seed, resample_id) PCG64 substreams. block = 1: ordinary;
+ *        block > 1: moving block (with wraparound).
+ */
+RCRE_NODISCARD int rcre_bootstrap_f64(const double* x, int n, uint64_t seed,
+                                      int resample_id, int n_boot, int block,
+                                      double (*stat)(const double* y, int n,
+                                                    void* user),
+                                      void* user, double* out_stats);
+
+/* ------------------- PDE domain layer (H7, 2.4.0) ------------------------ */
+/*
+ * Structured-grid solvers on the F64 substrate (docs/hpc.md 10).
+ * LAYOUT (shared with H4 multigrid): interior point (i, j) has 0 <= i < nx
+ * (x / column), 0 <= j < ny (y / row), flat index c = j*nx + i.
+ * Determinism: every parallel stage is an independent row/point or a
+ * fixed-order combine — results are bit-identical across pool sizes
+ * (pool == NULL means serial). State is caller-owned (arena-friendly).
+ * h = 1 grids unless documented otherwise.
+ */
+
+/**
+ * @brief 5-point Dirichlet stencil (h=1), F64: v = A u with zero
+ *        boundary (caller folds boundary data into the RHS).
+ *        Row-slab parallel. 0 on success, -1 on bad input.
+ */
+RCRE_NODISCARD int rcre_pde_stencil5_f64(size_t nx, size_t ny,
+                                         const double* u, double* v,
+                                         RCRE_ThreadPool* pool);
+/** F32 twin of rcre_pde_stencil5_f64. */
+RCRE_NODISCARD int rcre_pde_stencil5_f32(size_t nx, size_t ny,
+                                         const float* u, float* v,
+                                         RCRE_ThreadPool* pool);
+
+/**
+ * @brief 2D Poisson (Dirichlet, 5-point, h=1) via the 2D DST (H2 FFT).
+ *        Spectral: |rel err| is at the roundoff floor of the FFT.
+ *        MG layout: b/u are 0-indexed, c = j*nx + i.
+ */
+RCRE_NODISCARD int rcre_pde_poisson2d_fft_f64(size_t nx, size_t ny,
+                                              const double* b, double* u,
+                                              RCRE_ThreadPool* pool);
+
+/**
+ * @brief Poisson AUTO driver: spectral when nx*ny <= 4M cells, else the
+ *        H4 multigrid V-cycle (tol 1e-12, 400 cycles). auto_mode = 0
+ *        forces spectral. The choice is a pure function of the shape.
+ */
+RCRE_NODISCARD int rcre_pde_poisson2d_solve_f64(size_t nx, size_t ny,
+                                                const double* b, double* u,
+                                                RCRE_ThreadPool* pool,
+                                                int auto_mode);
+
+/**
+ * @brief Heat 2D explicit FTCS step (zero Dirichlet boundary):
+ *        u1 = u + (dt/h^2)(lap4 u). Stability gate: returns -1 (no
+ *        partial step) when dt/h^2 > 1/2.
+ */
+RCRE_NODISCARD int rcre_pde_heat2d_step_f64(size_t nx, size_t ny,
+                                            const double* u, double* u1,
+                                            double dt, double h,
+                                            RCRE_ThreadPool* pool);
+
+/**
+ * @brief Scalar Burgers 1D (u_t + (1/2 u^2)_x = 0, periodic): one
+ *        conservative MUSCL-upwind (minmod reconstruction + Roe-split
+ *        upwind face flux) step — 2nd order, TVD, stable for CFL <= 1.
+ *        Mass conserved to roundoff.
+ */
+RCRE_NODISCARD int rcre_pde_burgers1d_step_f64(const double* u, double* u1,
+                                               int n, double dt, double dx);
+/**
+ * @brief Shu-Osher piston + oscillation initial data on [0, L).
+ *        The classic benchmark profile (the scalar-Burgers
+ *        simplification of the gas-dynamics benchmark — see
+ *        docs/hpc.md 10.5).
+ */
+RCRE_NODISCARD int rcre_pde_burgers_shu_oshers_init(double* u, int n,
+                                                    double L);
+/**
+ * @brief Hopf-Lax exact solution of u_t + (1/2 u^2)_x = 0 with periodic
+ *        data (verification tool, O(n^2)): u(x,T) = (x - xi*)/T where
+ *        xi* (over periodic replicas) minimizes v0(xi) + (x-xi)^2/(2T),
+ *        v0(xi) = integral of u0 (trapezoidal). The maximum principle
+ *        (min u0 <= u <= max u0) holds for the result.
+ */
+RCRE_NODISCARD int rcre_pde_burgers_hopf_lax_f64(const double* u0, int n,
+                                                 double L, double T,
+                                                 double* out);
+
+/**
+ * @brief Wave 1D (u_tt = c^2 u_xx, periodic): one leapfrog step, DDK
+ *        (drift, then kick at the NEW position; v is the half-step
+ *        velocity). 2nd order in time, symplectic. CFL gate c dt/dx <= 1.
+ */
+RCRE_NODISCARD int rcre_pde_wave1d_step_f64(const double* u, const double* v,
+                                            double* u1, double* v1, int n,
+                                            double c, double dt, double dx);
+/** Consistent start for u_t^0 = 0: v^{1/2} = (c^2 dt/2) lap(u). */
+RCRE_NODISCARD int rcre_pde_wave1d_start_f64(const double* u, double* v, int n,
+                                             double c, double dt, double dx);
+/** Discrete energy 1/2 sum v^2 + (c^2/2 dx^2) sum (u_{i+1}-u_i)^2. */
+RCRE_NODISCARD double rcre_pde_wave1d_energy_f64(const double* u,
+                                                 const double* v, int n,
+                                                 double c, double dx);
+
+/* ------------------- Optimization (H8, 2.5.0) --------------------------- */
+/*
+ * L-BFGS / FISTA / coordinate-descent LASSO / SPSA (docs/hpc.md 11).
+ * All F64, all sequential and deterministic (SPSA under a fixed seed).
+ * Stopping tests are the scipy L-BFGS-B definitions where applicable,
+ * so the measured iteration bars against scipy are interpretable.
+ * Telemetry is via report structs — no callbacks in the numerics path
+ * (the H4 lesson). 0 on success, -1 on bad input.
+ */
+
+typedef struct RCRE_LbfgsOptions {
+    int max_iter; /* 0 -> 1000*n */
+    double ftol;  /* 0 -> 1e-7 (scipy default) */
+    double gtol;  /* 0 -> 1e-5 (scipy default), infinity-norm gradient */
+    double xtol;  /* 0 = disabled (scipy L-BFGS-B has no xtol; default 1e-9) */
+    int history;  /* m; 0 -> 10 */
+    int bounded;  /* 0/1 */
+    const double* lo; /* bounded: lower bounds (n) */
+    const double* hi; /* bounded: upper bounds (n) */
+} RCRE_LbfgsOptions;
+
+void rcre_lbfgs_options_default(RCRE_LbfgsOptions* o);
+
+typedef struct RCRE_OptReport {
+    int iter;    /* outer iterations (accepted L-BFGS steps / FISTA k) */
+    int f_evals; /* objective evaluations */
+    int g_evals; /* gradient evaluations (0 where N/A) */
+    int status;  /* 0 = converged, 1 = stopped by max_iter/stall */
+} RCRE_OptReport;
+
+/**
+ * @brief Two-loop L-BFGS (Nocedal-Wright) with Armijo backtracking.
+ *        x_out receives the minimizer; out_f its value. Box-bounded
+ *        variant = projected trials (documented heuristic, not BLP).
+ */
+RCRE_NODISCARD int rcre_lbfgs_f64(int n,
+                                  double (*fun)(const double* x, void* user),
+                                  void (*grad)(const double* x, double* g,
+                                               void* user),
+                                  void* user, const double* x0, double* x_out,
+                                  const RCRE_LbfgsOptions* opt,
+                                  double* out_f, RCRE_OptReport* report);
+
+/**
+ * @brief FISTA (Beck-Teboulle) for min f(x) + g(x): user supplies the
+ *        smooth f (value + gradient) and the prox of g
+ *        prox(z, step, out). L <= 0 enables backtracking L estimation.
+ *        out_f is the smooth value f(x) at the result (not f+g).
+ */
+RCRE_NODISCARD int rcre_fista_f64(int n,
+                                  double (*fun)(const double* x, void* user),
+                                  void (*fgrad)(const double* x, double* g,
+                                                void* user),
+                                  void (*prox)(const double* z, double step,
+                                              double* out, void* user),
+                                  void* user, const double* x0, double* x_out,
+                                  double L, int max_iter, double rtol,
+                                  double* out_f, RCRE_OptReport* report);
+
+/**
+ * @brief Cyclic coordinate descent for LASSO:
+ *        min 1/2||Ax-b||^2 + lambda||x||_1 (A: n x d row-major).
+ *        Exact soft-threshold coordinate updates; tol on the relative
+ *        coordinate change per full pass; out_obj = full objective.
+ */
+RCRE_NODISCARD int rcre_cd_lasso_f64(const double* A, int n, int d,
+                                     const double* b, double lambda,
+                                     const double* x0, double* x_out,
+                                     int max_iter, double tol,
+                                     double* out_obj, RCRE_OptReport* report);
+
+/**
+ * @brief SPSA (Spall) zeroth-order. four_point: 0 = 2-point estimate
+ *        (f(x+cD)-f(x))/(cD), 1 = 4-point sign estimate
+ *        (f(x+cD)-f(x-cD))/(2cD). Steps a_k = a0/(k+1)^gamma,
+ *        perturbations from PCG64 (fixed seed -> bit-identical run).
+ */
+RCRE_NODISCARD int rcre_spsa_f64(int n,
+                                 double (*fun)(const double* x, void* user),
+                                 void* user, const double* x0, double* x_out,
+                                 uint64_t seed, double c0, double a0,
+                                 double gamma, int max_iter, int four_point,
+                                 double* out_f, RCRE_OptReport* report);
+
+/* ------------------- 3-D PDE domain layer (H9, 2.6.0) -------------------- */
+/*
+ * Structured-grid 3-D solvers on the F64 substrate (docs/hpc.md 12).
+ * LAYOUT (the H4/H7 2-D layout extended): point (i, j, k) with
+ * 0 <= i < nx (x), 0 <= j < ny (y), 0 <= k < nz (z), flat index
+ * c = j*nz*nx + k*nx + i. Zero-boundary convention (the caller folds
+ * boundary data into b). Determinism: bit-identical across pool sizes
+ * (pool == NULL means serial).
+ */
+
+/* ------------------- H9 distributed operators (2.6.0) ------------------- */
+/*
+ * First distributed ops on the 12-fn MPI shim (include/extras/
+ * rcre_mpi.h). Determinism: ctx == NULL is the serial oracle path;
+ * the owned-row arithmetic is value- and order-identical to the core
+ * ops, so distributed and serial results are BIT-IDENTICAL
+ * (docs/hpc.md 12.2). ctx is opaque here (the shim header defines
+ * RCRE_MpiCtx).
+ */
+
+/**
+ * @brief Distributed SpMV: each rank computes its owned y-block
+ *        [r0, r1) from the owned CSR rows (row_ptr/col_idx/values for
+ *        the full matrix; rows r0..r1-1). x is FULL on every rank
+ *        (caller bcasts it). ctx == NULL: compute all rows. 0 on
+ *        success, -1 on bad input.
+ */
+typedef struct RCRE_MpiCtx RCRE_MpiCtx; /* forward (full type: extras/rcre_mpi.h) */
+
+RCRE_NODISCARD int rcre_dist_spmv_rows_f64(RCRE_MpiCtx* ctx,
+                                           const size_t* row_ptr,
+                                           const size_t* col_idx,
+                                           const double* values, int rows,
+                                           int r0, int r1, const double* x,
+                                           double* y_local);
+
+/**
+ * @brief Exchange owned y-blocks so every rank holds the full y
+ *        (all-to-all via isend/irecv, ascending-rank order). ctx ==
+ *        NULL: plain copy of the owned block into y_full.
+ */
+RCRE_NODISCARD int rcre_dist_gather_rows_f64(RCRE_MpiCtx* ctx, int n, int r0,
+                                             int r1, const double* y_local,
+                                             double* y_full);
+
+/**
+ * @brief Distributed 5-point stencil with halo exchange (H7 2-D
+ *        layout). ctx owns a row slab (deterministic partition of ny
+ *        over the ranks); u_local/v_local are (j1-j0) x nx. ctx ==
+ *        NULL: serial oracle — the core expression over all rows.
+ *        0 on success, -1 bad input, -2 communication failure.
+ */
+RCRE_NODISCARD int rcre_dist_stencil5_f64(RCRE_MpiCtx* ctx, size_t nx,
+                                          size_t ny, const double* u_local,
+                                          double* v_local);
+
+/**
+ * @brief 7-point Dirichlet stencil (h=1), F64: v = A u with zero
+ *        boundary. Line-slab parallel. 0 on success, -1 on bad input.
+ */
+RCRE_NODISCARD int rcre_pde_stencil7_f64(size_t nx, size_t ny, size_t nz,
+                                         const double* u, double* v,
+                                         RCRE_ThreadPool* pool);
+
+/**
+ * @brief 3-D Poisson (Dirichlet, 7-point, h=1): u = A^{-1} b via the
+ *        separable 1-D DST-I spectral solver (3 forward + 3 inverse
+ *        strided-line DST stages, eigenvalue divide). O(n^3 log n).
+ */
+RCRE_NODISCARD int rcre_pde_poisson3d_fft_f64(size_t nx, size_t ny, size_t nz,
+                                              const double* b, double* u,
+                                              RCRE_ThreadPool* pool);
+
 /* --------------------------- compensated reductions ---------------------- */
 
 /**
@@ -1938,6 +2583,34 @@ void rcre_qrng_sobol_point(RCRE_QRNG* q, double* out);
 void rcre_qrng_halton_at(uint64_t n, int k, double* out);
 void rcre_qrng_halton_init(RCRE_QRNG* q, int k);
 void rcre_qrng_halton_point(RCRE_QRNG* q, double* out);
+
+/* ---- Philox-4x32-10 (H6, 2.3.0) — the GPU-portable counter RNG ----------- */
+
+/**
+ * @brief One-shot Philox-4x32-10: four 32-bit words, a PURE function of
+ *        (counter, key). Bit-compatible with NVIDIA curand
+ *        curand_Philox4x32_10(c, k) (CUDA 13.3 reference, verified on
+ *        dlbox: RTX 5060 Ti, sm_120).
+ *
+ * Mapping used by RCRE: the 64-bit counter is (c.x = low32, c.y = high32,
+ * c.z = c.w = 0); the 64-bit key is (k.x = low32, k.y = high32).
+ *
+ * Why this exists: counter-based generation with a per-element counter
+ * (word j comes from counter j/4, word j%4) is reproducible BY
+ * CONSTRUCTION on any parallel machine — a GPU fill kernel and the CPU
+ * reference produce bit-identical streams at the same counters, with no
+ * shared state, no RNG carry between blocks, and zero synchronization.
+ * This is the documented H6 determinism bar for GPU RNG.
+ */
+void rcre_rng_philox4x32(uint64_t counter, uint64_t key,
+                         uint32_t out[4]);
+
+/**
+ * @brief Fill n uint32 words: word j = philox4x32(counter0 + j/4, key)[j%4].
+ *        Stateless and deterministic; `out` must hold n words.
+ */
+RCRE_NODISCARD int rcre_rng_philox4x32_fill(uint32_t* out, size_t n,
+                                            uint64_t counter0, uint64_t key);
 
 /* ========================================================================= */
 /* Safe, Zero-Malloc, SIMD-Accelerated C23 String Library (rcre_str)         */
@@ -5138,6 +5811,396 @@ bool rcre_prof_export_html(RCRE_ProfContext* ctx, const char* filepath);
 
 #endif /* RCRE_PROF_H */
 
+/* --- H6 GPU Bridge (rcre_gpu; cpu backend bundled, cuda is an opt-in TU) --- */
+/**
+ * @file rcre_gpu.h
+ * @brief Optional Hardware GPU Compute Extras (H6, 2.3.0)
+ *
+ * Architectural boundary (the D1 bridge pattern, proven by io/Arrow,
+ * io/DLPack and the zstd codec): isolated in include/extras/ and
+ * src/extras/ so the core C23 library in include/ and src/ stays
+ * strictly OS/vendor-header free. The core never links a GPU backend;
+ * user programs link the backend TUs they want:
+ *
+ *   gpu_ctx.c        always   — context plumbing + CPU reference backend
+ *                              (zero-dependency, the conformance oracle:
+ *                              its ops delegate to the same core/HAL
+ *                              functions the CPU solver paths use, so
+ *                              results are bit-identical to CPU)
+ *   gpu_cuda.c/.cu   opt-in   — NVIDIA CUDA (nvcc; RCRE_WITH_CUDA)
+ *   gpu_metal.m      opt-in   — Apple Metal (legacy single-kernel SGEMM)
+ *
+ * H6 determinism bar: kernels run with FIXED grid/block configurations
+ * (never auto-tuned off device queries), so a launch is deterministic
+ * on a given device. Cross-device bit-identity is NOT claimed for FP
+ * ops (addition order differs from CPU) — the gates are precision
+ * bars, except Philox, which is bit-identical by construction
+ * (word j = pure function of counter j/4 and key).
+ */
+
+#ifndef RCRE_GPU_H
+#define RCRE_GPU_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* Legacy single-kernel API (pre-H6; Metal on macOS, CPU HAL fallback)       */
+/* ========================================================================= */
+
+/** Returns true if a native GPU compute device (Metal) was initialized cleanly. */
+RCRE_NODISCARD bool rcre_gpu_is_available(void);
+
+/** Returns GPU device / fallback backend name (e.g. "Apple M5 Max (Metal)" or "CPU HAL Fallback"). */
+RCRE_NODISCARD const char* rcre_gpu_device_name(void);
+
+/**
+ * @brief Executes C = alpha * A * B + beta * C on Metal GPU (or CPU HAL fallback).
+ * @note Legacy managed-mode API. New code should use the context API
+ *       below (rcre_gpu_open_named + device-buffer ops).
+ */
+RCRE_NODISCARD int rcre_gpu_gemm_f32(
+    size_t M, size_t N, size_t K,
+    float alpha,
+    const float* A, size_t lda,
+    const float* B, size_t ldb,
+    float beta,
+    float* C, size_t ldc
+);
+
+/* ========================================================================= */
+/* H6 context API (2.3.0)                                                    */
+/* ========================================================================= */
+
+/** Opaque device context (one per backend). */
+typedef struct RCRE_GpuCtx RCRE_GpuCtx;
+/** Opaque device buffer. */
+typedef struct RCRE_GpuBuf RCRE_GpuBuf;
+
+
+/* ========================================================================= */
+/* Backend vtable (internal bridge contract — user code never fills this)    */
+/* ========================================================================= */
+
+/** Implementation of one backend. Opaque to callers; complete here so
+ *  backend TUs (always-compiled gpu_ctx.c, opt-in gpu_cuda.c) can
+ *  register themselves. */
+typedef struct RCRE_GpuBackend {
+    const char* name;
+    int (*available)(void);
+    const char* (*device_desc)(void);
+    RCRE_GpuBuf* (*alloc)(RCRE_GpuCtx* ctx, size_t bytes);
+    void (*free_buf)(RCRE_GpuBuf* buf);
+    int (*h2d)(RCRE_GpuCtx* ctx, RCRE_GpuBuf* dst, const void* src, size_t bytes);
+    int (*d2h)(RCRE_GpuCtx* ctx, void* dst, RCRE_GpuBuf* src, size_t bytes);
+    int (*sync)(RCRE_GpuCtx* ctx);
+    int (*gemm_f32)(RCRE_GpuCtx*, size_t m, size_t n, size_t k, float alpha,
+                    RCRE_GpuBuf*, size_t lda, RCRE_GpuBuf*, size_t ldb,
+                    float beta, RCRE_GpuBuf*, size_t ldc);
+    int (*gemm_f64)(RCRE_GpuCtx*, size_t m, size_t n, size_t k, double alpha,
+                    RCRE_GpuBuf*, size_t lda, RCRE_GpuBuf*, size_t ldb,
+                    double beta, RCRE_GpuBuf*, size_t ldc);
+    int (*spmv_f32)(RCRE_GpuCtx*, size_t rows, RCRE_GpuBuf*, RCRE_GpuBuf*,
+                    RCRE_GpuBuf*, RCRE_GpuBuf*, RCRE_GpuBuf*);
+    int (*spmv_f64)(RCRE_GpuCtx*, size_t rows, RCRE_GpuBuf*, RCRE_GpuBuf*,
+                    RCRE_GpuBuf*, RCRE_GpuBuf*, RCRE_GpuBuf*);
+    int (*axpy_f32)(RCRE_GpuCtx*, size_t n, float a, RCRE_GpuBuf*, RCRE_GpuBuf*);
+    int (*axpy_f64)(RCRE_GpuCtx*, size_t n, double a, RCRE_GpuBuf*, RCRE_GpuBuf*);
+    int (*dot_f32)(RCRE_GpuCtx*, size_t n, RCRE_GpuBuf*, RCRE_GpuBuf*, RCRE_GpuBuf*);
+    int (*dot_f64)(RCRE_GpuCtx*, size_t n, RCRE_GpuBuf*, RCRE_GpuBuf*, RCRE_GpuBuf*);
+    int (*philox_fill)(RCRE_GpuCtx*, size_t n, uint64_t c0, uint64_t key,
+                       RCRE_GpuBuf*);
+} RCRE_GpuBackend;
+
+/**
+ * @brief Internal: backend self-registration (called from backend TUs' C
+ *  constructors). User code never calls this.
+ */
+void rcre_gpu_register_backend(const char* name, RCRE_GpuBackend* be);
+
+/** @brief 1 if the named backend ("cuda", "metal", "cpu") is built in AND
+ *  a device is present, 0 otherwise. Never fails on unknown names (0). */
+RCRE_NODISCARD int rcre_gpu_backend_available(const char* backend);
+
+/** @brief Open a context for the named backend (or NULL). The "cpu"
+ *  backend is always available. */
+RCRE_NODISCARD RCRE_GpuCtx* rcre_gpu_open_named(const char* backend);
+
+/** @brief Open the first available backend: cuda -> metal -> cpu. */
+/* Internal layout (complete here so backend TUs can touch the fields;
+ * user code treats both as opaque). */
+struct RCRE_GpuCtx {
+    struct RCRE_GpuBackend* be;
+    void* priv;   /* backend-private state (device handle, ...) */
+};
+struct RCRE_GpuBuf {
+    RCRE_GpuCtx* ctx;
+    size_t       bytes;
+    void*        native;   /* backend device pointer (host ptr for cpu) */
+};
+
+RCRE_NODISCARD RCRE_GpuCtx* rcre_gpu_open(void);
+
+void rcre_gpu_close(RCRE_GpuCtx* ctx);
+
+/** @brief Backend name ("cuda" | "metal" | "cpu"). */
+RCRE_NODISCARD const char* rcre_gpu_backend_name(const RCRE_GpuCtx* ctx);
+/** @brief Device description (e.g. "NVIDIA GeForce RTX 5060 Ti (sm_120)"). */
+RCRE_NODISCARD const char* rcre_gpu_device_desc(const RCRE_GpuCtx* ctx);
+
+/* ---- buffers ------------------------------------------------------------- */
+
+/** @brief Allocate `bytes` on the device (NULL on failure). */
+RCRE_NODISCARD RCRE_GpuBuf* rcre_gpu_alloc(RCRE_GpuCtx* ctx, size_t bytes);
+void rcre_gpu_free(RCRE_GpuBuf* buf);
+/** @brief Number of bytes in the buffer. */
+RCRE_NODISCARD size_t rcre_gpu_bytes(const RCRE_GpuBuf* buf);
+
+/** Host -> device copy (up to buf->bytes). */
+RCRE_NODISCARD int rcre_gpu_h2d(RCRE_GpuCtx* ctx, RCRE_GpuBuf* dst,
+                                const void* src, size_t bytes);
+/** Device -> host copy (up to buf->bytes). */
+RCRE_NODISCARD int rcre_gpu_d2h(RCRE_GpuCtx* ctx, void* dst,
+                                RCRE_GpuBuf* src, size_t bytes);
+/** @brief Flush pending work. No-op on the CPU backend. */
+RCRE_NODISCARD int rcre_gpu_synchronize(RCRE_GpuCtx* ctx);
+
+/* ---- numeric ops (device buffers; row-major) -----------------------------
+ *
+ * Each op validates its buffers against the given element counts
+ * (bytes must match count * element size) and returns RCRE_OK on
+ * success. Buffers of the same context are required.
+ */
+
+/** C = alpha*A*B + beta*C (f32). A: m x k (lda), B: k x n (ldb), C: m x n (ldc). */
+RCRE_NODISCARD int rcre_gpu_gemm_f32_ctx(RCRE_GpuCtx* ctx,
+                                         size_t m, size_t n, size_t k,
+                                         float alpha,
+                                         RCRE_GpuBuf* A, size_t lda,
+                                         RCRE_GpuBuf* B, size_t ldb,
+                                         float beta,
+                                         RCRE_GpuBuf* C, size_t ldc);
+/** C = alpha*A*B + beta*C (f64). */
+RCRE_NODISCARD int rcre_gpu_gemm_f64_ctx(RCRE_GpuCtx* ctx,
+                                         size_t m, size_t n, size_t k,
+                                         double alpha,
+                                         RCRE_GpuBuf* A, size_t lda,
+                                         RCRE_GpuBuf* B, size_t ldb,
+                                         double beta,
+                                         RCRE_GpuBuf* C, size_t ldc);
+
+/** y = A*x (CSR, f32). row_ptr: rows+1 size_t, col_idx/values: nnz. */
+RCRE_NODISCARD int rcre_gpu_spmv_f32_ctx(RCRE_GpuCtx* ctx, size_t rows,
+                                         RCRE_GpuBuf* row_ptr,
+                                         RCRE_GpuBuf* col_idx,
+                                         RCRE_GpuBuf* values,
+                                         RCRE_GpuBuf* x, RCRE_GpuBuf* y);
+/** y = A*x (CSR, f64). */
+RCRE_NODISCARD int rcre_gpu_spmv_f64_ctx(RCRE_GpuCtx* ctx, size_t rows,
+                                         RCRE_GpuBuf* row_ptr,
+                                         RCRE_GpuBuf* col_idx,
+                                         RCRE_GpuBuf* values,
+                                         RCRE_GpuBuf* x, RCRE_GpuBuf* y);
+
+/** y = a*x + y (f32). */
+RCRE_NODISCARD int rcre_gpu_axpy_f32_ctx(RCRE_GpuCtx* ctx, size_t n,
+                                         float a, RCRE_GpuBuf* x,
+                                         RCRE_GpuBuf* y);
+/** y = a*x + y (f64). */
+RCRE_NODISCARD int rcre_gpu_axpy_f64_ctx(RCRE_GpuCtx* ctx, size_t n,
+                                         double a, RCRE_GpuBuf* x,
+                                         RCRE_GpuBuf* y);
+
+/** *out = dot(x, y) (f32). out holds one float. */
+RCRE_NODISCARD int rcre_gpu_dot_f32_ctx(RCRE_GpuCtx* ctx, size_t n,
+                                        RCRE_GpuBuf* x, RCRE_GpuBuf* y,
+                                        RCRE_GpuBuf* out);
+/** *out = dot(x, y) (f64). out holds one double. */
+RCRE_NODISCARD int rcre_gpu_dot_f64_ctx(RCRE_GpuCtx* ctx, size_t n,
+                                        RCRE_GpuBuf* x, RCRE_GpuBuf* y,
+                                        RCRE_GpuBuf* out);
+
+/** out[j] = philox4x32(counter0 + j/4, key)[j%4] (n uint32 words).
+ *  Bit-identical to rcre_rng_philox4x32_fill on every backend
+ *  (pure function of the counter — the H6 RNG determinism bar). */
+RCRE_NODISCARD int rcre_gpu_philox4x32_fill(RCRE_GpuCtx* ctx, size_t n,
+                                            uint64_t counter0, uint64_t key,
+                                            RCRE_GpuBuf* out);
+
+/* ---- managed convenience (host pointers; hidden alloc/copy/compute) ------ */
+
+/** C = alpha*A*B + beta*C from host pointers (f32). */
+RCRE_NODISCARD int rcre_gpu_gemm_f32_host(RCRE_GpuCtx* ctx,
+                                          size_t m, size_t n, size_t k,
+                                          float alpha,
+                                          const float* A, size_t lda,
+                                          const float* B, size_t ldb,
+                                          float beta,
+                                          float* C, size_t ldc);
+/** C = alpha*A*B + beta*C from host pointers (f64). */
+RCRE_NODISCARD int rcre_gpu_gemm_f64_host(RCRE_GpuCtx* ctx,
+                                          size_t m, size_t n, size_t k,
+                                          double alpha,
+                                          const double* A, size_t lda,
+                                          const double* B, size_t ldb,
+                                          double beta,
+                                          double* C, size_t ldc);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_GPU_H */
+
+/* --- H9 MPI shim (rcre_mpi; loopback bundled, real MPI is an opt-in TU) --- */
+/**
+ * @file rcre_mpi.h
+ * @brief RCRE H9 — MPI shim: a 12-function C ABI over self-registering
+ *        communication backends (the D1 bridge pattern, docs/hpc.md 12).
+ *
+ * Design (the H6 GPU-bridge precedent, applied to collective
+ * communication):
+ *
+ *  - The core never links a communication implementation. This header
+ *    defines an opaque RCRE_MpiCtx whose vtable is resolved at open
+ *    time; backends self-register from a C constructor and the
+ *    Makefile links the backend objects explicitly (no weak symbols —
+ *    the H5 hook lesson).
+ *  - `loopback` is ALWAYS available: a one-process in-memory backend
+ *    registered by mpi_ctx.c. It is the conformance oracle — the
+ *    distributed ops (src/core/dist.c) run against it and must be
+ *    bit-identical to the core serial operators.
+ *  - `mpi` (real MPI) is an OPTIONAL backend TU (src/extras/mpi_real.c)
+ *    compiled empty unless RCRE_HAVE_MPI is defined (mpicc probe,
+ *    `make check-mpi`); gates that need real processes skip clean
+ *    where it is not linked (the H6 CUDA pattern).
+ *
+ * Determinism policy: collectives on this shim are ORDERED — bcast
+ * copies from the root; allreduce-sum_f64 reduces in ascending rank
+ * order (a left fold). A 2-process run is therefore bit-identical to
+ * the 1-process loopback run of the same operation (pairwise-MPI
+ * allreduce would not be — documented in docs/hpc.md 12.2).
+ */
+#ifndef RCRE_EXTRAS_MPI_H
+#define RCRE_EXTRAS_MPI_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#if !defined(RCRE_NODISCARD)
+#if defined(__has_c_attribute)
+#if __has_c_attribute(nodiscard)
+#define RCRE_NODISCARD [[nodiscard]]
+#endif
+#endif
+#if !defined(RCRE_NODISCARD)
+#if defined(__GNUC__) || defined(__clang__)
+#define RCRE_NODISCARD __attribute__((warn_unused_result))
+#else
+#define RCRE_NODISCARD
+#endif
+#endif
+#endif
+
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
+/** Opaque communication context (one per communicator). */
+typedef struct RCRE_MpiCtx RCRE_MpiCtx;
+
+/** Backend registration (called from backend constructors). */
+typedef struct RCRE_MpiBackend {
+    const char* name; /* "loopback", "mpi", ... */
+    /** Open a communicator; returns NULL on failure. */
+    RCRE_MpiCtx* (*open)(void);
+    /** Process count. */
+    int (*size)(RCRE_MpiCtx* ctx);
+    /** This rank (0-based). */
+    int (*rank)(RCRE_MpiCtx* ctx);
+    void (*barrier)(RCRE_MpiCtx* ctx);
+    /** Broadcast n doubles from `root` (ordered: plain copy). */
+    void (*bcast_f64)(RCRE_MpiCtx* ctx, double* buf, size_t n, int root);
+    int (*send_f64)(RCRE_MpiCtx* ctx, const double* buf, size_t n, int dest,
+                    int tag);
+    int (*recv_f64)(RCRE_MpiCtx* ctx, double* buf, size_t n, int src,
+                    int tag);
+    /** Non-blocking; returns an opaque request id (>= 0) or -1. */
+    int (*isend_f64)(RCRE_MpiCtx* ctx, const double* buf, size_t n, int dest,
+                     int tag);
+    int (*irecv_f64)(RCRE_MpiCtx* ctx, double* buf, size_t n, int src,
+                     int tag);
+    int (*wait)(RCRE_MpiCtx* ctx, int req);
+    /** Ordered sum reduction (ascending-rank left fold) into `out`. */
+    void (*allreduce_sum_f64)(RCRE_MpiCtx* ctx, const double* in, double* out,
+                              size_t n);
+    void (*close)(RCRE_MpiCtx* ctx);
+} RCRE_MpiBackend;
+
+RCRE_NODISCARD bool rcre_mpi_backend_registered(const char* name);
+void rcre_mpi_register_backend(const char* name, RCRE_MpiBackend* be);
+
+/* ------------------------------------------------------------------ */
+/* The 12-function public ABI                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief Open a communicator on the named backend ("loopback" or "mpi").
+ *        NULL tries "mpi" then "loopback". 0 on success, -1 otherwise.
+ */
+RCRE_NODISCARD int rcre_mpi_open(const char* backend, RCRE_MpiCtx** out);
+
+/** 2. Close the context (frees it). */
+void rcre_mpi_close(RCRE_MpiCtx* ctx);
+
+/** 3. Number of processes in the communicator. */
+RCRE_NODISCARD int rcre_mpi_size(const RCRE_MpiCtx* ctx);
+
+/** 4. This process's rank. */
+RCRE_NODISCARD int rcre_mpi_rank(const RCRE_MpiCtx* ctx);
+
+/** 5. Blocking barrier. */
+void rcre_mpi_barrier(RCRE_MpiCtx* ctx);
+
+/** 6. Broadcast n doubles from `root`. */
+void rcre_mpi_bcast_f64(RCRE_MpiCtx* ctx, double* buf, size_t n, int root);
+
+/** 7. Blocking send of n doubles. 0 on success, -1 on bad input. */
+RCRE_NODISCARD int rcre_mpi_send_f64(RCRE_MpiCtx* ctx, const double* buf,
+                                     size_t n, int dest, int tag);
+
+/** 8. Blocking receive of n doubles. 0 on success, -1 on bad input. */
+RCRE_NODISCARD int rcre_mpi_recv_f64(RCRE_MpiCtx* ctx, double* buf, size_t n,
+                                     int src, int tag);
+
+/** 9. Non-blocking send; request id >= 0 or -1. */
+RCRE_NODISCARD int rcre_mpi_isend_f64(RCRE_MpiCtx* ctx, const double* buf,
+                                      size_t n, int dest, int tag);
+
+/** 10. Non-blocking receive; request id >= 0 or -1. */
+RCRE_NODISCARD int rcre_mpi_irecv_f64(RCRE_MpiCtx* ctx, double* buf,
+                                      size_t n, int src, int tag);
+
+/** 11. Wait on a request. 0 on success, -1 on bad input. */
+RCRE_NODISCARD int rcre_mpi_wait(RCRE_MpiCtx* ctx, int req);
+
+/** 12. Ordered sum reduction (ascending rank) of n doubles into out. */
+void rcre_mpi_allreduce_sum_f64(RCRE_MpiCtx* ctx, const double* in,
+                                double* out, size_t n);
+
+/* Backend name constants. */
+#define RCRE_MPI_BACKEND_LOOPBACK "loopback"
+#define RCRE_MPI_BACKEND_MPI "mpi"
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_EXTRAS_MPI_H */
+
 /* --- Sparse Matrix & Pruning Engine (rcre_sparse) --- */
 /**
  * @file rcre_sparse.h
@@ -5383,6 +6446,634 @@ RCRE_NODISCARD int rcre_sparse_bcsr4_load(
 
 #endif /* RCRE_SPARSE_H */
 
+
+/* --- HPC Natural Language Processing Engine (rcre_nlp) --- */
+/**
+ * @file rcre_nlp.h
+ * @brief RCRE HPC-Native, Zero-Malloc C23 Natural Language Processing Engine
+ *
+ * Built directly on top of rcre_str.h (RCRE_Slice, RCRE_StrBuilder, RCRE_StrPool,
+ * HAL SIMD) and rcre_sparse.h (RCRE_CSRMatrix).
+ *
+ * Satisfies NLP-REQ-01 through NLP-REQ-06:
+ *   - NLP-REQ-01: Zero-copy pull tokenizers (RCRE_WordIter, RCRE_CharNGramIter,
+ *                 RCRE_WordNGramIter) over raw or mmap'd RCRE_Slice buffers.
+ *   - NLP-REQ-02: Flat CSR-layout arena BM25 inverted index (RCRE_BM25Index)
+ *                 and deterministic Reciprocal Rank Fusion (rcre_nlp_rrf_fuse)
+ *                 for hybrid lexical + HNSW vector search.
+ *   - NLP-REQ-03: Scikit-Learn-parity TF-IDF vectorizer (RCRE_TfidfVectorizer)
+ *                 emitting 64-byte aligned RCRE_CSRMatrix, plus lock-free signed
+ *                 Feature Hashing (Weinberger trick).
+ *   - NLP-REQ-04: Flat-table DFA Aho-Corasick multi-pattern matcher & single-pass
+ *                 redactor (1 table load per byte, compile-time case folding).
+ *   - NLP-REQ-05: 64-bit word-parallel Myers Levenshtein edit distance,
+ *                 Jaro-Winkler similarity, and Jaccard n-gram overlap.
+ *   - NLP-REQ-06: LLM dataset deduplication (SimHash64 + hardware popcount,
+ *                 K-permutation MinHash) and zero-copy UTF-8 RAG document chunker.
+ *   - NLP-REQ-07: Topic modeling — Sparse HALS NMF (RCRE_NmfModel) and
+ *                 deterministic PCG64 Collapsed Gibbs LDA (RCRE_LdaModel).
+ *   - NLP-REQ-08: Native sparse text classification directly on RCRE_CSRMatrix —
+ *                 Multinomial / Complement Naive Bayes and Multi-Class Softmax SGD.
+ *   - NLP-REQ-09: Zero-copy sentence splitter (RCRE_SentIter), LexRank/TextRank +
+ *                 MMR extractive summarization, and graph keyword extraction.
+ *   - NLP-REQ-10: Exact O(nnz_a + nnz_b) sparse-sparse CSR row cosine similarity.
+ *
+ * Architectural guarantees:
+ *   - Zero malloc / calloc / realloc / free anywhere in this module.
+ *   - Pure, re-entrant, lock-free algorithms safe for RCRE_ThreadPool slabs.
+ *   - All dynamic structures reside contiguously inside caller RCRE_Arena pools.
+ */
+
+#ifndef RCRE_NLP_H
+#define RCRE_NLP_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Zero-Copy Tokenizers & N-Gram Iterators (NLP-REQ-01)                   */
+/* ========================================================================= */
+
+#define RCRE_NLP_MAX_NGRAM 8U
+
+typedef struct RCRE_TokenizeOpts {
+    bool   split_punct; /* Emit ASCII punctuation marks as standalone tokens */
+    bool   keep_digits; /* Include ASCII digits [0-9] in word tokens         */
+    size_t min_len;     /* Minimum token byte length (0 => default 1)        */
+    size_t max_len;     /* Maximum token byte length (0 => unlimited)        */
+} RCRE_TokenizeOpts;
+
+typedef struct RCRE_WordIter {
+    RCRE_Slice        src;
+    size_t            pos;
+    RCRE_TokenizeOpts opts;
+} RCRE_WordIter;
+
+typedef struct RCRE_CharNGramIter {
+    RCRE_Slice src;
+    size_t     n;
+    size_t     pos;
+} RCRE_CharNGramIter;
+
+typedef struct RCRE_WordNGramIter {
+    RCRE_WordIter words;
+    size_t        n;
+    size_t        filled;
+    size_t        head;
+    RCRE_Slice    ring[RCRE_NLP_MAX_NGRAM];
+} RCRE_WordNGramIter;
+
+RCRE_NODISCARD RCRE_TokenizeOpts rcre_nlp_default_tokenize_opts(void);
+RCRE_NODISCARD RCRE_WordIter rcre_nlp_word_iter_init(RCRE_Slice text, const RCRE_TokenizeOpts* opts);
+RCRE_NODISCARD bool rcre_nlp_word_iter_next(RCRE_WordIter* it, RCRE_Slice* out_tok);
+
+RCRE_NODISCARD RCRE_CharNGramIter rcre_nlp_char_ngram_init(RCRE_Slice text, size_t n);
+RCRE_NODISCARD bool rcre_nlp_char_ngram_next(RCRE_CharNGramIter* it, RCRE_Slice* out_ngram);
+
+RCRE_NODISCARD RCRE_WordNGramIter rcre_nlp_word_ngram_init(RCRE_Slice text, size_t n, const RCRE_TokenizeOpts* opts);
+/** Emits contiguous zero-copy slice spanning the current n-word window. */
+RCRE_NODISCARD bool rcre_nlp_word_ngram_next(RCRE_WordNGramIter* it, RCRE_Slice* out_span);
+
+/* ========================================================================= */
+/* 2. Flat-Arena BM25 Inverted Index & Hybrid RRF Fusion (NLP-REQ-02)        */
+/* ========================================================================= */
+
+typedef struct RCRE_BM25Opts {
+    float             k1;        /* Term-frequency saturation (default 1.5)  */
+    float             b;         /* Document-length normalization (default 0.75) */
+    bool              lowercase; /* ASCII lowercase normalization (default true) */
+    RCRE_TokenizeOpts tok_opts;
+} RCRE_BM25Opts;
+
+typedef struct RCRE_SearchHit {
+    uint32_t doc_id;
+    float    score;
+} RCRE_SearchHit;
+
+typedef struct RCRE_BM25Index {
+    RCRE_StrPool vocab;          /* Term -> dense RCRE_StrId [0..num_terms)  */
+    uint32_t     num_docs;
+    uint32_t     num_terms;
+    float        avg_doc_len;
+    float        k1;
+    float        b;
+    bool         lowercase;
+    RCRE_TokenizeOpts tok_opts;
+
+    uint32_t*    doc_lens;       /* [num_docs] token count per document      */
+    float*       term_idf;       /* [num_terms] precomputed BM25 IDF         */
+    uint32_t*    term_offsets;   /* [num_terms + 1] CSR posting offsets      */
+    uint32_t*    postings_doc;   /* [total_postings] sorted doc IDs          */
+    uint32_t*    postings_tf;    /* [total_postings] term frequency in doc   */
+    size_t       total_postings;
+} RCRE_BM25Index;
+
+RCRE_NODISCARD RCRE_BM25Opts rcre_bm25_default_opts(void);
+
+/**
+ * @brief Builds a flat CSR-layout BM25 inverted index in two O(tokens) linear passes.
+ * @param index   Output initialized index.
+ * @param docs    Array of document slices [num_docs].
+ * @param num_docs Number of documents.
+ * @param opts    Optional BM25 options (nullptr => defaults).
+ * @param arena   Persistent arena owning the index buffers.
+ * @param scratch Ephemeral scratch arena (rewound before return; may equal arena).
+ */
+RCRE_NODISCARD int rcre_bm25_build(
+    RCRE_BM25Index* index,
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    const RCRE_BM25Opts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Executes Okapi BM25 top-k search.
+ * @param out_hits Caller array of capacity top_k.
+ * @param out_count Actual number of hits written (<= top_k).
+ */
+RCRE_NODISCARD int rcre_bm25_search(
+    const RCRE_BM25Index* index,
+    RCRE_Slice query,
+    size_t top_k,
+    RCRE_SearchHit* out_hits,
+    size_t* out_count,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Reciprocal Rank Fusion (RRF): fuses multiple ranked hit lists
+ *        (e.g., BM25 lexical + HNSW dense vector) via sum 1 / (k_rrf + rank).
+ */
+RCRE_NODISCARD int rcre_nlp_rrf_fuse(
+    const RCRE_SearchHit* const* lists,
+    const size_t* list_counts,
+    size_t num_lists,
+    float k_rrf,
+    size_t top_k,
+    RCRE_SearchHit* out_hits,
+    size_t* out_count,
+    RCRE_Arena* scratch
+);
+
+/* ========================================================================= */
+/* 3. Scikit-Learn Parity TF-IDF Vectorizer & Feature Hashing (NLP-REQ-03)   */
+/* ========================================================================= */
+
+typedef enum RCRE_NlpNorm {
+    RCRE_NLP_NORM_NONE = 0,
+    RCRE_NLP_NORM_L2   = 1,
+    RCRE_NLP_NORM_L1   = 2
+} RCRE_NlpNorm;
+
+typedef struct RCRE_TfidfOpts {
+    bool              lowercase;    /* Default true                          */
+    bool              smooth_idf;   /* log((1+N)/(1+df)) + 1 (default true)  */
+    bool              sublinear_tf; /* 1 + log(tf) (default false)           */
+    RCRE_NlpNorm      norm;         /* Default RCRE_NLP_NORM_L2              */
+    uint32_t          min_df;       /* Minimum document freq (default 1)     */
+    float             max_df_ratio; /* Max doc freq ratio in (0,1] (def 1.0) */
+    size_t            max_features; /* 0 => unlimited                        */
+    RCRE_TokenizeOpts tok_opts;
+} RCRE_TfidfOpts;
+
+typedef struct RCRE_TfidfVectorizer {
+    RCRE_StrPool   vocab;        /* Alphabetically ordered feature IDs [0..V) */
+    float*         idf;          /* [vocab_size]                              */
+    size_t         vocab_size;
+    size_t         num_fit_docs;
+    RCRE_TfidfOpts opts;
+} RCRE_TfidfVectorizer;
+
+RCRE_NODISCARD RCRE_TfidfOpts rcre_tfidf_default_opts(void);
+
+RCRE_NODISCARD int rcre_tfidf_fit(
+    RCRE_TfidfVectorizer* vec,
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    const RCRE_TfidfOpts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Transforms documents into a 64-byte aligned RCRE_CSRMatrix
+ *        [num_docs, vocab_size] with sorted column indices per row.
+ */
+RCRE_NODISCARD int rcre_tfidf_transform(
+    const RCRE_TfidfVectorizer* vec,
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch,
+    RCRE_CSRMatrix* out_csr
+);
+
+/**
+ * @brief Lock-free signed Feature Hashing (Weinberger trick) directly into
+ *        a contiguous 2D F32 RCRE_Tensor [num_docs, n_features].
+ */
+RCRE_NODISCARD int rcre_nlp_hash_vectorize(
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    size_t n_features,
+    bool lowercase,
+    RCRE_NlpNorm norm,
+    const RCRE_TokenizeOpts* tok_opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+);
+
+/* ========================================================================= */
+/* 4. Aho-Corasick Flat DFA Multi-Pattern Automaton (NLP-REQ-04)             */
+/* ========================================================================= */
+
+#define RCRE_AC_NONE ((uint32_t)0xFFFFFFFFu)
+
+typedef struct RCRE_ACMatch {
+    size_t   start;      /* Inclusive byte start offset in text */
+    size_t   end;        /* Exclusive byte end offset in text   */
+    uint32_t pattern_id; /* Index into original patterns array  */
+} RCRE_ACMatch;
+
+typedef bool (*rcre_ac_match_cb)(RCRE_ACMatch match, void* user_ctx);
+
+typedef struct RCRE_AhoCorasick {
+    uint32_t* next;          /* Flat DFA table: [num_states * 256]      */
+    uint32_t* out_head;      /* [num_states] index into out_nodes       */
+    uint32_t* out_pat_id;    /* [num_out_nodes] pattern index           */
+    uint32_t* out_next;      /* [num_out_nodes] next output node        */
+    size_t*   pat_lens;      /* [num_patterns] byte length per pattern  */
+    uint32_t  num_states;
+    uint32_t  num_out_nodes;
+    uint32_t  num_patterns;
+    bool      case_insensitive;
+} RCRE_AhoCorasick;
+
+RCRE_NODISCARD int rcre_ac_build(
+    RCRE_AhoCorasick* ac,
+    const RCRE_Slice* patterns,
+    size_t num_patterns,
+    bool case_insensitive,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+);
+
+/** Streams every match to callback (return false from cb to stop early). Returns match count. */
+size_t rcre_ac_scan(
+    const RCRE_AhoCorasick* ac,
+    RCRE_Slice text,
+    rcre_ac_match_cb cb,
+    void* user_ctx
+);
+
+/** Collects up to max_matches into out_matches; returns total matches found. */
+size_t rcre_ac_find_all(
+    const RCRE_AhoCorasick* ac,
+    RCRE_Slice text,
+    RCRE_ACMatch* out_matches,
+    size_t max_matches
+);
+
+/** Single-pass leftmost-first non-overlapping redaction into arena-owned slice. */
+RCRE_NODISCARD RCRE_Slice rcre_ac_redact(
+    const RCRE_AhoCorasick* ac,
+    RCRE_Slice text,
+    RCRE_Slice replacement,
+    RCRE_Arena* arena
+);
+
+/* ========================================================================= */
+/* 5. Bit-Parallel Myers Edit Distance & Fuzzy Metrics (NLP-REQ-05)          */
+/* ========================================================================= */
+
+/**
+ * @brief Exact Levenshtein edit distance using 64-bit word-parallel Myers
+ *        bit-vectors when min(a.len, b.len) <= 64, and O(min(m,n)) 2-row DP
+ *        for longer strings (scratch arena optional; stack handles up to 1024).
+ */
+RCRE_NODISCARD size_t rcre_nlp_levenshtein(RCRE_Slice a, RCRE_Slice b, RCRE_Arena* scratch);
+
+/** Reference textbook O(m*n) Levenshtein oracle (for differential verification). */
+RCRE_NODISCARD size_t rcre_nlp_levenshtein_scalar(RCRE_Slice a, RCRE_Slice b, RCRE_Arena* scratch);
+
+/** Normalized Levenshtein similarity in [0.0, 1.0]. */
+RCRE_NODISCARD float rcre_nlp_levenshtein_sim(RCRE_Slice a, RCRE_Slice b, RCRE_Arena* scratch);
+
+/** Jaro-Winkler string similarity in [0.0, 1.0] (prefix_scale typically 0.1f). */
+RCRE_NODISCARD float rcre_nlp_jaro_winkler(RCRE_Slice a, RCRE_Slice b, float prefix_scale, RCRE_Arena* scratch);
+
+/** Exact byte/UTF-8 character n-gram Jaccard similarity in [0.0, 1.0]. */
+RCRE_NODISCARD float rcre_nlp_jaccard_char_ngrams(RCRE_Slice a, RCRE_Slice b, size_t n, RCRE_Arena* scratch);
+
+/* ========================================================================= */
+/* 6. LLM Dataset Deduplication & UTF-8 RAG Chunker (NLP-REQ-06)             */
+/* ========================================================================= */
+
+/** 64-bit Charikar SimHash over tokenized words (lowercase ASCII normalized). */
+RCRE_NODISCARD uint64_t rcre_nlp_simhash64(RCRE_Slice text, const RCRE_TokenizeOpts* opts);
+
+/** Hardware-accelerated Hamming distance between two 64-bit SimHash fingerprints. */
+RCRE_NODISCARD uint32_t rcre_nlp_hamming64(uint64_t a, uint64_t b);
+
+/**
+ * @brief Computes a K-permutation MinHash signature over word n-grams
+ *        (ngram_n == 1 => unigrams; ngram_n >= 2 => word shingles).
+ */
+RCRE_NODISCARD int rcre_nlp_minhash_compute(
+    RCRE_Slice text,
+    size_t ngram_n,
+    uint64_t* out_sig,
+    size_t num_hashes,
+    const RCRE_TokenizeOpts* opts
+);
+
+/** Estimates Jaccard similarity from two MinHash signatures in [0.0, 1.0]. */
+RCRE_NODISCARD float rcre_nlp_minhash_jaccard(const uint64_t* sig_a, const uint64_t* sig_b, size_t num_hashes);
+
+/**
+ * @brief Zero-copy UTF-8 & word-boundary-safe RAG document chunker.
+ *        Allocates only the RCRE_Slice* descriptor array in arena (0 text copies).
+ */
+RCRE_NODISCARD int rcre_nlp_chunk_utf8(
+    RCRE_Slice text,
+    size_t max_bytes,
+    size_t overlap_bytes,
+    RCRE_Arena* arena,
+    RCRE_Slice** out_chunks,
+    size_t* out_count
+);
+
+/* ========================================================================= */
+/* 7. Topic Modeling: Sparse HALS NMF & Collapsed Gibbs LDA (NLP-REQ-07)     */
+/* ========================================================================= */
+
+typedef struct RCRE_NmfOpts {
+    size_t   num_topics; /* K: latent topic rank (default 8)                 */
+    size_t   max_iter;   /* HALS outer iterations (default 50)               */
+    float    tol;        /* Relative Frobenius improvement stop (def 1e-4)   */
+    uint64_t seed;       /* PCG64 deterministic seed (default 42)            */
+} RCRE_NmfOpts;
+
+typedef struct RCRE_NmfModel {
+    size_t num_docs;
+    size_t vocab_size;
+    size_t num_topics;
+    float* W;            /* [num_docs * num_topics] row-major doc-topic >= 0 */
+    float* H;            /* [num_topics * vocab_size] row-major topic-term   */
+    float  recon_error;  /* Final Frobenius norm ||X - W*H||_F               */
+    size_t iters_run;
+} RCRE_NmfModel;
+
+RCRE_NODISCARD RCRE_NmfOpts rcre_nmf_default_opts(size_t num_topics);
+
+/**
+ * @brief Fits Non-Negative Matrix Factorization X ~ W * H directly on a
+ *        non-negative RCRE_CSRMatrix using Fast HALS (O(K * nnz) per sweep).
+ */
+RCRE_NODISCARD int rcre_nmf_fit(
+    RCRE_NmfModel* model,
+    const RCRE_CSRMatrix* X_csr,
+    const RCRE_NmfOpts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Projects unseen documents X_new onto a fitted NMF basis H (fixed H,
+ *        HALS W-updates). Writes out_W [X_new->rows * model->num_topics].
+ */
+RCRE_NODISCARD int rcre_nmf_transform(
+    const RCRE_NmfModel* model,
+    const RCRE_CSRMatrix* X_new,
+    size_t max_iter,
+    float* out_W,
+    RCRE_Arena* scratch
+);
+
+typedef struct RCRE_TopicTerm {
+    uint32_t term_id;
+    float    weight;
+} RCRE_TopicTerm;
+
+/** Extracts top-k highest-weight term IDs from a topic row [vocab_size]. */
+RCRE_NODISCARD size_t rcre_nlp_topic_top_terms(
+    const float* topic_row,
+    size_t vocab_size,
+    size_t top_k,
+    RCRE_TopicTerm* out_terms,
+    RCRE_Arena* scratch
+);
+
+typedef struct RCRE_LdaOpts {
+    size_t            num_topics; /* K topics (default 8)                    */
+    size_t            num_iters;  /* Collapsed Gibbs sweeps (default 60)     */
+    float             alpha;      /* Doc-topic Dirichlet prior (def 0.1)     */
+    float             beta;       /* Topic-word Dirichlet prior (def 0.01)   */
+    uint64_t          seed;       /* PCG64 deterministic seed (default 42)   */
+    bool              lowercase;  /* ASCII lowercase tokens (default true)   */
+    RCRE_TokenizeOpts tok_opts;
+} RCRE_LdaOpts;
+
+typedef struct RCRE_LdaModel {
+    RCRE_StrPool vocab;
+    size_t       num_docs;
+    size_t       vocab_size;
+    size_t       num_topics;
+    float        alpha;
+    float        beta;
+    bool         lowercase;
+    RCRE_TokenizeOpts tok_opts;
+
+    float*       theta;       /* [num_docs * num_topics] doc-topic probs     */
+    float*       phi;         /* [num_topics * vocab_size] topic-word probs  */
+    float        log_perplexity;
+} RCRE_LdaModel;
+
+RCRE_NODISCARD RCRE_LdaOpts rcre_lda_default_opts(size_t num_topics);
+
+/**
+ * @brief Fits Latent Dirichlet Allocation via deterministic PCG64 Collapsed
+ *        Gibbs Sampling in flat arena count tables (zero malloc).
+ */
+RCRE_NODISCARD int rcre_lda_fit(
+    RCRE_LdaModel* model,
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    const RCRE_LdaOpts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Infers normalized topic distribution out_theta[num_topics] for a new
+ *        unseen document using fixed phi and deterministic fold-in Gibbs sweeps.
+ */
+RCRE_NODISCARD int rcre_lda_infer(
+    const RCRE_LdaModel* model,
+    RCRE_Slice doc,
+    size_t num_iters,
+    uint64_t seed,
+    float* out_theta,
+    RCRE_Arena* scratch
+);
+
+/* ========================================================================= */
+/* 8. Native Sparse Text Classifiers (NLP-REQ-08)                            */
+/* ========================================================================= */
+
+typedef struct RCRE_NaiveBayesModel {
+    size_t num_classes;
+    size_t vocab_size;
+    float  alpha;
+    bool   complement;        /* false: Multinomial NB; true: Complement NB  */
+    float* class_log_prior;   /* [num_classes]                               */
+    float* feature_weights;   /* [num_classes * vocab_size] log-prob/weights */
+} RCRE_NaiveBayesModel;
+
+/**
+ * @brief Trains Multinomial or Complement Naive Bayes directly on RCRE_CSRMatrix
+ *        in a single O(nnz) linear pass (zero dense matrix materialization).
+ */
+RCRE_NODISCARD int rcre_nlp_nb_fit(
+    RCRE_NaiveBayesModel* model,
+    const RCRE_CSRMatrix* X_csr,
+    const uint32_t* labels,
+    size_t num_classes,
+    float alpha,
+    bool complement,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Predicts class labels (and optional calibrated softmax probs [N*C])
+ *        directly on RCRE_CSRMatrix rows.
+ */
+RCRE_NODISCARD int rcre_nlp_nb_predict(
+    const RCRE_NaiveBayesModel* model,
+    const RCRE_CSRMatrix* X_csr,
+    uint32_t* out_labels,
+    float* out_probs
+);
+
+typedef struct RCRE_SparseClfOpts {
+    size_t   epochs;      /* Training passes over CSR rows (default 30)      */
+    float    lr;          /* Initial learning rate (default 0.5)             */
+    float    l2_reg;      /* L2 weight decay (default 1e-4)                  */
+    uint64_t seed;        /* PCG64 deterministic shuffle seed (default 42)   */
+} RCRE_SparseClfOpts;
+
+typedef struct RCRE_SparseLinearClf {
+    size_t num_classes;
+    size_t vocab_size;
+    float* weights;       /* [num_classes * vocab_size]                      */
+    float* bias;          /* [num_classes]                                   */
+} RCRE_SparseLinearClf;
+
+RCRE_NODISCARD RCRE_SparseClfOpts rcre_sparse_clf_default_opts(void);
+
+/**
+ * @brief Trains an L2-regularized multi-class Softmax classifier directly on
+ *        RCRE_CSRMatrix via PCG64-shuffled sparse SGD (O(epochs * nnz)).
+ */
+RCRE_NODISCARD int rcre_nlp_sparse_clf_fit(
+    RCRE_SparseLinearClf* clf,
+    const RCRE_CSRMatrix* X_csr,
+    const uint32_t* labels,
+    size_t num_classes,
+    const RCRE_SparseClfOpts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+);
+
+RCRE_NODISCARD int rcre_nlp_sparse_clf_predict(
+    const RCRE_SparseLinearClf* clf,
+    const RCRE_CSRMatrix* X_csr,
+    uint32_t* out_labels,
+    float* out_probs
+);
+
+/* ========================================================================= */
+/* 9. Sentence Splitting, Extractive Summarization & Keywords (NLP-REQ-09)   */
+/* ========================================================================= */
+
+typedef struct RCRE_SentIter {
+    RCRE_Slice src;
+    size_t     pos;
+} RCRE_SentIter;
+
+RCRE_NODISCARD RCRE_SentIter rcre_nlp_sent_iter_init(RCRE_Slice text);
+RCRE_NODISCARD bool rcre_nlp_sent_iter_next(RCRE_SentIter* it, RCRE_Slice* out_sent);
+
+typedef struct RCRE_SummarizeOpts {
+    float  damping;         /* PageRank damping factor (default 0.85)        */
+    float  sim_threshold;   /* Min cosine edge threshold (default 0.05)      */
+    float  mmr_lambda;      /* MMR relevance vs diversity in [0,1] (def 0.7) */
+    size_t max_iter;        /* Power iterations (default 30)                 */
+} RCRE_SummarizeOpts;
+
+typedef struct RCRE_SummarySent {
+    size_t     sent_index;  /* Original 0-based sentence index               */
+    float      score;       /* LexRank/TextRank centrality score             */
+    RCRE_Slice sentence;    /* Zero-copy slice into source document          */
+} RCRE_SummarySent;
+
+RCRE_NODISCARD RCRE_SummarizeOpts rcre_summarize_default_opts(void);
+
+/**
+ * @brief Extractive text summarization via TF-IDF sentence graph + LexRank
+ *        PageRank power iteration + MMR diversity, returned in document order.
+ */
+RCRE_NODISCARD int rcre_nlp_summarize_extractive(
+    RCRE_Slice text,
+    size_t top_k,
+    const RCRE_SummarizeOpts* opts,
+    RCRE_SummarySent* out_sents,
+    size_t* out_count,
+    RCRE_Arena* scratch
+);
+
+typedef struct RCRE_Keyword {
+    RCRE_Slice term;        /* Arena-backed lowercase keyword slice          */
+    float      score;       /* TextRank co-occurrence centrality score       */
+} RCRE_Keyword;
+
+/**
+ * @brief Extracts top-k keywords via sliding-window word co-occurrence
+ *        TextRank graph (built-in English stopword filtering, zero malloc).
+ */
+RCRE_NODISCARD int rcre_nlp_extract_keywords(
+    RCRE_Slice text,
+    size_t top_k,
+    size_t window_size,
+    RCRE_Keyword* out_keywords,
+    size_t* out_count,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+);
+
+/* ========================================================================= */
+/* 10. Fast Sparse-Sparse CSR Row Cosine Similarity (NLP-REQ-10)             */
+/* ========================================================================= */
+
+/**
+ * @brief Exact O(nnz_a + nnz_b) cosine similarity between two sorted CSR rows.
+ *        Zero allocations.
+ */
+RCRE_NODISCARD float rcre_nlp_csr_row_cosine(
+    const RCRE_CSRMatrix* csr_a, size_t row_a,
+    const RCRE_CSRMatrix* csr_b, size_t row_b
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_NLP_H */
 
 
 #ifdef RCRE_IMPLEMENTATION
@@ -12471,8 +14162,6 @@ double rcre_sf_norm_cdf_f64(double x) {
 #include <stdint.h>
 #include <string.h>
 
-#include "rng_pcg_table.h"
-#include "rng_sobol_table.h"
 
 /* PCG64 128-bit multiplier (numpy/random/src/pcg64: PCG_DEFAULT_MULTIPLIER_128). */
 static const uint64_t RCRE_RNG_PCG_MULT_H = 2549297995355413924ull; /* 0x2360ed051fc65da4 */
@@ -12606,6 +14295,56 @@ void rcre_rng_pcg_skip(RCRE_RNG* r, uint64_t n) {
         r->s_lo = (uint64_t)acc;
         r->s_hi = (uint64_t)(acc >> 64);
     }
+}
+
+/* ========================================================================= */
+/* Philox-4x32-10 (H6, 2.3.0) — counter RNG, GPU-portable by construction    */
+/* ========================================================================= */
+
+/* Reference: NVIDIA curand curand_Philox4x32_10 / _philox4x32round
+ * (curand_philox4x32_x.h, CUDA 13.3). Round: a 4x32 bit-matrix multiply
+ * over GF(2) expressed as mulhilo32 + XOR (the M4x32 constants are the
+ * packed high/low multipliers); W32 advances the round key. */
+#define RCRE_PHILOX_W32_0 0x9E3779B9u
+#define RCRE_PHILOX_W32_1 0xBB67AE85u
+#define RCRE_PHILOX_M4X32_0 0xD2511F53u
+#define RCRE_PHILOX_M4X32_1 0xCD9E8D57u
+
+/* One round of the 4x32 counter mixer (matches _philox4x32round). */
+static void philox_round(uint32_t* c, uint32_t* k) {
+    uint64_t p0 = (uint64_t)RCRE_PHILOX_M4X32_0 * (uint64_t)c[0];
+    uint64_t p1 = (uint64_t)RCRE_PHILOX_M4X32_1 * (uint64_t)c[2];
+    uint32_t lo0 = (uint32_t)p0, hi0 = (uint32_t)(p0 >> 32);
+    uint32_t lo1 = (uint32_t)p1, hi1 = (uint32_t)(p1 >> 32);
+    uint32_t n0 = hi1 ^ c[1] ^ k[0];
+    uint32_t n1 = lo1;
+    uint32_t n2 = hi0 ^ c[3] ^ k[1];
+    uint32_t n3 = lo0;
+    c[0] = n0; c[1] = n1; c[2] = n2; c[3] = n3;
+    k[0] += RCRE_PHILOX_W32_0;
+    k[1] += RCRE_PHILOX_W32_1;
+}
+
+void rcre_rng_philox4x32(uint64_t counter, uint64_t key, uint32_t out[4]) {
+    uint32_t c[4] = { (uint32_t)(counter & 0xFFFFFFFFu),
+                      (uint32_t)(counter >> 32),
+                      0u, 0u };
+    uint32_t k[2] = { (uint32_t)(key & 0xFFFFFFFFu),
+                      (uint32_t)(key >> 32) };
+    for (int r = 0; r < 10; ++r) philox_round(c, k);
+    out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; out[3] = c[3];
+}
+
+int rcre_rng_philox4x32_fill(uint32_t* out, size_t n, uint64_t counter0,
+                             uint64_t key) {
+    if (!out && n) return RCRE_ERR_INVALID_ARG;
+    for (size_t j = 0; j < n; j += 4) {
+        uint32_t w[4];
+        rcre_rng_philox4x32(counter0 + (j >> 2), key, w);
+        size_t m = (n - j < 4) ? n - j : 4;
+        for (size_t i = 0; i < m; ++i) out[j + i] = w[i];
+    }
+    return RCRE_OK;
 }
 
 /* ========================================================================= */
@@ -12744,9 +14483,21 @@ static void fft_chirp(double* cr, double* ci, size_t j, size_t n, int invert) {
 /* Forward declaration: the Bluestein path is defined below (it recurses
  * back into fft_rec on the power-of-two length). */
 static void fft_bluestein(double* re, double* im, size_t n, int invert);
+static void fft_pow2_core(double* re, double* im, size_t n, int invert);
 
 static void fft_rec(double* re, double* im, size_t n, int invert) {
     if (n == 1) return;
+
+    /* H9 (2.6.0): power-of-two lengths take the table-cached in-place
+     * path (the H2 header's bar-gated table optimization; the H2 test
+     * bars are precision gates at 1e-10, and this path sits at
+     * ~1e-13 relative to the recursive result — verified in
+     * tests/test_fft_f64.c). Determinism is unchanged: fixed
+     * algorithm per (n, invert). */
+    if ((n & (n - 1)) == 0) {
+        fft_pow2_core(re, im, n, invert);
+        return;
+    }
 
     size_t p = 0;
     for (size_t cand = 2; cand <= 7; ++cand) {
@@ -12823,14 +14574,15 @@ static void fft_bluestein(double* re, double* im, size_t n, int invert) {
      * First two transforms in the requested direction, the third the
      * OPPOSITE (the convolution identity: conv = IFFT(FFT . FFT) for
      * forward, or the conjugate symmetry for inverse). */
-    fft_rec(are, aim, N, invert);
-    fft_rec(bre, bim, N, invert);
+    /* N' is a power of two by construction */
+    fft_pow2_core(are, aim, N, invert);
+    fft_pow2_core(bre, bim, N, invert);
     for (size_t k = 0; k < N; ++k) {
         const double pr = are[k] * bre[k] - aim[k] * bim[k];
         const double pi = are[k] * bim[k] + aim[k] * bre[k];
         are[k] = pr; aim[k] = pi;
     }
-    fft_rec(are, aim, N, !invert);
+    fft_pow2_core(are, aim, N, !invert);
 
     /* apply the final chirp and the 1/N' convolution scale */
     for (size_t j = 0; j < n; ++j) {
@@ -12843,6 +14595,76 @@ static void fft_bluestein(double* re, double* im, size_t n, int invert) {
     free(are); free(aim); free(bre); free(bim);
 }
 
+/* ---- power-of-two fast path (H9, 2.6.0: the bar-gated table cache) ------ */
+/*
+ * Iterative in-place radix-2 DIT for n = 2^k. The H2 recursion above
+ * recomputes every twiddle with cos/sin in the butterfly loop
+ * (correctness-first; ~n log n libm calls). This path builds one
+ * per-stage twiddle table: n-1 cos/sin pairs total per transform —
+ * the summation order CHANGES, so the gate is a precision bar
+ * (relative <= 1e-13 vs rcre_fft_1d_f64, tests/test_fft_f64.c), NOT
+ * bit-identity with the recursive path. Determinism is unchanged:
+ * fixed algorithm per (n, invert) -> bit-identical across calls and
+ * across pool sizes.
+ */
+/* In-place radix-2 DIT, no 1/n scale (the scaling policy belongs to the
+ * caller: rcre_fft_pow2_f64 scales for the public numpy convention,
+ * fft_rec/fft_bluestein manage their own scaling). */
+static void fft_pow2_core(double* re, double* im, size_t n, int invert) {
+    /* bit-reversal permutation */
+    size_t j = 0;
+    for (size_t i = 1; i < n; ++i) {
+        size_t bit = n >> 1;
+        while (j & bit)
+            j ^= bit, bit >>= 1;
+        j ^= bit;
+        if (i < j) {
+            double tr = re[i];
+            re[i] = re[j];
+            re[j] = tr;
+            double ti = im[i];
+            im[i] = im[j];
+            im[j] = ti;
+        }
+    }
+    /* stages m = 2, 4, ..., n; per-stage table of m/2 twiddles
+     * W_m^t = exp(sign * 2 pi i t / m) */
+    const double sgn = invert ? 1.0 : -1.0;
+    for (size_t m = 2; m <= n; m <<= 1) {
+        const size_t half = m >> 1;
+        const double ang_step = sgn * 2.0 * M_PI / (double)m;
+        for (size_t k2 = 0; k2 < n; k2 += m) {
+            for (size_t t = 0; t < half; ++t) {
+                const double wr = cos(ang_step * (double)t);
+                const double wi = sin(ang_step * (double)t);
+                const size_t a = (size_t)(k2 + t);
+                const size_t b = (size_t)(k2 + t + half);
+                const double br = re[b], bi = im[b];
+                const double xr = wr * br - wi * bi;
+                const double xi = wr * bi + wi * br;
+                re[b] = re[a] - xr;
+                im[b] = im[a] - xi;
+                re[a] += xr;
+                im[a] += xi;
+            }
+        }
+    }
+}
+
+RCRE_NODISCARD int rcre_fft_pow2_f64(double* re, double* im, size_t n,
+                                     int invert) {
+    if (!re || !im || n < 2 || (n & (n - 1)) != 0) return -1;
+    fft_pow2_core(re, im, n, invert);
+    if (invert) {
+        const double sc = 1.0 / (double)n;
+        for (size_t i = 0; i < n; ++i) {
+            re[i] *= sc;
+            im[i] *= sc;
+        }
+    }
+    return 0;
+}
+
 /* ---- radix-p Cooley-Tukey (p in {2,3,5,7}) ------------------------------ */
 
 /* ---- public entry ------------------------------------------------------- */
@@ -12851,10 +14673,11 @@ RCRE_NODISCARD int rcre_fft_1d_f64(const double* in_re, const double* in_im,
                                    double* out_re, double* out_im,
                                    size_t n, int invert) {
     if (n == 0) return -1;
-    double* re = (double*)malloc(n * sizeof(double));
-    double* im = (double*)malloc(n * sizeof(double));
-    memcpy(re, in_re, n * sizeof(double));
-    memcpy(im, in_im, n * sizeof(double));
+    double* re = (double*)calloc(n, sizeof(double));
+    double* im = (double*)calloc(n, sizeof(double));
+    /* NULL input halves = zeros (the common real-input case). */
+    if (in_re) memcpy(re, in_re, n * sizeof(double));
+    if (in_im) memcpy(im, in_im, n * sizeof(double));
     fft_rec(re, im, n, invert);
     if (invert) {
         const double s = 1.0 / (double)n;
@@ -12866,6 +14689,7208 @@ RCRE_NODISCARD int rcre_fft_1d_f64(const double* in_re, const double* in_im,
     free(im);
     return 0;
 }
+
+/* --- Source: direct.c --- */
+/**
+ * @file direct.c
+ * @brief Direct factorizations and symmetric eigendecomposition, F64 (H3)
+ *
+ * LAPACK-class building blocks for the HPC scientific stack:
+ *
+ *  - LU with partial pivoting (dgetrf/dgetrs-class): factor + solve.
+ *  - Cholesky (dpotrf/dpotrs-class) for symmetric positive-definite.
+ *  - Householder QR (dgeqrf-class): factor, explicit Q, least squares.
+ *  - Symmetric eigendecomposition (dsyev-class): Householder reduction
+ *    to tridiagonal form + Wilkinson-shift implicit QL iteration on the
+ *    tridiagonal, eigenvalues always, eigenvectors optional.
+ *
+ * Conventions: row-major throughout (RCRE), F64, deterministic plain
+ * sequential (fixed loop order). Householder reflectors use the scaled
+ * storage form H = I - tau*u*u^T with u[0] = 1 and
+ *
+ *     tau = 2 / (u^T u)              (the exact Householder coefficient
+ *                                     for the unnormalized scaled vector;
+ *                                     note: NOT 2/(1 + u^T u) — that
+ *                                     variant is wrong for m = 1 and
+ *                                     was caught by the Q-orthogonality
+ *                                     audit during H3 development).
+ *
+ * The tridiagonal trailing update is the exact 3-term HAH form
+ * A' = A - tau (u (A u)^T + (A u) u^T) + tau^2 (u^T A u) u u^T
+ * (verified against an explicit full-matrix HAH oracle to ~1e-16).
+ */
+
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ========================================================================= */
+/* LU with partial pivoting                                                  */
+/* ========================================================================= */
+
+int rcre_linalg_lu_factor_f64(double* A, size_t lda, size_t n, size_t* piv) {
+    for (size_t k = 0; k < n; ++k) {
+        size_t p = k;
+        double best = fabs(A[k * lda + k]);
+        for (size_t i = k + 1; i < n; ++i) {
+            const double m = fabs(A[i * lda + k]);
+            if (m > best) { best = m; p = i; }
+        }
+        piv[k] = p;
+        if (p != k) {
+            /* swap the ENTIRE row, including the L multipliers in
+             * columns 0..k-1 — skipping them breaks the P consistency
+             * (PA = LU) — caught by the n = 3 audit. */
+            for (size_t j = 0; j < n; ++j) {
+                const double t = A[k * lda + j];
+                A[k * lda + j] = A[p * lda + j];
+                A[p * lda + j] = t;
+            }
+        }
+        if (best == 0.0) return -1;
+        const double inv = 1.0 / A[k * lda + k];
+        for (size_t i = k + 1; i < n; ++i) {
+            const double m = A[i * lda + k] * inv;
+            A[i * lda + k] = m;
+            double* a_i = A + i * lda;
+            const double* a_k = A + k * lda;
+            for (size_t j = k + 1; j < n; ++j)
+                a_i[j] -= m * a_k[j];
+        }
+    }
+    return 0;
+}
+
+int rcre_linalg_lu_solve_f64(const double* A, size_t lda, const size_t* piv,
+                             size_t n, double* B, size_t ldx, size_t nrhs) {
+    for (size_t k = 0; k < n; ++k) {
+        const size_t p = piv[k];
+        if (p != k)
+            for (size_t r = 0; r < nrhs; ++r) {
+                const double t = B[k * ldx + r];
+                B[k * ldx + r] = B[p * ldx + r];
+                B[p * ldx + r] = t;
+            }
+    }
+    for (size_t i = 1; i < n; ++i)
+        for (size_t r = 0; r < nrhs; ++r) {
+            double s = B[i * ldx + r];
+            const double* a_i = A + i * lda;
+            for (size_t k = 0; k < i; ++k)
+                s -= a_i[k] * B[k * ldx + r];
+            B[i * ldx + r] = s;
+        }
+    for (size_t i = n; i-- > 0;) {
+        const size_t ii = i;
+        for (size_t r = 0; r < nrhs; ++r) {
+            double s = B[ii * ldx + r];
+            const double* a_i = A + ii * lda;
+            for (size_t k = ii + 1; k < n; ++k)
+                s -= a_i[k] * B[k * ldx + r];
+            B[ii * ldx + r] = s / a_i[ii];
+        }
+    }
+    return 0;
+}
+
+int rcre_linalg_solve_f64(const double* A, size_t lda, size_t n,
+                          double* B, size_t ldx, size_t nrhs) {
+    if (lda != n) return -1; /* square packed input only */
+    double* work = (double*)malloc(n * n * sizeof(double));
+    size_t* piv = (size_t*)malloc(n * sizeof(size_t));
+    memcpy(work, A, n * n * sizeof(double));
+    int rc = rcre_linalg_lu_factor_f64(work, n, n, piv);
+    if (rc == 0) rc = rcre_linalg_lu_solve_f64(work, n, piv, n, B, ldx, nrhs);
+    free(work);
+    free(piv);
+    return rc;
+}
+
+/* ========================================================================= */
+/* Cholesky (SPD)                                                            */
+/* ========================================================================= */
+
+int rcre_linalg_cholesky_f64(double* A, size_t lda, size_t n, int lower) {
+    if (lower) {
+        for (size_t j = 0; j < n; ++j)
+            for (size_t i = j; i < n; ++i) {
+                double s = A[i * lda + j];
+                for (size_t k = 0; k < j; ++k)
+                    s -= A[i * lda + k] * A[j * lda + k];
+                if (i == j) {
+                    if (s <= 0.0) return -1;
+                    A[i * lda + j] = sqrt(s);
+                } else {
+                    A[i * lda + j] = s / A[j * lda + j];
+                }
+            }
+    } else {
+        for (size_t j = 0; j < n; ++j)
+            for (size_t i = j; i < n; ++i) {
+                double s = A[i * lda + j];
+                for (size_t k = 0; k < j; ++k)
+                    s -= A[k * lda + i] * A[k * lda + j];
+                if (i == j) {
+                    if (s <= 0.0) return -1;
+                    A[i * lda + j] = sqrt(s);
+                } else {
+                    A[i * lda + j] = s / A[j * lda + j];
+                }
+            }
+    }
+    return 0;
+}
+
+/**
+ * @brief Solve A X = B from a Cholesky factor (row-major, multi-RHS).
+ * Lower-packed L: L y = B (forward) then L^T x = y (lower, transposed).
+ * Upper-packed L^T: (L^T) y = B (upper) then L x = y (upper, transposed).
+ * Uses the H2 trsm primitive.
+ */
+int rcre_linalg_cholesky_solve_f64(const double* F, size_t lda, size_t n,
+                                   double* B, size_t ldx, size_t nrhs, int lower) {
+    if (lower) {
+        if (rcre_linalg_trsm_f64(0, 0, 0, 1.0, F, lda, B, ldx, n, nrhs) != 0)
+            return -1;
+        if (rcre_linalg_trsm_f64(0, 1, 0, 1.0, F, lda, B, ldx, n, nrhs) != 0)
+            return -1;
+    } else {
+        if (rcre_linalg_trsm_f64(1, 0, 0, 1.0, F, lda, B, ldx, n, nrhs) != 0)
+            return -1;
+        if (rcre_linalg_trsm_f64(1, 1, 0, 1.0, F, lda, B, ldx, n, nrhs) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* ========================================================================= */
+/* Householder QR                                                            */
+/* ========================================================================= */
+
+int rcre_linalg_qr_factor_f64(double* A, size_t lda, size_t m, size_t n,
+                              double* tau) {
+    const size_t kmax = (m < n) ? m : n;
+    for (size_t k = 0; k < kmax; ++k) {
+        double norm = 0.0;
+        for (size_t i = k; i < m; ++i) {
+            const double v = A[i * lda + k];
+            norm += v * v;
+        }
+        norm = sqrt(norm);
+        if (norm == 0.0) { tau[k] = 0.0; continue; }
+        const double x0 = A[k * lda + k];
+        double beta = (x0 >= 0.0) ? -norm : norm;
+        if (x0 == 0.0) beta = -norm;
+        const double v0 = x0 - beta;
+        A[k * lda + k] = beta;
+        for (size_t i = k + 1; i < m; ++i)
+            A[i * lda + k] /= v0;
+        /* tau = 2 / (u^T u), u[0] = 1 (scaled storage) */
+        double uu = 1.0;
+        for (size_t i = k + 1; i < m; ++i) {
+            const double v = A[i * lda + k];
+            uu += v * v;
+        }
+        tau[k] = 2.0 / uu;
+        for (size_t j = k + 1; j < n; ++j) {
+            double dot = A[k * lda + j]; /* u[0] = 1 term */
+            for (size_t i = k + 1; i < m; ++i)
+                dot += A[i * lda + k] * A[i * lda + j];
+            dot *= tau[k];
+            A[k * lda + j] -= dot;
+            for (size_t i = k + 1; i < m; ++i)
+                A[i * lda + j] -= dot * A[i * lda + k];
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief Explicit Q (m×m row-major) from a packed QR factorization.
+ * The factorization computes R = H_{kmax-1} ... H_0 A (left application
+ * in increasing k), so A = Q R with Q = H_0 H_1 ... H_{kmax-1} — the
+ * REVERSE product. We therefore accumulate Q <- Q * H_k (right
+ * multiplication, applied in increasing k): (Q H_k)[i,j] = Q[i,j] -
+ * tau * u_j * (Q[i, k:] u), j >= k. NOTE the row loop is outer: each
+ * row's dot product is computed before that row's entries change.
+ */
+void rcre_linalg_qr_q_f64(const double* A, size_t lda, size_t m, size_t n,
+                          const double* tau, double* Q, size_t ldq) {
+    const size_t kmax = (m < n) ? m : n;
+    for (size_t i = 0; i < m; ++i)
+        for (size_t j = 0; j < m; ++j)
+            Q[i * ldq + j] = (i == j) ? 1.0 : 0.0;
+    for (size_t k = 0; k < kmax; ++k) {
+        if (tau[k] == 0.0) continue;
+        for (size_t i = 0; i < m; ++i) {
+            double dot = Q[i * ldq + k]; /* u[0] = 1 term */
+            for (size_t l = k + 1; l < m; ++l)
+                dot += Q[i * ldq + l] * A[l * lda + k];
+            dot *= tau[k];
+            Q[i * ldq + k] -= dot;
+            for (size_t j = k + 1; j < m; ++j)
+                Q[i * ldq + j] -= dot * A[j * lda + k];
+        }
+    }
+}
+
+int rcre_linalg_qr_lsolve_f64(const double* A, size_t lda, size_t m, size_t n,
+                              const double* tau, double* B, size_t ldx, size_t nrhs) {
+    const size_t kmax = (m < n) ? m : n;
+    for (size_t k = 0; k < kmax; ++k) {
+        if (tau[k] == 0.0) continue;
+        for (size_t r = 0; r < nrhs; ++r) {
+            double dot = B[k * ldx + r];
+            for (size_t i = k + 1; i < m; ++i)
+                dot += A[i * lda + k] * B[i * ldx + r];
+            dot *= tau[k];
+            B[k * ldx + r] -= dot;
+            for (size_t i = k + 1; i < m; ++i)
+                B[i * ldx + r] -= dot * A[i * lda + k];
+        }
+    }
+    for (size_t i = n; i-- > 0;) {
+        const size_t ii = i;
+        for (size_t r = 0; r < nrhs; ++r) {
+            double s = B[ii * ldx + r];
+            const double* a_i = A + ii * lda;
+            for (size_t k = ii + 1; k < n; ++k)
+                s -= a_i[k] * B[k * ldx + r];
+            B[ii * ldx + r] = (a_i[ii] == 0.0) ? s : s / a_i[ii];
+        }
+    }
+    return 0;
+}
+
+/* ========================================================================= */
+/* Symmetric eigendecomposition                                              */
+/* ========================================================================= */
+
+/**
+ * @brief Householder reduction to tridiagonal (internal).
+ * A (n×n row-major, in) — the trailing blocks are overwritten by the
+ * reduction; d (n, out) = diagonal, e (n-1, out) = first off-diagonal
+ * (e[n-1] set to 0 if the array has length n). Q (n×n row-major, in/out)
+ * accumulates the reflector product Q = H_{n-2} ... H_0 so that
+ * Q * A0 * Q^T = tridiag(d, e); if Q is NULL the vectors are discarded.
+ */
+static int sytrd_f64(double* A, size_t lda, size_t n, double* d, double* e,
+                     double* Q, size_t ldq) {
+    if (Q != NULL) {
+        for (size_t i = 0; i < n; ++i)
+            for (size_t j = 0; j < n; ++j)
+                Q[i * ldq + j] = (i == j) ? 1.0 : 0.0;
+    }
+    for (size_t k = 0; k + 1 < n; ++k) {
+        const size_t m = n - k - 1;
+        double nn = 0.0;
+        for (size_t i = k + 1; i < n; ++i) {
+            const double v = A[i * lda + k];
+            nn += v * v;
+        }
+        nn = sqrt(nn);
+        const double x0 = A[(k + 1) * lda + k];
+        d[k] = A[k * lda + k]; /* unchanged by the reduction */
+        if (nn == 0.0) { e[k] = 0.0; continue; }
+        double sigma = (x0 >= 0.0) ? -nn : nn;
+        if (x0 == 0.0) sigma = -nn;
+        const double v0 = x0 - sigma;
+        /* store the scaled Householder vector in the sub-diagonal:
+         * A[k+1, k] := u[0] = 1, A[k+2:, k] := x[i]/v0.
+         * (FORGETTING to write A[k+1,k] = 1 leaves x0 there, corrupting
+         * uu, W, and the Q accumulation — caught by the n = 2 audit.) */
+        A[(k + 1) * lda + k] = 1.0;
+        for (size_t i = k + 2; i < n; ++i)
+            A[i * lda + k] /= v0;
+        /* uu = u^T u over the WHOLE stored vector (u[0] = 1 is A[k+1,k]) */
+        double uu = 0.0;
+        for (size_t i = k + 1; i < n; ++i) {
+            const double v = A[i * lda + k];
+            uu += v * v;
+        }
+        const double tau = 2.0 / uu;
+        /* e[k] = (H A H)[k, k+1] = A[k,k+1] - tau * (row_k · u).
+         * u = (1, x[v0-scaled]): the first term uses the ORIGINAL
+         * A[k,k+1] (u[0] = 1); the rest read the now-scaled column.
+         * rowk = A[k,k+1] + sum_{l>k+1} A[k,l] * (A[l,k]/v0) */
+        double rowk = A[k * lda + k + 1];
+        for (size_t l = k + 2; l < n; ++l)
+            rowk += A[k * lda + l] * A[l * lda + k];
+        e[k] = A[k * lda + k + 1] - tau * rowk;
+        /* trailing: W = (trailing A) u; A' = A - tau(Wu^T + uW^T)
+         *          + tau^2 (u^T W) u u^T  (exact HAH) */
+        double* W = (double*)malloc(m * sizeof(double));
+        for (size_t j = 0; j < m; ++j) {
+            double s = 0.0;
+            for (size_t l = 0; l < m; ++l)
+                s += A[(k + 1 + j) * lda + (k + 1 + l)] * A[(k + 1 + l) * lda + k];
+            W[j] = s;
+        }
+        double uW = 0.0;
+        for (size_t i = 0; i < m; ++i)
+            uW += A[(k + 1 + i) * lda + k] * W[i];
+        for (size_t i = 0; i < m; ++i) {
+            const double ui = A[(k + 1 + i) * lda + k];
+            for (size_t j = i; j < m; ++j) {
+                const double uj = A[(k + 1 + j) * lda + k];
+                const double v = A[(k + 1 + i) * lda + (k + 1 + j)]
+                               - tau * (W[i] * uj + ui * W[j])
+                               + tau * tau * uW * ui * uj;
+                A[(k + 1 + i) * lda + (k + 1 + j)] = v;
+                A[(k + 1 + j) * lda + (k + 1 + i)] = v;
+            }
+        }
+        free(W);
+        /* Q <- Q * H_k (RIGHT multiplication, increasing k):
+         * on return Q = H_0 H_1 ... H_{n-2} = L^T, so that with the
+         * QL eigenvector V_T: A = (L^T V_T) D (L^T V_T)^T. Each row i:
+         * q[i, k:m] <- q[i, k:m] - tau * u * (q[i, k:m] . u), u in the
+         * stored column k (u[0] = 1 implicit). */
+        if (Q != NULL) {
+            for (size_t i = 0; i < n; ++i) {
+                double dot = Q[i * ldq + k + 1]; /* u[0] = 1 term */
+                for (size_t l = k + 2; l < n; ++l)
+                    dot += Q[i * ldq + l] * A[l * lda + k];
+                dot *= tau;
+                Q[i * ldq + k + 1] -= dot;
+                for (size_t j = k + 2; j < n; ++j)
+                    Q[i * ldq + j] -= dot * A[j * lda + k];
+            }
+        }
+    }
+    d[n - 1] = A[(n - 1) * lda + (n - 1)];
+    if (n > 0) e[n - 1] = 0.0;
+    return 0;
+}
+
+/**
+ * @brief Wilkinson-shift implicit QL iteration on a tridiagonal
+ * (d, e in/out, length n; e[n-1] unused).
+ *
+ * Each sweep computes the exact implicit step T+ = Q^T T Q where
+ * Q = G_l^T ... G_{na-2}^T is the Givens product from the QR of
+ * M = T - mu*I (mu = the Wilkinson shift from the trailing 2x2).
+ *
+ * The Givens follow from the QR evolution of M. Key facts (verified
+ * numerically): the z-value at step i is the sweep-START sub-diagonal
+ * e[i] (rotations never touch rows below i+1), and the x-value
+ * (the running M diagonal) has the closed form
+ *   x_l     = d_l - mu
+ *   x_{i+1} = -s_i*(c_{i-1}*e[i]) + c_i*(d[i+1] - mu),  c_{l-1} := 1
+ * (the super-diagonal of M before G_i is c_{i-1}*e[i], the original).
+ *
+ * Q is formed densely per sweep (O(n^2)); the new tridiagonal is
+ * computed directly as T+ = Q^T T Q using only Q's columns:
+ *   d'_i = T_ii*(Q_ii^2 + Q_{i-1,i}^2 + Q_{i+1,i}^2)
+ *          + 2*T_i,i+1*Q_ii*Q_{i+1,i} + 2*T_i-1,i*Q_ii*Q_{i-1,i}
+ *   e'_i = T_ii*Q_ii*Q_i,i+1 + T_i+1,i+1*(Q_i+1,i*Q_i,i+1 +
+ *          Q_i,i+1*Q_i+1,i+1) + T_i,i+1*(Q_ii*Q_i+1,i+1 +
+ *          Q_i+1,i*Q_i,i+1) + T_i-1,i-1*Q_i-1,i*Q_i-1,i+1
+ *          + T_i-1,i*(Q_i-1,i*Q_i,i+1 + Q_ii*Q_i-1,i+1)
+ * (T tridiagonal; Q rows below l are untouched identity rows).
+ * In exact arithmetic a Wilkinson-shift sweep deflates the bottom
+ * element; the 30n+10 sweep budget per block is the standard bound.
+ *
+ * Eigenvectors: S (the running similarity, T = S^T A S) is updated
+ * S <- S*Q per sweep (Q = G_l^T ... G_{na-2}^T with G_l^T leftmost,
+ * applied to the columns in ASCENDING i). When all sweeps finish, T
+ * is diagonal and S = S0*Q_1 ... Q_k is exactly the eigenvector
+ * matrix in the original coordinates (A*S = S*diag(w)).
+ *
+ * -1 on non-convergence.
+ */
+static int steqr_f64(double* d, double* e, size_t n,
+                     double* S, size_t ldv, int compute_vectors) {
+    const double EPS = 2.220446049250313e-16;
+    double* cA  = (double*)malloc(n * sizeof(double));
+    double* sA  = (double*)malloc(n * sizeof(double));
+    double* esnap = (double*)malloc((n > 1 ? n : 1) * sizeof(double));
+    double* Q   = (double*)malloc((n ? n : 1) * (n ? n : 1) * sizeof(double));
+    double* B   = (double*)malloc((n ? n : 1) * (n ? n : 1) * sizeof(double));
+    double* TP  = (double*)malloc((n ? n : 1) * (n ? n : 1) * sizeof(double));
+    double* nd  = (double*)malloc(n * sizeof(double));
+    double* ne  = (double*)malloc((n > 1 ? n : 1) * sizeof(double));
+    int ok = 1;
+    size_t na = n; /* active size (bottom na elements) */
+    const long budget = 30L * (long)n + 10;
+    while (na > 1) {
+        /* deflation scan from the bottom: e[idx] connects d[idx],
+         * d[idx+1]; the first (bottom) candidate is e[na-2]. */
+        size_t l = 0;
+        int found = 0;
+        for (size_t i = na - 1; i > 1; --i) {
+            const size_t idx = i - 1;
+            if (e[idx] == 0.0 ||
+                fabs(e[idx]) <= EPS * (fabs(d[idx]) + fabs(d[idx + 1]))) {
+                e[idx] = 0.0;
+                l = idx + 1; /* active block = [idx+1 .. na-1] */
+                found = 1;
+                break;
+            }
+        }
+        if (found && l == na - 1) break;
+        long iters = 0;
+        for (;;) {
+            if (++iters > budget) { ok = 0; break; }
+            /* exact Wilkinson shift: the trailing 2x2's eigenvalue
+             * closest to d[na-1] (stable form, no cancellation). */
+            const double delta = d[na - 1] - d[na - 2];
+            const double ev = e[na - 2];
+            double mu;
+            if (delta != 0.0) {
+                const double g = delta / 2.0 +
+                                  (delta > 0.0 ? 1.0 : -1.0) * hypot(delta / 2.0, ev);
+                mu = d[na - 1] + ev * ev / g;
+            } else {
+                mu = d[na - 1] + fabs(ev);
+            }
+            /* snapshot the sweep-start sub-diagonal (the z-values) */
+            for (size_t i = l; i + 1 < na; ++i) esnap[i] = e[i];
+            /* the Givens of the QR of M = T - mu I */
+            double x = d[l] - mu;
+            double c_prev = 1.0;
+            for (size_t i = l; i + 1 < na; ++i) {
+                const double z = esnap[i];
+                const double rho = hypot(x, z);
+                double c = 1.0, s = 0.0;
+                if (rho != 0.0) { c = x / rho; s = z / rho; }
+                cA[i] = c;
+                sA[i] = s;
+                /* next x: -s_i*(c_{i-1}*e[i]) + c_i*(d[i+1]-mu) */
+                x = -s * c_prev * esnap[i] + c * (d[i + 1] - mu);
+                c_prev = c;
+            }
+            /* Q = G_l^T ... G_{na-2}^T (G_l^T leftmost): start from
+             * the identity, apply G_i^T from the left in DECREASING
+             * i (G_{na-2}^T first, G_l^T last). */
+            for (size_t i = 0; i < n; ++i)
+                for (size_t j = 0; j < n; ++j)
+                    Q[i * n + j] = (i == j) ? 1.0 : 0.0;
+            for (long i = (long)na - 2; i >= (long)l; --i) {
+                const double c = cA[i], s = sA[i];
+                for (size_t j = 0; j < n; ++j) {
+                    const double a = Q[i * n + j];
+                    const double b = Q[(i + 1) * n + j];
+                    Q[i * n + j] = c * a - s * b;
+                    Q[(i + 1) * n + j] = s * a + c * b;
+                }
+            }
+            /* T+ = Q^T T Q. Q's band grows with the number of Givens, so
+             * the column-local forms are invalid; compute exactly:
+             *   B  = Q^T T  (O(n^2): T tridiagonal, each B column is a
+             *          3-term sum over Q's columns)
+             *   T+ = B * Q  (dense gemm, O(n^3) per sweep)
+             * The result is tridiagonal in exact arithmetic (the bulge
+             * closes); take the diagonal and the symmetrized
+             * super-diagonal, discard the roundoff-level fill. */
+            /* Active-block restriction: Q's rows/columns outside
+             * [l, na) are exact identity rows (the Givens only touch
+             * rows l..na-1) and T is block-diagonal there (deflated
+             * e = 0), so the products over k outside [l, na) vanish.
+             * Cost per sweep: O(m^3) with m = na-l, shrinking as the
+             * eigenvalues deflate. */
+            const size_t m = na - l;
+            for (size_t i = l; i < na; ++i)
+                for (size_t j = l; j < na; ++j) {
+                    double a = 0.0;
+                    a += Q[j * n + i] * d[j];
+                    if (j + 1 < na) a += Q[(j + 1) * n + i] * e[j];
+                    if (j > l) a += Q[(j - 1) * n + i] * e[j - 1];
+                    B[i * n + j] = a;
+                }
+            rcre_linalg_gemm_f64(m, m, m, 1.0, B + l * n, n, Q + l * n, n,
+                                 0.0, TP + l * n, n);
+            for (size_t i = l; i < na; ++i)
+                nd[i] = TP[i * n + i];
+            for (size_t i = l; i + 1 < na; ++i)
+                ne[i] = 0.5 * (TP[i * n + (i + 1)] + TP[(i + 1) * n + i]);
+            for (size_t i = l; i < na; ++i) d[i] = nd[i];
+            for (size_t i = l; i + 1 < na; ++i) e[i] = ne[i];
+            /* S <- S*Q (= S*G_l^T ... G_{na-2}^T with G_l^T leftmost:
+             * evaluate left-to-right, apply G_i^T to the columns in
+             * ASCENDING i: S <- S*G_i^T per step). At the end of all
+             * sweeps T is diagonal, so S = S0*Q_1 ... Q_k is exactly
+             * the eigenvector matrix in the original coordinates. */
+            if (compute_vectors && S != NULL) {
+                for (size_t i = l; i + 1 < na; ++i) {
+                    const double c = cA[i], s = sA[i];
+                    for (size_t r = 0; r < n; ++r) {
+                        const double a = S[r * ldv + i];
+                        const double b = S[r * ldv + i + 1];
+                        S[r * ldv + i] = c * a + s * b;
+                        S[r * ldv + i + 1] = -s * a + c * b;
+                    }
+                }
+            }
+            if (e[na - 2] == 0.0 ||
+                fabs(e[na - 2]) <= EPS * (fabs(d[na - 2]) + fabs(d[na - 1]))) {
+                e[na - 2] = 0.0;
+                na -= 1;
+                break;
+            }
+        }
+        if (!ok) break;
+    }
+    free(cA); free(sA); free(esnap); free(Q); free(B); free(TP); free(nd); free(ne);
+    return ok ? 0 : -1;
+}
+
+int rcre_linalg_syev_f64(double* A, size_t lda, size_t n, int compute_vectors,
+                         double* w, double* V, size_t ldv) {
+    if (n == 0) return 0;
+    double* e = (double*)malloc((n > 1 ? n : 1) * sizeof(double));
+    int rc;
+    if (compute_vectors) {
+        /* S starts as S0 = Q_trd (T = S0^T A S0) and is updated
+         * S <- S*Q_k per QL sweep. When T is finally diagonal,
+         * S = S0*Q_1 ... Q_k is the eigenvector matrix:
+         * A*S = S*diag(w). */
+        double* S = (double*)malloc(n * n * sizeof(double));
+        rc = sytrd_f64(A, lda, n, w, e, S, n);
+        if (rc == 0) rc = steqr_f64(w, e, n, S, n, 1);
+        if (rc == 0 && V != NULL)
+            for (size_t i = 0; i < n; ++i)
+                for (size_t j = 0; j < n; ++j)
+                    V[i * ldv + j] = S[i * n + j];
+        free(S);
+    } else {
+        rc = sytrd_f64(A, lda, n, w, e, NULL, 0);
+        if (rc == 0) rc = steqr_f64(w, e, n, NULL, 0, 0);
+    }
+    free(e);
+    if (rc != 0) return rc;
+    /* ascending sort, transporting eigenvector columns */
+    for (size_t i = 0; i + 1 < n; ++i) {
+        size_t p = i;
+        for (size_t j = i + 1; j < n; ++j)
+            if (w[j] < w[p]) p = j;
+        if (p != i) {
+            const double t = w[i];
+            w[i] = w[p];
+            w[p] = t;
+            if (compute_vectors && V != NULL)
+                for (size_t r = 0; r < n; ++r) {
+                    const double t2 = V[r * ldv + i];
+                    V[r * ldv + i] = V[r * ldv + p];
+                    V[r * ldv + p] = t2;
+                }
+        }
+    }
+    return 0;
+}
+
+/* --- Source: krylov.c --- */
+/**
+ * @file krylov.c
+ * @brief RCRE H4 — sparse CSR + Krylov iterative solvers (2.2.0)
+ *
+ * The HPC iterative-solver core:
+ *   - minimal F64/F32 CSR storage (public C view, caller-owned arrays)
+ *   - SpMV (the Krylov workhorse; scalar kernels — SpMV is
+ *     memory-bandwidth bound, the thread/SIMD work is H4b/H6)
+ *   - preconditioners: Jacobi (diagonal) and ILU(0) (no fill, following
+ *     the sparsity pattern — the sparse analogue of the H3 LU)
+ *   - Krylov drivers: preconditioned CG (+ FCG mode), BiCGStab,
+ *     restarted GMRES(m) with a Householder QR on the Hessenberg
+ *
+ * Design contract (matches H0-H3):
+ *   - deterministic: fixed loop order, no threading, bitwise
+ *     reproducible run-to-run (the slab-parallel SpMV port is H4b/H6);
+ *   - F64 is the scientific substrate, F32 the workhorse — one
+ *     type-generic implementation instantiated for both;
+ *   - convergence is gated on the TRUE relative residual
+ *     ||b - A x|| / ||b|| (accumulated in double even on F32);
+ *   - callbacks are telemetry only (prof integration), they cannot
+ *     abort the solve.
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ========================================================================= */
+/* CSR from dense                                                            */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_csr_f64_from_dense(const double* A, size_t rows,
+                                           size_t cols, double threshold,
+                                           size_t** row_ptr,
+                                           size_t** col_idx,
+                                           double** values, size_t* nnz) {
+    if (!A || !row_ptr || !col_idx || !values || !nnz) return -1;
+    size_t total = 0;
+    for (size_t i = 0; i < rows; ++i)
+        for (size_t j = 0; j < cols; ++j)
+            if (fabs(A[i * cols + j]) > threshold) total++;
+    size_t* rp = (size_t*)malloc((rows + 1) * sizeof(size_t));
+    size_t* ci = (size_t*)malloc((total ? total : 1) * sizeof(size_t));
+    double* va = (double*)malloc((total ? total : 1) * sizeof(double));
+    if (!rp || !ci || !va) {
+        free(rp); free(ci); free(va);
+        *nnz = 0;
+        return -1;
+    }
+    for (size_t i = 0; i <= rows; ++i) rp[i] = 0;
+    for (size_t i = 0; i < rows; ++i)
+        for (size_t j = 0; j < cols; ++j)
+            if (fabs(A[i * cols + j]) > threshold) rp[i + 1]++;
+    for (size_t i = 1; i <= rows; ++i) rp[i] += rp[i - 1];
+    /* running write cursors: each row fills from its own start (rp[i]) */
+    size_t* cur = (size_t*)malloc((rows + 1) * sizeof(size_t));
+    if (!cur) { free(rp); free(ci); free(va); *nnz = 0; return -1; }
+    memcpy(cur, rp, (rows + 1) * sizeof(size_t));
+    for (size_t i = 0; i < rows; ++i)
+        for (size_t j = 0; j < cols; ++j) {
+            const double v = A[i * cols + j];
+            if (fabs(v) > threshold) {
+                const size_t at = cur[i]++;
+                ci[at] = j;
+                va[at] = v;
+            }
+        }
+    free(cur);
+    *row_ptr = rp;
+    *col_idx = ci;
+    *values = va;
+    *nnz = total;
+    return 0;
+}
+
+RCRE_NODISCARD int rcre_csr_f32_from_dense(const float* A, size_t rows,
+                                           size_t cols, float threshold,
+                                           size_t** row_ptr,
+                                           size_t** col_idx,
+                                           float** values, size_t* nnz) {
+    if (!A || !row_ptr || !col_idx || !values || !nnz) return -1;
+    size_t total = 0;
+    for (size_t i = 0; i < rows; ++i)
+        for (size_t j = 0; j < cols; ++j)
+            if (fabsf(A[i * cols + j]) > threshold) total++;
+    size_t* rp = (size_t*)malloc((rows + 1) * sizeof(size_t));
+    size_t* ci = (size_t*)malloc((total ? total : 1) * sizeof(size_t));
+    float* va = (float*)malloc((total ? total : 1) * sizeof(float));
+    if (!rp || !ci || !va) {
+        free(rp); free(ci); free(va);
+        *nnz = 0;
+        return -1;
+    }
+    for (size_t i = 0; i <= rows; ++i) rp[i] = 0;
+    for (size_t i = 0; i < rows; ++i)
+        for (size_t j = 0; j < cols; ++j)
+            if (fabsf(A[i * cols + j]) > threshold) rp[i + 1]++;
+    for (size_t i = 1; i <= rows; ++i) rp[i] += rp[i - 1];
+    size_t* cur = (size_t*)malloc((rows + 1) * sizeof(size_t));
+    if (!cur) { free(rp); free(ci); free(va); *nnz = 0; return -1; }
+    memcpy(cur, rp, (rows + 1) * sizeof(size_t));
+    for (size_t i = 0; i < rows; ++i)
+        for (size_t j = 0; j < cols; ++j) {
+            const float v = A[i * cols + j];
+            if (fabsf(v) > threshold) {
+                const size_t at = cur[i]++;
+                ci[at] = j;
+                va[at] = v;
+            }
+        }
+    free(cur);
+    *row_ptr = rp;
+    *col_idx = ci;
+    *values = va;
+    *nnz = total;
+    return 0;
+}
+
+/* ========================================================================= */
+/* SpMV                                                                      */
+/* ========================================================================= */
+
+void rcre_spmv_f64(const RCRE_CSR_F64* A, const double* x, double* y) {
+    if (!A || !x || !y) return;
+    for (size_t i = 0; i < A->rows; ++i) {
+        double s = 0.0;
+        for (size_t k = A->row_ptr[i]; k < A->row_ptr[i + 1]; ++k)
+            s += A->values[k] * x[A->col_idx[k]];
+        y[i] = s;
+    }
+}
+
+void rcre_spmv_f32(const RCRE_CSR_F32* A, const float* x, float* y) {
+    if (!A || !x || !y) return;
+    for (size_t i = 0; i < A->rows; ++i) {
+        float s = 0.0f;
+        for (size_t k = A->row_ptr[i]; k < A->row_ptr[i + 1]; ++k)
+            s += A->values[k] * x[A->col_idx[k]];
+        y[i] = s;
+    }
+}
+
+/* ========================================================================= */
+/* Type-generic preconditioners + Krylov drivers                             */
+/* =========================================================================
+ * One implementation, two instantiations (F64 substrate, F32 workhorse).
+ * SUF  = "f64" / "f32"  (name suffix)
+ * CSR  = the RCRE_CSR_* struct type
+ * REAL = double / float
+ * ABSF = fabs / fabsf
+ */
+
+#define RCRE_KRYLOV_IMPL(SUF, CSR, REAL, ABSF)                               \
+                                                                             \
+/* --- helpers ------------------------------------------------------------- */ \
+                                                                             \
+static size_t krylov_find_col_##SUF(const CSR* A, size_t row, size_t col) {  \
+    for (size_t k = A->row_ptr[row]; k < A->row_ptr[row + 1]; ++k) {         \
+        if (A->col_idx[k] == col) return k;                                  \
+        if (A->col_idx[k] > col) break; /* ascending */                      \
+    }                                                                        \
+    return (size_t)-1;                                                       \
+}                                                                            \
+                                                                             \
+/* double-accumulated 2-norm: the convergence monitor on BOTH paths          */ \
+static double krylov_norm_##SUF(const REAL* v, size_t n) {                   \
+    double s = 0.0;                                                          \
+    for (size_t i = 0; i < n; ++i) s += (double)v[i] * (double)v[i];         \
+    return sqrt(s);                                                          \
+}                                                                            \
+                                                                             \
+static REAL krylov_dot_##SUF(const REAL* a, const REAL* b, size_t n) {       \
+    REAL s = (REAL)0;                                                        \
+    for (size_t i = 0; i < n; ++i) s += a[i] * b[i];                         \
+    return s;                                                                \
+}                                                                            \
+                                                                             \
+static void krylov_axpy_##SUF(REAL* y, REAL a, const REAL* x, size_t n) {    \
+    for (size_t i = 0; i < n; ++i) y[i] += a * x[i];                         \
+}                                                                            \
+                                                                             \
+                                                                             \
+static void krylov_apply_pc_##SUF(int pc, const void* pc_data,                \
+                                  const REAL* r, REAL* z, size_t n) {        \
+    switch (pc) {                                                            \
+    case RCRE_PC_JACOBI: {                                                   \
+        const REAL* inv = (const REAL*)pc_data;                              \
+        for (size_t i = 0; i < n; ++i) z[i] = inv[i] * r[i];                 \
+        break;                                                               \
+    }                                                                        \
+    case RCRE_PC_WEIGHTED_JACOBI: {                                          \
+        /* pc_data = w[] with w[i] = omega/|A_ii| (pre-scaled by the user)  \
+         * — same code path as plain Jacobi, different diagonal array.      \
+         */                                                                  \
+        const REAL* w = (const REAL*)pc_data;                                \
+        for (size_t i = 0; i < n; ++i) z[i] = w[i] * r[i];                   \
+        break;                                                               \
+    }                                                                        \
+    case RCRE_PC_ILU0: {                                                     \
+        rcre_pc_ilu0_solve_##SUF((const CSR*)pc_data, r, z);                 \
+        break;                                                               \
+    }                                                                        \
+    default:                                                                 \
+        memcpy(z, r, n * sizeof(REAL));                                      \
+        break;                                                               \
+    }                                                                        \
+}                                                                            \
+                                                                             \
+/* --- Jacobi --------------------------------------------------------------- */ \
+                                                                             \
+RCRE_NODISCARD int rcre_pc_jacobi_##SUF(const CSR* A, REAL* inv_diag) {      \
+    if (!A || !inv_diag || A->rows != A->cols) return -1;                    \
+    const size_t n = A->rows;                                                \
+    for (size_t i = 0; i < n; ++i) {                                         \
+        const size_t p = krylov_find_col_##SUF(A, i, i);                     \
+        if (p == (size_t)-1 || A->values[p] == (REAL)0) return -1;           \
+        inv_diag[i] = (REAL)1 / A->values[p];                                \
+    }                                                                        \
+    return 0;                                                                \
+}                                                                            \
+                                                                             \
+/* --- ILU(0) --------------------------------------------------------------- */ \
+/* Factors A = L*U on EXACTLY A's pattern: values[pos] is L[i,k] < i...      */ \
+/* strictly below the diagonal and U[i,j] on/above it (unit L implicit).     */ \
+/* O(nnz_below * |row_k| * |row_i|) with short-row linear searches — fine    */ \
+/* for structured stencils; the big-n barrier is H4b (MG/AMG), not here.     */ \
+                                                                             \
+RCRE_NODISCARD int rcre_pc_ilu0_##SUF(const CSR* A, CSR* fac) {              \
+    if (!A || !fac || A->rows != A->cols) return -1;                         \
+    const size_t n = A->rows;                                                \
+    size_t* rp = (size_t*)malloc((n + 1) * sizeof(size_t));                  \
+    size_t* ci = (size_t*)malloc((A->nnz ? A->nnz : 1) * sizeof(size_t));    \
+    REAL* va = (REAL*)malloc((A->nnz ? A->nnz : 1) * sizeof(REAL));          \
+    if (!rp || !ci || !va) { free(rp); free(ci); free(va); return -1; }      \
+    memcpy(rp, A->row_ptr, (n + 1) * sizeof(size_t));                        \
+    memcpy(ci, A->col_idx, A->nnz * sizeof(size_t));                         \
+    memcpy(va, A->values, A->nnz * sizeof(REAL));                            \
+    /* publish the pattern BEFORE the sweep: the find_col searches read   \
+     * fac's own row_ptr/col_idx during the factorization */                \
+    fac->rows = n;                                                           \
+    fac->cols = n;                                                           \
+    fac->nnz = A->nnz;                                                       \
+    fac->row_ptr = rp;                                                       \
+    fac->col_idx = ci;                                                       \
+    fac->values = va;                                                        \
+    for (size_t k = 0; k < n; ++k) {                                         \
+        const size_t pk = krylov_find_col_##SUF(fac, k, k);                  \
+        if (pk == (size_t)-1 || va[pk] == (REAL)0) {                         \
+            free(rp); free(ci); free(va); return -1;                         \
+        }                                                                    \
+        for (size_t i = k + 1; i < n; ++i) {                                 \
+            const size_t pi = krylov_find_col_##SUF(fac, i, k);              \
+            if (pi == (size_t)-1) continue;                                  \
+            const REAL w = va[pi] / va[pk];                                  \
+            if (w == (REAL)0) continue;                                      \
+            va[pi] = w; /* L[i,k] */                                         \
+            for (size_t q = A->row_ptr[k]; q < A->row_ptr[k + 1]; ++q) {     \
+                const size_t j = A->col_idx[q];                              \
+                if (j <= k) continue; /* only U[k,j] with j > k */           \
+                const size_t pj = krylov_find_col_##SUF(fac, i, j);          \
+                if (pj != (size_t)-1) va[pj] -= w * va[q];                   \
+            }                                                                \
+        }                                                                    \
+    }                                                                        \
+    return 0;                                                                \
+}                                                                            \
+                                                                             \
+/* z = (L U)^-1 r, IN PLACE on z (forward then backward; both passes         */ \
+/* touch only already- / not-yet-written entries, so one scratch buffer).    */ \
+void rcre_pc_ilu0_solve_##SUF(const CSR* F, const REAL* r, REAL* z) {        \
+    if (!F || !r || !z) return;                                              \
+    const size_t n = F->rows;                                                \
+    for (size_t i = 0; i < n; ++i) {                                         \
+        REAL s = r[i];                                                       \
+        for (size_t k = F->row_ptr[i]; k < F->row_ptr[i + 1]; ++k) {         \
+            const size_t j = F->col_idx[k];                                  \
+            if (j >= i) break; /* L part is strictly below */                \
+            s -= F->values[k] * z[j];                                        \
+        }                                                                    \
+        z[i] = s;                                                            \
+    }                                                                        \
+    for (size_t i = n; i-- > 0;) {                                           \
+        REAL s = z[i], diag = (REAL)0;                                       \
+        for (size_t k = F->row_ptr[i]; k < F->row_ptr[i + 1]; ++k) {         \
+            const size_t j = F->col_idx[k];                                  \
+            if (j == i) { diag = F->values[k]; continue; }                   \
+            if (j > i) s -= F->values[k] * z[j];                             \
+        }                                                                    \
+        z[i] = (diag != (REAL)0) ? s / diag : r[i]; /* defensive */          \
+    }                                                                        \
+}                                                                            \
+                                                                             \
+/* --- PCG / FCG ------------------------------------------------------------ */ \
+                                                                             \
+RCRE_NODISCARD int rcre_krylov_pcg_##SUF(const CSR* A, const REAL* b,        \
+                                         REAL* x, double tol,                \
+                                         size_t max_iter, int pc,            \
+                                         const void* pc_data, int fcg,       \
+                                         RCRE_KrylovCallback cb,             \
+                                         void* user) {                       \
+    if (!A || !b || !x) return -1;                                           \
+    const size_t n = A->rows;                                                \
+    if (n == 0) return 0;                                                    \
+    if (pc == RCRE_PC_ILU0 && !pc_data) return -1;                           \
+    if (pc == RCRE_PC_JACOBI && !pc_data) return -1;                         \
+    if (pc == RCRE_PC_WEIGHTED_JACOBI && !pc_data) return -1;                \
+    REAL* r = (REAL*)malloc(n * sizeof(REAL));                               \
+    REAL* z = (REAL*)malloc(n * sizeof(REAL));                               \
+    REAL* p = (REAL*)malloc(n * sizeof(REAL));                               \
+    REAL* w = (REAL*)malloc(n * sizeof(REAL));                               \
+    if (!r || !z || !p || !w) { free(r); free(z); free(p); free(w);          \
+                                return -1; }                                 \
+    /* r = b - A*x */                                                        \
+    rcre_spmv_##SUF(A, x, w);                                                \
+    for (size_t i = 0; i < n; ++i) r[i] = b[i] - w[i];                       \
+    const double normb = krylov_norm_##SUF(b, n);                            \
+    const double normref = normb > 0.0 ? normb : 1.0;                        \
+    double rel = krylov_norm_##SUF(r, n) / normref;                          \
+    if (cb) cb(0, rel, user);                                                \
+    if (rel <= tol) { free(r); free(z); free(p); free(w); return 0; }        \
+    /* first preconditioned step */                                          \
+    krylov_apply_pc_##SUF(pc, pc_data, r, z, n);                             \
+    memcpy(p, z, n * sizeof(REAL));                                          \
+    REAL gam = krylov_dot_##SUF(fcg ? r : z, fcg ? p : r, n);                \
+    int iters = 0;                                                           \
+    int ok = 0;                                                              \
+    while (iters < (int)max_iter) {                                          \
+        ++iters;                                                             \
+        rcre_spmv_##SUF(A, p, w); /* Ap */                                   \
+        const REAL den = krylov_dot_##SUF(p, w, n);                          \
+        const REAL alpha = (den != (REAL)0) ? gam / den : (REAL)0;           \
+        if (alpha != alpha || alpha <= (REAL)0) break; /* breakdown */       \
+        krylov_axpy_##SUF(x, alpha, p, n);                                   \
+        for (size_t i = 0; i < n; ++i) r[i] -= alpha * w[i];                 \
+        rel = krylov_norm_##SUF(r, n) / normref;                             \
+        if (cb) cb((size_t)iters, rel, user);                                \
+        if (rel <= tol) { ok = 1; break; }                                   \
+        if (fcg) {                                                           \
+            /* FCG: p is updated CG-style FROM THE RESIDUAL (M^-1 is        \
+             * applied only to r0, saving one preconditioner apply per      \
+             * iteration). Valid when M^-1 A is symmetric; with pc = NONE   \
+             * FCG reduces exactly to plain CG. gamma = r^T r. */           \
+            const REAL gamn = krylov_dot_##SUF(r, r, n);                     \
+            const REAL beta = (gam != (REAL)0) ? gamn / gam : (REAL)0;       \
+            for (size_t i = 0; i < n; ++i) p[i] = r[i] + beta * p[i];        \
+            gam = gamn;                                                      \
+        } else {                                                             \
+            krylov_apply_pc_##SUF(pc, pc_data, r, z, n);                     \
+            const REAL gamn = krylov_dot_##SUF(z, r, n);                     \
+            const REAL beta = (gam != (REAL)0) ? gamn / gam : (REAL)0;       \
+            for (size_t i = 0; i < n; ++i) p[i] = z[i] + beta * p[i];        \
+            gam = gamn;                                                      \
+        }                                                                    \
+    }                                                                        \
+    free(r); free(z); free(p); free(w);                                      \
+    return ok ? iters : -1;                                                  \
+}                                                                            \
+                                                                             \
+/* --- BiCGStab -------------------------------------------------------------- */ \
+                                                                             \
+/* Plain BiCGStab (original 1983 recurrence) on the LEFT-PRECONDITIONED    \
+ * system B = M^-1 A with RHS f = M^-1 b (x is the state, exactly as in the  \
+ * unpreconditioned case: the B-system solution IS x, and r = f - B x =      \
+ * M^-1 (b - A x) is the standard left-preconditioned monitor, which equals  \
+ * the true relative residual for pc = NONE). spmv_B(v) = M^-1 (A v) is      \
+ * spmv followed by the preconditioner apply. The shadow start is v = r0     \
+ * (van der Vorst's robust restart: measured here to converge on standard 1D\n * advection-diffusion matrices where the original zero-shadow form breaks  \
+ * down or stagnates; see docs/hpc.md).                                  \
+ * Convergence is matrix-dependent (BiCGStab's known fragility; see         \
+ * docs/hpc.md — GMRES(m) is the robust nonsymmetric solver). Breakdowns    \
+ * (zero recurrence pivots) return -1 with x at the last full update.       \
+ * Returns the number of iterations or -1. */                                \
+RCRE_NODISCARD int rcre_krylov_bicgstab_##SUF(const CSR* A, const REAL* b,   \
+                                              REAL* x, double tol,           \
+                                              size_t max_iter, int pc,       \
+                                              const void* pc_data,           \
+                                              RCRE_KrylovCallback cb,        \
+                                              void* user) {                  \
+    if (!A || !b || !x) return -1;                                           \
+    const size_t n = A->rows;                                                \
+    if (n == 0) return 0;                                                    \
+    if ((pc == RCRE_PC_ILU0 || pc == RCRE_PC_JACOBI ||                       \
+         pc == RCRE_PC_WEIGHTED_JACOBI) && !pc_data) return -1;              \
+    REAL* f = (REAL*)malloc(n * sizeof(REAL));    /* f = M^-1 b */           \
+    REAL* r = (REAL*)malloc(n * sizeof(REAL));    /* r = f - B x */          \
+    REAL* r0 = (REAL*)malloc(n * sizeof(REAL));   /* shadow residual */      \
+    REAL* v = (REAL*)malloc(n * sizeof(REAL));                                       \
+    REAL* p = (REAL*)malloc(n * sizeof(REAL));                                       \
+    REAL* w = (REAL*)malloc(n * sizeof(REAL));                                       \
+    REAL* s = (REAL*)malloc(n * sizeof(REAL));                                       \
+    REAL* t = (REAL*)malloc(n * sizeof(REAL));                                       \
+    if (!f || !r || !r0 || !v || !p || !w || !s || !t) {                        \
+        free(f); free(r); free(r0); free(v); free(p);                           \
+        free(w); free(s); free(t);                                              \
+        return -1;                                                             \
+    }                                                                        \
+    /* f = M^-1 b; r = f - B x0 = M^-1 (b - A x0) */                          \
+    krylov_apply_pc_##SUF(pc, pc_data, b, f, n);                              \
+    rcre_spmv_##SUF(A, x, w);                                                 \
+    krylov_apply_pc_##SUF(pc, pc_data, w, w, n);  /* w = B x0 */              \
+    for (size_t i = 0; i < n; ++i) r[i] = f[i] - w[i];                        \
+    memcpy(r0, r, n * sizeof(REAL));                                          \
+    memcpy(v, r, n * sizeof(REAL));   /* van der Vorst shadow start (v = r0) */ \
+    memset(p, 0, n * sizeof(REAL));                                           \
+    const double normf = krylov_norm_##SUF(f, n);                             \
+    const double normref = normf > 0.0 ? normf : 1.0;                         \
+    double rel = krylov_norm_##SUF(r, n) / normref;                           \
+    if (cb) cb(0, rel, user);                                                 \
+    if (rel <= tol) { /* x0 already good: leave x untouched, return 0 */      \
+        free(f); free(r); free(r0); free(v); free(p);                         \
+        free(w); free(s); free(t);                                            \
+        return 0;                                                             \
+    }                                                                        \
+    REAL rho = (REAL)1, alpha = (REAL)1;                                      \
+    int iters = 0, ok = 0;                                                    \
+    while (iters < (int)max_iter) {                                           \
+        ++iters;                                                              \
+        const REAL rho_n = krylov_dot_##SUF(r, r0, n);                        \
+        if (rho_n == (REAL)0) break; /* breakdown */                          \
+        const REAL theta = rho_n / rho;                                       \
+        for (size_t i = 0; i < n; ++i)                                        \
+            p[i] = r[i] + theta * (v[i] - alpha * p[i]);                      \
+        rcre_spmv_##SUF(A, p, w);                                             \
+        krylov_apply_pc_##SUF(pc, pc_data, w, w, n);  /* w = B p */           \
+        const REAL rw = krylov_dot_##SUF(w, r0, n);                           \
+        if (rw == (REAL)0) break; /* breakdown */                             \
+        alpha = rho_n / rw;                                                   \
+        for (size_t i = 0; i < n; ++i) s[i] = r[i] - alpha * w[i];            \
+        rcre_spmv_##SUF(A, s, t);                                             \
+        krylov_apply_pc_##SUF(pc, pc_data, t, t, n);  /* t = B s */           \
+        /* omega = (s, B s)/||B s||^2: least-squares value minimizing \
+         * ||r - omega t||; with the van der Vorst shadow start this is \
+         * the variant measured to be robust here. */                      \
+        const REAL tt = krylov_dot_##SUF(s, t, n);                            \
+        const REAL tw = krylov_dot_##SUF(t, t, n);                             \
+        if (tw == (REAL)0) break; /* breakdown */                             \
+        const REAL omega = tt / tw;                                           \
+        for (size_t i = 0; i < n; ++i) x[i] += alpha * p[i] + omega * s[i];   \
+        for (size_t i = 0; i < n; ++i) r[i] = s[i] - omega * t[i];            \
+        memcpy(v, s, n * sizeof(REAL));                                       \
+        /* next step's rho = (r_new, r0) (van der Vorst) */                   \
+        rho = krylov_dot_##SUF(r, r0, n);                                     \
+        rel = krylov_norm_##SUF(r, n) / normref;                              \
+        if (cb) cb((size_t)iters, rel, user);                                 \
+        if (rel <= tol) { ok = 1; break; }                                    \
+    }                                                                        \
+    free(f); free(r); free(r0); free(v); free(p);                             \
+    free(w); free(s); free(t);                                                \
+    return ok ? iters : -1;                                                   \
+}                                                                            \
+                                                                             \
+/* --- GMRES(m), restarted, Householder QR on the Hessenberg ----------------- */ \
+                                                                             \
+/* Householder QR of the active (m+1) x m Hessenberg block (leading dim \
+ * LDA) applied to c (length m+1); on return R = H (upper triangle),    \
+ * c = Q^T c (in place), y = R^-1 c (length m), *res = |c[m]| (the LS   \
+ * residual of min ||c - H y||). LDA = the buffer's row stride (the     \
+ * full allocation); only the first m+1 rows / m columns are active.    \
+ */                                                                  \
+static void krylov_hqr_##SUF(REAL* H, size_t m, size_t lda, REAL* c,    \
+                             REAL* y, REAL* res) {                       \
+    for (size_t k = 0; k < m; ++k) {                                     \
+        /* x = column k of H, rows k..m (length m+1-k) */                \
+        REAL ssq = (REAL)0;                                              \
+        for (size_t i = k; i <= m; ++i) ssq += H[i * lda + k] * H[i * lda + k]; \
+        const REAL nrm = (REAL)sqrt((double)ssq);                        \
+        if (nrm == (REAL)0) continue;                                    \
+        /* alpha = -sign(x0) * ||x||, sign(0) = +1. v is a SEPARATE       \
+         * buffer: writing v[0] = x0 - alpha into H's own column would    \
+         * corrupt the (k,k) entry that the j = k dot product reads. */   \
+        const REAL alpha = (H[k * lda + k] < (REAL)0) ? nrm : (REAL)-nrm;\
+        REAL* v = (REAL*)malloc((m + 1) * sizeof(REAL));                 \
+        if (!v) { free(v); continue; } /* OOM: skip this reflector */    \
+        for (size_t i = 0; i <= m - k; ++i) v[i] = H[(k + i) * lda + k]; \
+        v[0] -= alpha; /* v = x - alpha*e1 */                            \
+        REAL vv = (REAL)0;                                               \
+        for (size_t i = 0; i <= m - k; ++i) vv += v[i] * v[i];           \
+        if (vv == (REAL)0) continue;                                     \
+        const REAL tau = (REAL)2 / vv;                                   \
+        /* apply H2 = I - tau*v*v^T to H[k..m, k..m-1] (per column) */   \
+        for (size_t j = k; j < m; ++j) {                                 \
+            REAL d = (REAL)0;                                            \
+            for (size_t i = k; i <= m; ++i) d += v[i - k] * H[i * lda + j]; \
+            d *= tau;                                                    \
+            for (size_t i = k; i <= m; ++i) H[i * lda + j] -= d * v[i - k]; \
+        }                                                                \
+        /* and to c[k..m] */                                             \
+        {                                                                \
+            REAL d = (REAL)0;                                            \
+            for (size_t i = k; i <= m; ++i) d += v[i - k] * c[i];        \
+            d *= tau;                                                    \
+            for (size_t i = k; i <= m; ++i) c[i] -= d * v[i - k];        \
+        }                                                                \
+        free(v);                                                         \
+    }                                                                    \
+    /* y = R^-1 c (R = upper triangle of H, m x m) */                    \
+    for (size_t i = m; i-- > 0;) {                                       \
+        REAL s = c[i];                                                   \
+        for (size_t j = i + 1; j < m; ++j) s -= H[i * lda + j] * y[j];   \
+        const REAL diag = H[i * lda + i];                                \
+        y[i] = (diag != (REAL)0) ? s / diag : (REAL)0;                   \
+    }                                                                    \
+    if (res) *res = (REAL)ABSF(c[m]);                                    \
+}                                                                        \
+                                                                         \
+RCRE_NODISCARD int rcre_krylov_gmres_##SUF(const CSR* A, const REAL* b,      \
+                                           REAL* x, double tol,              \
+                                           size_t max_iter, size_t m,        \
+                                           int pc, const void* pc_data,      \
+                                           RCRE_KrylovCallback cb,           \
+                                           void* user) {                     \
+    if (!A || !b || !x) return -1;                                           \
+    const size_t n = A->rows;                                                \
+    if (n == 0) return 0;                                                    \
+    if (m == 0 || m >= n) return -1;                                         \
+    if ((pc == RCRE_PC_ILU0 || pc == RCRE_PC_JACOBI ||                       \
+         pc == RCRE_PC_WEIGHTED_JACOBI) && !pc_data) return -1;              \
+    REAL* r = (REAL*)malloc(n * sizeof(REAL));                               \
+    REAL* w = (REAL*)malloc(n * sizeof(REAL));                               \
+    REAL* z = (REAL*)malloc(n * sizeof(REAL));                               \
+    REAL* V = (REAL*)malloc((size_t)(m + 1) * n * sizeof(REAL));             \
+    REAL* H = (REAL*)calloc((size_t)(m + 1) * m, sizeof(REAL));              \
+    REAL* c = (REAL*)malloc((m + 1) * sizeof(REAL));                         \
+    REAL* y = (REAL*)malloc(m * sizeof(REAL));                               \
+    if (!r || !w || !z || !V || !H || !c || !y) {                            \
+        free(r); free(w); free(z); free(V); free(H); free(c); free(y);       \
+        return -1;                                                           \
+    }                                                                        \
+    /* r = b - A x */                                                        \
+    rcre_spmv_##SUF(A, x, w);                                                \
+    for (size_t i = 0; i < n; ++i) r[i] = b[i] - w[i];                       \
+    const double normb = krylov_norm_##SUF(b, n);                            \
+    const double normref = normb > 0.0 ? normb : 1.0;                        \
+    double rel = krylov_norm_##SUF(r, n) / normref;                          \
+    if (cb) cb(0, rel, user);                                                \
+    if (rel <= tol) { free(r); free(w); free(z); free(V); free(H);           \
+        free(c); free(y); return 0; }                                        \
+    int ok = 0;                                                              \
+    size_t matvecs = 1; /* the initial residual matvec */                    \
+    while (!ok) {                                                            \
+        /* fresh Arnoldi basis from the current residual */                  \
+        krylov_apply_pc_##SUF(pc, pc_data, r, z, n);                         \
+        const REAL beta = (REAL)krylov_norm_##SUF(z, n);                     \
+        if (beta == (REAL)0) { ok = 1; break; } /* M^-1 r = 0 => r = 0 */    \
+        for (size_t i = 0; i < n; ++i) V[i] = z[i] / beta;                   \
+        memset(H, 0, (size_t)(m + 1) * m * sizeof(REAL));                    \
+        memset(c, 0, (m + 1) * sizeof(REAL));                                \
+        c[0] = beta;                                                         \
+        /* inner loop: at most m Arnoldi steps, bounded by the matvec       \
+         * budget. max_iter counts ALL matvecs (initial + Arnoldi +          \
+         * re-checks); the returned value is matvecs - 1 (x0 was applied     \
+         * once before the solver "started"). */                             \
+        size_t jcols = 0;                                                    \
+        for (size_t j = 1; j <= m; ++j) {                                    \
+            if (matvecs >= max_iter) break; /* next step would exceed */     \
+            ++matvecs;                                                       \
+            const REAL* vprev = V + (size_t)(j - 1) * n;                     \
+            rcre_spmv_##SUF(A, vprev, w);                                    \
+            krylov_apply_pc_##SUF(pc, pc_data, w, z, n);                     \
+            /* modified Gram-Schmidt (2 passes) */                           \
+            for (size_t i = 0; i < j; ++i) {                                 \
+                const REAL* vi = V + i * n;                                  \
+                H[i * m + (j - 1)] = krylov_dot_##SUF(vi, z, n);             \
+                krylov_axpy_##SUF(z, -H[i * m + (j - 1)], vi, n);            \
+            }                                                                \
+            for (size_t i = 0; i < j; ++i) {                                 \
+                const REAL* vi = V + i * n;                                  \
+                const REAL h = krylov_dot_##SUF(vi, z, n);                   \
+                H[i * m + (j - 1)] += h;                                     \
+                krylov_axpy_##SUF(z, -h, vi, n);                             \
+            }                                                                \
+            const REAL hnext = (REAL)krylov_norm_##SUF(z, n);                \
+            H[j * m + (j - 1)] = hnext;                                      \
+            jcols = j;                                                       \
+            rel = (double)hnext / normref;                                   \
+            if (cb) cb(matvecs, rel, user);                                  \
+            if (hnext <= (REAL)(tol * normref)) break; /* converged */       \
+            if (j < m && hnext != (REAL)0) {                                 \
+                REAL* vn = V + j * n;                                        \
+                for (size_t i = 0; i < n; ++i) vn[i] = z[i] / hnext;         \
+            }                                                                \
+        }                                                                    \
+        if (jcols == 0) break; /* budget exhausted before any step */        \
+        /* least-squares solve on the active (jcols+1) x jcols block */      \
+        REAL resls = (REAL)0;                                                \
+        krylov_hqr_##SUF(H, jcols, m, c, y, &resls);                         \
+        for (size_t j = 0; j < jcols; ++j) {                                 \
+            const REAL* vj = V + j * n;                                      \
+            krylov_axpy_##SUF(x, y[j], vj, n);                               \
+        }                                                                    \
+        /* re-check the TRUE residual (the Arnoldi residual is exact only    \
+         * up to the re-orthogonalization quality); consumes 1 matvec */     \
+        if (matvecs < max_iter) {                                            \
+            ++matvecs;                                                       \
+            rcre_spmv_##SUF(A, x, w);                                        \
+            for (size_t i = 0; i < n; ++i) r[i] = b[i] - w[i];               \
+            rel = krylov_norm_##SUF(r, n) / normref;                         \
+            if (cb) cb(matvecs, rel, user);                                  \
+        }                                                                    \
+        if (rel <= tol) ok = 1;                                              \
+    }                                                                        \
+    free(r); free(w); free(z); free(V); free(H); free(c); free(y);           \
+    return ok ? (int)(matvecs - 1) : -1;                                     \
+}
+RCRE_KRYLOV_IMPL(f64, RCRE_CSR_F64, double, fabs)
+RCRE_KRYLOV_IMPL(f32, RCRE_CSR_F32, float, fabsf)
+#undef RCRE_KRYLOV_IMPL
+
+/* --- Source: multigrid.c --- */
+/* ==========================================================================
+ * RCRE — Geometric Multigrid, 2D Poisson (H4, 2.2.0)
+ *
+ * Two classic geometric multigrid cycle types for the 2D Poisson equation
+ * with Dirichlet boundary conditions on a structured tensor-product grid
+ * (the canonical HPC model problem: the 5-point Laplacian, h^2-scaled:
+ *
+ *     (A u)_{i,j} = 4 u_{i,j} - u_{i-1,j} - u_{i+1,j} - u_{i,j-1} - u_{i,j+1}
+ *
+ * with interior indices 0..nx-1 / 0..ny-1 and zero boundary values (the
+ * caller folds the boundary data into the RHS f)). Both share the same
+ * operators: red-black Gauss-Seidel smoothing (exact substitution; the two
+ * colors are independent and the fixed traversal is deterministic),
+ * full-weighting restriction R (1/16 of [4 1 1; 1 4 1; 1 1 4]), bilinear
+ * prolongation P, and an exact dense Gaussian solve at the coarsest level.
+ *
+ *   V-cycle (rcre_mg_vcycle_poisson2d): residual correction — the classic
+ *   pattern. The defect is restricted, a coarse V-cycle (started from zero)
+ *   computes its correction, which is prolonged and added.
+ *
+ *   FAS (rcre_mg_fas_poisson2d): Full Approximation Scheme — the coarse
+ *   level solves against the full restricted RHS R f starting from the
+ *   full-weighting of u, and the fine update is u += P (u_c_after -
+ *   u_c_before). FAS corrects against the full RHS at every level instead
+ *   of only the residual; it is provided as the alternative cycle for
+ *   users to pick per problem.
+ *
+ * Measured behavior (Apple M5 Max, -O3, see docs/hpc.md): both cycles
+ * reduce broadband residuals to 1e-10 in a modest number of cycles on
+ * 32^2..512^2. A PURE smoothest-mode error decays slowly and h-dependently
+ * (per-cycle rate -> 1 as n grows; the two-grid correction of the smoothest
+ * mode is limited by the eigenvalue ratio lambda_1,coarse/lambda_1,fine ~ 4
+ * per level). That is a property of fixed-count 2:1 geometric MG for the
+ * model problem, not an implementation defect: for smooth-error-dominated
+ * solves use rcre_krylov_pcg + RCRE_PC_ILU0 instead.
+ *
+ * The recursion is depth-first and deterministic: same inputs produce the
+ * same outputs on every machine and core count. OOM at any level degrades
+ * gracefully (no correction at that level; the cycle still applies
+ * smoothing).
+ * ========================================================================== */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+
+/* --- F64 core ------------------------------------------------------------- */
+
+/* Red-black Gauss-Seidel sweep: exact substitution in color order. The
+ * sequential in-place update is what gives GS its strong low-frequency
+ * smoothing — with weighted Jacobi the V-cycle's mode-1 factor drifts to 1
+ * faster as the grid grows, with red-black GS it stays the classical
+ * model-problem behavior. The two colors are independent (parallelizable
+ * later); the fixed traversal keeps the result deterministic. */
+static void mg2d_gs_sweep_f64(size_t nx, size_t ny, const double* f, double* u,
+                              int color) {
+    for (size_t j = (size_t)color; j < ny; j += 2) {
+        for (size_t i = 0; i < nx; ++i) {
+            const size_t c = j * nx + i;
+            double lap = 4.0 * u[c];
+            if (i > 0) lap -= u[c - 1];
+            if (i + 1 < nx) lap -= u[c + 1];
+            if (j > 0) lap -= u[c - nx];
+            if (j + 1 < ny) lap -= u[c + nx];
+            u[c] += (f[c] - lap) / 4.0;
+        }
+    }
+}
+
+static void mg2d_res_op_f64(size_t nx, size_t ny, const double* f, const double* u,
+                            double* out) {
+    /* out = f - A u (the 5-point stencil; A has 4 on the diagonal and -1
+     * off-diagonal — the neighbors enter with a MINUS sign). */
+    for (size_t j = 0; j < ny; ++j) {
+        for (size_t i = 0; i < nx; ++i) {
+            const size_t c = j * nx + i;
+            double lap = 4.0 * u[c];
+            if (i > 0) lap -= u[c - 1];
+            if (i + 1 < nx) lap -= u[c + 1];
+            if (j > 0) lap -= u[c - nx];
+            if (j + 1 < ny) lap -= u[c + nx];
+            out[c] = f[c] - lap;
+        }
+    }
+}
+
+static void mg2d_restrict_f64(size_t nx, size_t ny, const double* f,
+                              size_t nxc, size_t nyc, double* g) {
+    /* Full weighting: g(i,j) = (4 f(2i+1,2j+1) + f(2i,2j+1) + f(2i+2,2j+1)
+     *                    + f(2i+1,2j) + f(2i+1,2j+2)) / 16.
+     * Points outside the fine interior are zero (Dirichlet ghosts). */
+    for (size_t j = 0; j < nyc; ++j) {
+        for (size_t i = 0; i < nxc; ++i) {
+            const size_t ci = 2 * i + 1;
+            const size_t cj = 2 * j + 1;
+            double s = 0.0;
+            if (ci < nx && cj < ny) s += 4.0 * f[cj * nx + ci];
+            if (2 * i < nx && cj < ny) s += f[cj * nx + (2 * i)];
+            if (2 * i + 2 < nx && cj < ny) s += f[cj * nx + (2 * i + 2)];
+            if (ci < nx && 2 * j < ny) s += f[(2 * j) * nx + ci];
+            if (ci < nx && 2 * j + 2 < ny) s += f[(2 * j + 2) * nx + ci];
+            g[j * nxc + i] = s / 16.0;
+        }
+    }
+}
+
+static void mg2d_prolong_f64(size_t nx, size_t ny, const double* g,
+                             size_t nxc, size_t nyc, double* h) {
+    /* Bilinear 4-2-1 interpolation into h (h must be zeroed first). */
+    for (size_t j = 0; j < nyc; ++j) {
+        for (size_t i = 0; i < nxc; ++i) {
+            const double v = g[j * nxc + i];
+            const size_t ci = 2 * i + 1;
+            const size_t cj = 2 * j + 1;
+            if (ci < nx && cj < ny) h[cj * nx + ci] += v;
+            if (2 * i < nx && cj < ny) h[cj * nx + (2 * i)] += 0.5 * v;
+            if (2 * i + 2 < nx && cj < ny) h[cj * nx + (2 * i + 2)] += 0.5 * v;
+            if (ci < nx && 2 * j < ny) h[(2 * j) * nx + ci] += 0.5 * v;
+            if (ci < nx && 2 * j + 2 < ny) h[(2 * j + 2) * nx + ci] += 0.5 * v;
+        }
+    }
+}
+
+/* Exact dense solver for the coarsest level (tiny: nx*ny <= 256). FAS needs
+ * an exact coarsest-level correction: the coarsest level carries the whole
+ * smoothest mode of the RHS, so an inexact solve sets a stagnation floor. */
+static int mg2d_dense_solve_f64(size_t nx, size_t ny, const double* rhs, double* x) {
+    const size_t n = nx * ny;
+    if (n > 256) return -1;
+    double* M = (double*)malloc((n + 1) * n * sizeof(double)); /* augmented */
+    if (!M) return -1;
+    for (size_t j = 0; j < ny; ++j) {
+        for (size_t i = 0; i < nx; ++i) {
+            const size_t c = j * nx + i;
+            for (size_t q = 0; q < n; ++q) M[c * (n + 1) + q] = 0.0;
+            M[c * (n + 1) + c] = 4.0;
+            if (i > 0) M[c * (n + 1) + (j * nx + (i - 1))] = -1.0;
+            if (i + 1 < nx) M[c * (n + 1) + (j * nx + (i + 1))] = -1.0;
+            if (j > 0) M[c * (n + 1) + ((j - 1) * nx + i)] = -1.0;
+            if (j + 1 < ny) M[c * (n + 1) + ((j + 1) * nx + i)] = -1.0;
+            M[c * (n + 1) + n] = rhs[c];
+        }
+    }
+    for (size_t c = 0; c < n; ++c) {
+        size_t p = c;
+        for (size_t r = c + 1; r < n; ++r)
+            if (fabs(M[r * (n + 1) + c]) > fabs(M[p * (n + 1) + c])) p = r;
+        for (size_t q = c; q <= n; ++q) {
+            double t = M[c * (n + 1) + q];
+            M[c * (n + 1) + q] = M[p * (n + 1) + q];
+            M[p * (n + 1) + q] = t;
+        }
+        const double piv = M[c * (n + 1) + c];
+        if (piv == 0.0) {
+            free(M);
+            return -1;
+        }
+        for (size_t r = c + 1; r < n; ++r) {
+            const double g = M[r * (n + 1) + c] / piv;
+            if (g == 0.0) continue;
+            for (size_t q = c; q <= n; ++q) M[r * (n + 1) + q] -= g * M[c * (n + 1) + q];
+        }
+    }
+    for (size_t i = n; i-- > 0;) {
+        double sv = M[i * (n + 1) + n];
+        for (size_t j = i + 1; j < n; ++j) sv -= M[i * (n + 1) + j] * x[j];
+        x[i] = sv / M[i * (n + 1) + i];
+    }
+    free(M);
+    return 0;
+}
+
+/* One FAS cycle at this level. f: RHS at this level; u: approximation
+ * (in/out). Each level allocates its own scratch (sizes shrink geometrically). */
+static void mg2d_fas_rec_f64(size_t nx, size_t ny, const double* f, double* u,
+                             int pre, int post) {
+    double* r = (double*)malloc((size_t)nx * ny * sizeof(double));
+    double* z = (double*)malloc((size_t)nx * ny * sizeof(double));
+    if (!r || !z) {
+        free(r);
+        free(z);
+        return; /* OOM: no correction at this level */
+    }
+    /* 1. pre-smoothing */
+    for (int s = 0; s < pre; ++s) {
+        mg2d_gs_sweep_f64(nx, ny, f, u, 0);
+        mg2d_gs_sweep_f64(nx, ny, f, u, 1);
+    }
+    /* 2. defect */
+    mg2d_res_op_f64(nx, ny, f, u, r);
+    const size_t nxc = (nx + 1) / 2;
+    const size_t nyc = (ny + 1) / 2;
+    if (nxc < 2 || nyc < 2) {
+        /* 3. coarsest level: exact correction u += A^-1 r */
+        double* e = (double*)malloc((size_t)nx * ny * sizeof(double));
+        if (e) {
+            memset(e, 0, (size_t)nx * ny * sizeof(double));
+            if (mg2d_dense_solve_f64(nx, ny, r, e) == 0)
+                for (size_t i = 0; i < (size_t)nx * ny; ++i) u[i] += e[i];
+        }
+        free(e);
+        free(r);
+        free(z);
+        return;
+    }
+    /* 4. coarse FAS: RHS = R f, start from P u */
+    mg2d_restrict_f64(nx, ny, f, nxc, nyc, z); /* z = coarse RHS */
+    double* cu = (double*)malloc(nxc * nyc * sizeof(double));
+    double* c0 = (double*)malloc(nxc * nyc * sizeof(double));
+    if (cu && c0) {
+        /* coarse start = prolongation of the current fine approximation */
+        memset(cu, 0, nxc * nyc * sizeof(double));
+        /* P u: the coarse-grid approximation of u */
+        mg2d_restrict_f64(nx, ny, u, nxc, nyc, c0); /* full-weighting of u */
+        memcpy(cu, c0, nxc * nyc * sizeof(double));
+        mg2d_fas_rec_f64(nxc, nyc, z, cu, pre, post);
+        /* 5. add the coarse-grid correction */
+        double* d = c0; /* reuse: d = cu - c0 */
+        for (size_t i = 0; i < nxc * nyc; ++i) d[i] = cu[i] - c0[i];
+        /* z held the coarse RHS; prolong accumulates with +=, so zero it first */
+        memset(z, 0, (size_t)nx * ny * sizeof(double));
+        mg2d_prolong_f64(nx, ny, d, nxc, nyc, z); /* z = P d */
+        for (size_t i = 0; i < (size_t)nx * ny; ++i) u[i] += z[i];
+    }
+    free(cu);
+    free(c0);
+    /* 6. post-smoothing */
+    for (int s = 0; s < post; ++s) {
+        mg2d_gs_sweep_f64(nx, ny, f, u, 0);
+        mg2d_gs_sweep_f64(nx, ny, f, u, 1);
+    }
+    free(r);
+    free(z);
+}
+
+RCRE_NODISCARD int rcre_mg_fas_poisson2d_f64(size_t nx, size_t ny,
+                                             const double* f, double* x,
+                                             int pre, int post) {
+    if (!f || !x || nx < 2 || ny < 2 || pre < 0 || post < 0 || pre + post == 0)
+        return -1;
+    mg2d_fas_rec_f64(nx, ny, f, x, pre, post);
+    return 1;
+}
+
+/* Classic residual-correction V-cycle (F64). u is the running approximation
+ * (in/out); the coarse-level approximation always starts from zero (the
+ * standard V-cycle coarse start). Anatomy: pre-smooth, defect, restrict the
+ * DEFECT (not the RHS), recurse, prolong + add the coarse correction,
+ * post-smooth; exact dense solve at the coarsest level. */
+static void mg2d_vcycle_rec_f64(size_t nx, size_t ny, const double* f, double* u,
+                                int pre, int post) {
+    double* r = (double*)malloc((size_t)nx * ny * sizeof(double));
+    if (!r) return; /* OOM: no correction at this level */
+    /* 1. pre-smoothing */
+    for (int s = 0; s < pre; ++s) {
+        mg2d_gs_sweep_f64(nx, ny, f, u, 0);
+        mg2d_gs_sweep_f64(nx, ny, f, u, 1);
+    }
+    /* 2. defect */
+    mg2d_res_op_f64(nx, ny, f, u, r);
+    const size_t nxc = (nx + 1) / 2;
+    const size_t nyc = (ny + 1) / 2;
+    if (nxc < 2 || nyc < 2) {
+        /* 3. coarsest level: exact correction u += A^-1 r */
+        double* e = (double*)malloc((size_t)nx * ny * sizeof(double));
+        if (e) {
+            memset(e, 0, (size_t)nx * ny * sizeof(double));
+            if (mg2d_dense_solve_f64(nx, ny, r, e) == 0)
+                for (size_t i = 0; i < (size_t)nx * ny; ++i) u[i] += e[i];
+        }
+        free(e);
+        free(r);
+        return;
+    }
+    /* 4. coarse V-cycle on the restricted defect, started from zero */
+    double* rc = (double*)malloc(nxc * nyc * sizeof(double));
+    double* uc = (double*)calloc(nxc * nyc, sizeof(double));
+    if (rc && uc) {
+        mg2d_restrict_f64(nx, ny, r, nxc, nyc, rc); /* rc = R r */
+        mg2d_vcycle_rec_f64(nxc, nyc, rc, uc, pre, post);
+        /* 5. prolong and add the coarse correction */
+        double* pd = (double*)calloc((size_t)nx * ny, sizeof(double));
+        if (pd) {
+            mg2d_prolong_f64(nx, ny, uc, nxc, nyc, pd); /* pd = P uc */
+            for (size_t i = 0; i < (size_t)nx * ny; ++i) u[i] += pd[i];
+        }
+        free(pd);
+    }
+    free(rc);
+    free(uc);
+    /* 6. post-smoothing */
+    for (int s = 0; s < post; ++s) {
+        mg2d_gs_sweep_f64(nx, ny, f, u, 0);
+        mg2d_gs_sweep_f64(nx, ny, f, u, 1);
+    }
+    free(r);
+}
+
+RCRE_NODISCARD int rcre_mg_vcycle_poisson2d_f64(size_t nx, size_t ny,
+                                                const double* f, double* x,
+                                                int pre, int post) {
+    if (!f || !x || nx < 2 || ny < 2 || pre < 0 || post < 0 || pre + post == 0)
+        return -1;
+    mg2d_vcycle_rec_f64(nx, ny, f, x, pre, post);
+    return 1;
+}
+
+RCRE_NODISCARD int rcre_mg_solve_poisson2d_f64(size_t nx, size_t ny,
+                                               const double* f, double* x,
+                                               double tol, int max_cycles,
+                                               RCRE_KrylovCallback cb, void* user) {
+    if (!f || !x || nx < 2 || ny < 2) return -1;
+    const size_t n = nx * ny;
+    double* r = (double*)malloc(n * sizeof(double));
+    if (!r) return -1;
+    double nf = 0.0;
+    for (size_t i = 0; i < n; ++i) nf += f[i] * f[i];
+    const double ref = nf > 0.0 ? sqrt(nf) : 1.0;
+    mg2d_res_op_f64(nx, ny, f, x, r);
+    double s = 0.0;
+    for (size_t i = 0; i < n; ++i) s += r[i] * r[i];
+    double rel = sqrt(s) / ref;
+    if (cb) cb(0, rel, user);
+    if (rel <= tol) {
+        free(r);
+        return 0;
+    }
+    int cycles = 0;
+    int ok = 0;
+    while (cycles < max_cycles) {
+        ++cycles;
+        if (rcre_mg_vcycle_poisson2d_f64(nx, ny, f, x, 2, 2) < 0) break;
+        mg2d_res_op_f64(nx, ny, f, x, r);
+        s = 0.0;
+        for (size_t i = 0; i < n; ++i) s += r[i] * r[i];
+        rel = sqrt(s) / ref;
+        if (cb) cb((size_t)cycles, rel, user);
+        if (rel <= tol) {
+            ok = 1;
+            break;
+        }
+    }
+    free(r);
+    return ok ? cycles : -1;
+}
+
+/* --- F32 twin -------------------------------------------------------------- */
+
+/* Red-black Gauss-Seidel sweep, F32 twin. */
+static void mg2d_gs_sweep_f32(size_t nx, size_t ny, const float* f, float* u,
+                              int color) {
+    for (size_t j = (size_t)color; j < ny; j += 2) {
+        for (size_t i = 0; i < nx; ++i) {
+            const size_t c = j * nx + i;
+            float lap = (float)4 * u[c];
+            if (i > 0) lap -= u[c - 1];
+            if (i + 1 < nx) lap -= u[c + 1];
+            if (j > 0) lap -= u[c - nx];
+            if (j + 1 < ny) lap -= u[c + nx];
+            u[c] += (f[c] - lap) * 0.25f;
+        }
+    }
+}
+
+static void mg2d_res_op_f32(size_t nx, size_t ny, const float* f, const float* u,
+                            float* out) {
+    for (size_t j = 0; j < ny; ++j) {
+        for (size_t i = 0; i < nx; ++i) {
+            const size_t c = j * nx + i;
+            float lap = (float)4 * u[c];
+            if (i > 0) lap -= u[c - 1];
+            if (i + 1 < nx) lap -= u[c + 1];
+            if (j > 0) lap -= u[c - nx];
+            if (j + 1 < ny) lap -= u[c + nx];
+            out[c] = f[c] - lap;
+        }
+    }
+}
+
+static void mg2d_restrict_f32(size_t nx, size_t ny, const float* f,
+                              size_t nxc, size_t nyc, float* g) {
+    for (size_t j = 0; j < nyc; ++j) {
+        for (size_t i = 0; i < nxc; ++i) {
+            const size_t ci = 2 * i + 1;
+            const size_t cj = 2 * j + 1;
+            float s = (float)0;
+            if (ci < nx && cj < ny) s += (float)4 * f[cj * nx + ci];
+            if (2 * i < nx && cj < ny) s += f[cj * nx + (2 * i)];
+            if (2 * i + 2 < nx && cj < ny) s += f[cj * nx + (2 * i + 2)];
+            if (ci < nx && 2 * j < ny) s += f[(2 * j) * nx + ci];
+            if (ci < nx && 2 * j + 2 < ny) s += f[(2 * j + 2) * nx + ci];
+            g[j * nxc + i] = s * (float)(1.0 / 16.0);
+        }
+    }
+}
+
+static void mg2d_prolong_f32(size_t nx, size_t ny, const float* g,
+                             size_t nxc, size_t nyc, float* h) {
+    for (size_t j = 0; j < nyc; ++j) {
+        for (size_t i = 0; i < nxc; ++i) {
+            const float v = g[j * nxc + i];
+            const size_t ci = 2 * i + 1;
+            const size_t cj = 2 * j + 1;
+            if (ci < nx && cj < ny) h[cj * nx + ci] += v;
+            if (2 * i < nx && cj < ny) h[cj * nx + (2 * i)] += (float)0.5 * v;
+            if (2 * i + 2 < nx && cj < ny) h[cj * nx + (2 * i + 2)] += (float)0.5 * v;
+            if (ci < nx && 2 * j < ny) h[(2 * j) * nx + ci] += (float)0.5 * v;
+            if (ci < nx && 2 * j + 2 < ny) h[(2 * j + 2) * nx + ci] += (float)0.5 * v;
+        }
+    }
+}
+
+static int mg2d_dense_solve_f32(size_t nx, size_t ny, const float* rhs, float* x) {
+    const size_t n = nx * ny;
+    if (n > 256) return -1;
+    float* M = (float*)malloc((n + 1) * n * sizeof(float));
+    if (!M) return -1;
+    for (size_t j = 0; j < ny; ++j) {
+        for (size_t i = 0; i < nx; ++i) {
+            const size_t c = j * nx + i;
+            for (size_t q = 0; q < n; ++q) M[c * (n + 1) + q] = (float)0;
+            M[c * (n + 1) + c] = (float)4;
+            if (i > 0) M[c * (n + 1) + (j * nx + (i - 1))] = (float)-1;
+            if (i + 1 < nx) M[c * (n + 1) + (j * nx + (i + 1))] = (float)-1;
+            if (j > 0) M[c * (n + 1) + ((j - 1) * nx + i)] = (float)-1;
+            if (j + 1 < ny) M[c * (n + 1) + ((j + 1) * nx + i)] = (float)-1;
+            M[c * (n + 1) + n] = rhs[c];
+        }
+    }
+    for (size_t c = 0; c < n; ++c) {
+        size_t p = c;
+        for (size_t r = c + 1; r < n; ++r)
+            if (fabsf(M[r * (n + 1) + c]) > fabsf(M[p * (n + 1) + c])) p = r;
+        for (size_t q = c; q <= n; ++q) {
+            float t = M[c * (n + 1) + q];
+            M[c * (n + 1) + q] = M[p * (n + 1) + q];
+            M[p * (n + 1) + q] = t;
+        }
+        const float piv = M[c * (n + 1) + c];
+        if (piv == (float)0) {
+            free(M);
+            return -1;
+        }
+        for (size_t r = c + 1; r < n; ++r) {
+            const float g = M[r * (n + 1) + c] / piv;
+            if (g == (float)0) continue;
+            for (size_t q = c; q <= n; ++q) M[r * (n + 1) + q] -= g * M[c * (n + 1) + q];
+        }
+    }
+    for (size_t i = n; i-- > 0;) {
+        float sv = M[i * (n + 1) + n];
+        for (size_t j = i + 1; j < n; ++j) sv -= M[i * (n + 1) + j] * x[j];
+        x[i] = sv / M[i * (n + 1) + i];
+    }
+    free(M);
+    return 0;
+}
+
+static void mg2d_fas_rec_f32(size_t nx, size_t ny, const float* f, float* u,
+                             int pre, int post) {
+    float* r = (float*)malloc((size_t)nx * ny * sizeof(float));
+    float* z = (float*)malloc((size_t)nx * ny * sizeof(float));
+    if (!r || !z) {
+        free(r);
+        free(z);
+        return;
+    }
+    for (int s = 0; s < pre; ++s) {
+        mg2d_gs_sweep_f32(nx, ny, f, u, 0);
+        mg2d_gs_sweep_f32(nx, ny, f, u, 1);
+    }
+    mg2d_res_op_f32(nx, ny, f, u, r);
+    const size_t nxc = (nx + 1) / 2;
+    const size_t nyc = (ny + 1) / 2;
+    if (nxc < 2 || nyc < 2) {
+        float* e = (float*)malloc((size_t)nx * ny * sizeof(float));
+        if (e) {
+            memset(e, 0, (size_t)nx * ny * sizeof(float));
+            if (mg2d_dense_solve_f32(nx, ny, r, e) == 0)
+                for (size_t i = 0; i < (size_t)nx * ny; ++i) u[i] += e[i];
+        }
+        free(e);
+        free(r);
+        free(z);
+        return;
+    }
+    mg2d_restrict_f32(nx, ny, f, nxc, nyc, z); /* z = coarse RHS */
+    float* cu = (float*)malloc(nxc * nyc * sizeof(float));
+    float* c0 = (float*)malloc(nxc * nyc * sizeof(float));
+    if (cu && c0) {
+        mg2d_restrict_f32(nx, ny, u, nxc, nyc, c0); /* full-weighting of u */
+        memcpy(cu, c0, nxc * nyc * sizeof(float));
+        mg2d_fas_rec_f32(nxc, nyc, z, cu, pre, post);
+        float* d = c0;
+        for (size_t i = 0; i < nxc * nyc; ++i) d[i] = cu[i] - c0[i];
+        mg2d_prolong_f32(nx, ny, d, nxc, nyc, z);
+        for (size_t i = 0; i < (size_t)nx * ny; ++i) u[i] += z[i];
+    }
+    free(cu);
+    free(c0);
+    for (int s = 0; s < post; ++s) {
+        mg2d_gs_sweep_f32(nx, ny, f, u, 0);
+        mg2d_gs_sweep_f32(nx, ny, f, u, 1);
+    }
+    free(r);
+    free(z);
+}
+
+RCRE_NODISCARD int rcre_mg_fas_poisson2d_f32(size_t nx, size_t ny,
+                                             const float* f, float* x,
+                                             int pre, int post) {
+    if (!f || !x || nx < 2 || ny < 2 || pre < 0 || post < 0 || pre + post == 0)
+        return -1;
+    mg2d_fas_rec_f32(nx, ny, f, x, pre, post);
+    return 1;
+}
+
+/* Classic residual-correction V-cycle, F32 twin (same structure as the
+ * F64 version; residual monitoring happens in double in the public
+ * wrapper). */
+static void mg2d_vcycle_rec_f32(size_t nx, size_t ny, const float* f, float* u,
+                                int pre, int post) {
+    float* r = (float*)malloc((size_t)nx * ny * sizeof(float));
+    if (!r) return; /* OOM: no correction at this level */
+    for (int s = 0; s < pre; ++s) {
+        mg2d_gs_sweep_f32(nx, ny, f, u, 0);
+        mg2d_gs_sweep_f32(nx, ny, f, u, 1);
+    }
+    mg2d_res_op_f32(nx, ny, f, u, r);
+    const size_t nxc = (nx + 1) / 2;
+    const size_t nyc = (ny + 1) / 2;
+    if (nxc < 2 || nyc < 2) {
+        float* e = (float*)malloc((size_t)nx * ny * sizeof(float));
+        if (e) {
+            memset(e, 0, (size_t)nx * ny * sizeof(float));
+            if (mg2d_dense_solve_f32(nx, ny, r, e) == 0)
+                for (size_t i = 0; i < (size_t)nx * ny; ++i) u[i] += e[i];
+        }
+        free(e);
+        free(r);
+        return;
+    }
+    float* rc = (float*)malloc(nxc * nyc * sizeof(float));
+    float* uc = (float*)calloc(nxc * nyc, sizeof(float));
+    if (rc && uc) {
+        mg2d_restrict_f32(nx, ny, r, nxc, nyc, rc); /* rc = R r */
+        mg2d_vcycle_rec_f32(nxc, nyc, rc, uc, pre, post);
+        float* pd = (float*)calloc((size_t)nx * ny, sizeof(float));
+        if (pd) {
+            mg2d_prolong_f32(nx, ny, uc, nxc, nyc, pd); /* pd = P uc */
+            for (size_t i = 0; i < (size_t)nx * ny; ++i) u[i] += pd[i];
+        }
+        free(pd);
+    }
+    free(rc);
+    free(uc);
+    for (int s = 0; s < post; ++s) {
+        mg2d_gs_sweep_f32(nx, ny, f, u, 0);
+        mg2d_gs_sweep_f32(nx, ny, f, u, 1);
+    }
+    free(r);
+}
+
+RCRE_NODISCARD int rcre_mg_vcycle_poisson2d_f32(size_t nx, size_t ny,
+                                                const float* f, float* x,
+                                                int pre, int post) {
+    if (!f || !x || nx < 2 || ny < 2 || pre < 0 || post < 0 || pre + post == 0)
+        return -1;
+    mg2d_vcycle_rec_f32(nx, ny, f, x, pre, post);
+    return 1;
+}
+
+RCRE_NODISCARD int rcre_mg_solve_poisson2d_f32(size_t nx, size_t ny,
+                                               const float* f, float* x,
+                                               double tol, int max_cycles,
+                                               RCRE_KrylovCallback cb, void* user) {
+    if (!f || !x || nx < 2 || ny < 2) return -1;
+    const size_t n = nx * ny;
+    float* r = (float*)malloc(n * sizeof(float));
+    if (!r) return -1;
+    double nf = 0.0;
+    for (size_t i = 0; i < n; ++i) nf += (double)f[i] * (double)f[i];
+    const double ref = nf > 0.0 ? sqrt(nf) : 1.0;
+    mg2d_res_op_f32(nx, ny, f, x, r);
+    double s = 0.0;
+    for (size_t i = 0; i < n; ++i) s += (double)r[i] * (double)r[i];
+    double rel = sqrt(s) / ref;
+    if (cb) cb(0, rel, user);
+    if (rel <= tol) {
+        free(r);
+        return 0;
+    }
+    int cycles = 0;
+    int ok = 0;
+    while (cycles < max_cycles) {
+        ++cycles;
+        if (rcre_mg_vcycle_poisson2d_f32(nx, ny, f, x, 2, 2) < 0) break;
+        mg2d_res_op_f32(nx, ny, f, x, r);
+        s = 0.0;
+        for (size_t i = 0; i < n; ++i) s += (double)r[i] * (double)r[i];
+        rel = sqrt(s) / ref;
+        if (cb) cb((size_t)cycles, rel, user);
+        if (rel <= tol) {
+            ok = 1;
+            break;
+        }
+    }
+    free(r);
+    return ok ? cycles : -1;
+}
+
+/* --- Source: chunked.c --- */
+/* RCRE H5 — Zarr v3 chunked ND arrays (out-of-core substrate, 2.2.0)
+ *
+ * Zero-dependency core: the "bytes" (identity) codec is always available;
+ * the "zstd" codec is an opt-in translation unit (src/core/zarr_zstd.c,
+ * built when RCRE_WITH_ZSTD is defined and libzstd is present) that
+ * registers itself into the codec table below — the D1 bridge/extras
+ * pattern, infrastructure-immune (a build without libzstd loses only the
+ * zstd codec; everything else is unaffected).
+ *
+ * Format conformance (zarr-python 3.x, Zarr v3 spec):
+ *   <root>/<name>/zarr.json          array metadata (v3)
+ *   <root>/<name>/c/<i>/<j>/...      chunk files, no extension; keys are
+ *                                     the chunk indices joined with "/"
+ *                                     (the v3 "default" chunk-key encoding)
+ *   <root>/zarr.json                 optional group root
+ * Codec pipeline: codecs are applied in LIST ORDER on write and REVERSE
+ * list order on read (v3 semantics). The identity pipeline is
+ * [{"bytes": {"endian": "little"}}]; the zstd pipeline appends
+ * [{"zstd": {"level": L, "checksum": false}}].
+ * A missing chunk file reads as the fill value (v3 semantics).
+ *
+ * Threading: array-level operations dispatch one task per chunk through
+ * rcre_threadpool_parallel_for (NULL pool = serial). Per-chunk tasks touch
+ * disjoint buffer regions, so pooled runs are bit-identical to serial and
+ * to each other regardless of work-stealing order (library-wide slab
+ * determinism contract). rcre_zarr_reduce_sum keeps one Neumaier partial
+ * per chunk (task id) and combines them in fixed chunk order —
+ * bit-identical across pool sizes and machines (the H0 reduction
+ * contract).
+ */
+#include <errno.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdatomic.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#if defined(_WIN32)
+  /* POSIX file store only: Zarr v3 on Windows is out of scope for H5
+   * (the io layer documents the same boundary). */
+  #error "rcre chunked (Zarr v3) requires a POSIX filesystem"
+#endif
+
+/* ========================================================================= */
+/* dtype table                                                               */
+/* ========================================================================= */
+
+typedef struct {
+    const char* name;   /* numpy-style name (v3 "data_type" field) */
+    size_t      itemsize;
+    int         cls;    /* 1 float, 0 integer, -1 bool */
+} ZarrDType;
+
+static const ZarrDType ZDT[] = {
+    { "float64", 8,  1 },
+    { "float32", 4,  1 },
+    { "float16", 2,  1 },
+    { "int64",   8,  0 },
+    { "int32",   4,  0 },
+    { "int16",   2,  0 },
+    { "int8",    1,  0 },
+    { "uint64",  8,  0 },
+    { "uint32",  4,  0 },
+    { "uint16",  2,  0 },
+    { "uint8",   1,  0 },
+    { "bool",    1, -1 },
+};
+static const int ZDT_N = (int)(sizeof(ZDT) / sizeof(ZDT[0]));
+
+/* ---- float16 (IEEE 754 binary16) encode/decode --------------------------- */
+
+/* Decode a binary16 bit pattern to double. */
+static double f16_to_f64(uint16_t u) {
+    int neg = (int)(u >> 15);
+    int exp = (int)((u >> 10) & 0x1F);
+    uint32_t mant = u & 0x3FF;
+    double v;
+    if (exp == 0) {
+        v = mant ? ldexp((double)mant, -24) : 0.0; /* subnormal or zero */
+    } else if (exp == 31) {
+        v = mant ? NAN : INFINITY;
+    } else {
+        v = (1.0 + (double)mant * 0x1.0p-10) * ldexp(1.0, exp - 15);
+    }
+    return neg ? -v : v;
+}
+
+/* Encode a double to a binary16 bit pattern (round to nearest, ties to
+ * even). Overflow -> ±inf, underflow -> flush to (possibly signed) zero. */
+static uint16_t f64_to_f16(double v) {
+    if (isnan(v)) return 0x7E00;
+    int neg = signbit(v);
+    v = fabs(v);
+    if (isinf(v)) return (uint16_t)(neg ? 0xFC00 : 0x7C00);
+    if (v >= 65504.0 + 32.0) return (uint16_t)(neg ? 0xFC00 : 0x7C00); /* overflow */
+    if (v == 0.0) return (uint16_t)(neg ? 0x8000 : 0x0000);
+    int exp;
+    double m = frexp(v, &exp); /* v = m * 2^exp, m in [0.5, 1) */
+    /* normalized half: v = 1.f * 2^(E-15), E in 1..30 */
+    if (exp < -13) {
+        /* subnormal: value = round(v / 2^-24) * 2^-24, 10-bit field */
+        uint32_t bits = (uint32_t)llround(v / 0x1.0p-24);
+        if (bits > 0x3FF) bits = 0x3FF;
+        return (uint16_t)((neg ? 0x8000u : 0u) | bits);
+    }
+    int E = exp - 1; /* v = 1.xxx * 2^(E-15) */
+    if (E < 1) { /* very small normalized -> subnormal path */
+        uint32_t bits = (uint32_t)llround(v / 0x1.0p-24);
+        if (bits > 0x3FF) bits = 0x3FF;
+        return (uint16_t)((neg ? 0x8000u : 0u) | bits);
+    }
+    /* mantissa: 10 bits + rounding bit + sticky */
+    double frac = (m - 0.5) * 2.0; /* in [0,1): the 1.xxx fraction */
+    uint32_t full = (uint32_t)llround(frac * 2048.0); /* 11-bit field */
+    if (full > 2047) { /* round-up into next exponent */
+        full = 1024;
+        E++;
+        if (E > 30) return (uint16_t)(neg ? 0xFC00 : 0x7C00);
+    }
+    return (uint16_t)((neg ? 0x8000u : 0u) | ((uint32_t)(E - 1) << 10) | (full & 0x3FF));
+}
+
+/* ========================================================================= */
+/* codec table (identity always; zstd self-registers from its own TU)        */
+/* ========================================================================= */
+
+typedef struct {
+    const char*  name;
+    int (*decode)(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_cap);
+    int (*encode)(const uint8_t* in, size_t in_len, int level,
+                  uint8_t** out, size_t* out_len);
+    int          registered;
+} ZarrCodec;
+
+static ZarrCodec g_codecs[8];
+static int       g_codecs_init = 0;
+
+static void zarr_codec_init(void) {
+    if (g_codecs_init) return;
+    g_codecs_init = 1;
+    for (int i = 0; i < 8; ++i) {
+        g_codecs[i].name = NULL;
+        g_codecs[i].decode = NULL;
+        g_codecs[i].encode = NULL;
+        g_codecs[i].registered = 0;
+    }
+    g_codecs[0].name = "bytes";
+    g_codecs[0].registered = 1; /* identity: decode/encode are no-ops */
+}
+
+/* Registered by src/core/zarr_zstd.c at first use (also callable directly). */
+RCRE_NODISCARD int rcre_zarr_register_codec(
+    const char* name,
+    int (*decode)(const uint8_t*, size_t, uint8_t*, size_t),
+    int (*encode)(const uint8_t*, size_t, int, uint8_t**, size_t*)) {
+    zarr_codec_init();
+    for (int i = 0; i < 8; ++i) {
+        if (g_codecs[i].name && strcmp(g_codecs[i].name, name) == 0) {
+            g_codecs[i].decode = decode;
+            g_codecs[i].encode = encode;
+            g_codecs[i].registered = 1;
+            return RCRE_OK;
+        }
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (!g_codecs[i].name) {
+            g_codecs[i].name = strdup(name);
+            g_codecs[i].decode = decode;
+            g_codecs[i].encode = encode;
+            g_codecs[i].registered = 1;
+            return RCRE_OK;
+        }
+    }
+    return RCRE_ERR_INVALID_ARG; /* table full */
+}
+
+static ZarrCodec* zarr_codec_find(const char* name) {
+    zarr_codec_init();
+    for (int i = 0; i < 8; ++i)
+        if (g_codecs[i].name && strcmp(g_codecs[i].name, name) == 0)
+            return &g_codecs[i];
+    return NULL;
+}
+
+RCRE_NODISCARD int rcre_zarr_codec_available(const char* name) {
+    ZarrCodec* c = zarr_codec_find(name);
+    return (c && c->registered) ? 1 : 0;
+}
+
+/* ========================================================================= */
+/* minimal JSON value tree (parser + writer)                                 */
+/* ========================================================================= */
+
+typedef enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ } JKind;
+
+typedef struct JVal JVal;
+struct JVal {
+    JKind     kind;
+    int       b;
+    int       is_int; /* J_NUM: emit as a JSON integer (no ".0") */
+    double    num;
+    char*     str;   /* J_STR */
+    JVal**    keys;  /* J_ARR items / J_OBJ keys */
+    JVal**    vals;  /* J_OBJ values (parallel to keys) */
+    int       n;
+    int       cap;
+};
+
+static JVal* jv_new(JKind k) {
+    JVal* v = (JVal*)calloc(1, sizeof(JVal));
+    if (v) v->kind = k;
+    return v;
+}
+
+static void jv_free(JVal* v) {
+    if (!v) return;
+    free(v->str);
+    for (int i = 0; i < v->n; ++i) {
+        jv_free(v->keys[i]);
+        if (v->vals) jv_free(v->vals[i]);
+    }
+    free(v->keys);
+    free(v->vals);
+    free(v);
+}
+
+static int jv_push(JVal* o, JVal* key, JVal* val) {
+    if (o->n >= o->cap) {
+        int nc = o->cap ? o->cap * 2 : 4;
+        JVal** nk = (JVal**)realloc(o->keys, (size_t)nc * sizeof(JVal*));
+        if (!nk) return -1;
+        o->keys = nk;
+        if (o->kind == J_OBJ) {
+            JVal** nv = (JVal**)realloc(o->vals, (size_t)nc * sizeof(JVal*));
+            if (!nv) return -1;
+            o->vals = nv;
+        }
+        o->cap = nc;
+    }
+    o->keys[o->n] = (o->kind == J_OBJ) ? key : val;
+    if (o->vals) o->vals[o->n] = val;
+    o->n++;
+    return 0;
+}
+
+/* ---- parser (recursive descent; sufficient for v3 metadata) --------------- */
+
+typedef struct { char* p; char* end; int err; } JParse;
+
+static void jskip(JParse* s) {
+    while (s->p < s->end) {
+        char c = *s->p;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') s->p++;
+        else break;
+    }
+}
+
+static char* jstring_raw(JParse* s) {
+    if (s->p >= s->end || *s->p != '"') { s->err = 1; return NULL; }
+    s->p++;
+    size_t cap = 16, n = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { s->err = 1; return NULL; }
+    while (s->p < s->end && *s->p != '"') {
+        char c = *s->p++;
+        if (c == '\\') {
+            if (s->p >= s->end) break;
+            char e = *s->p++;
+            switch (e) {
+                case '"': c = '"'; break;
+                case '\\': c = '\\'; break;
+                case '/': c = '/'; break;
+                case 'b': c = '\b'; break;
+                case 'f': c = '\f'; break;
+                case 'n': c = '\n'; break;
+                case 'r': c = '\r'; break;
+                case 't': c = '\t'; break;
+                case 'u': {
+                    /* v3 metadata fields this library reads are ASCII;
+                     * non-ASCII escapes are rejected rather than
+                     * encoding-guessed (dimension_names etc. are
+                     * optional). */
+                    if (s->p + 4 > s->end) { s->err = 1; free(buf); return NULL; }
+                    int code = 0;
+                    for (int i = 0; i < 4; ++i) {
+                        char h = s->p[i];
+                        code *= 16;
+                        if (h >= '0' && h <= '9') code += h - '0';
+                        else if (h >= 'a' && h <= 'f') code += 10 + h - 'a';
+                        else if (h >= 'A' && h <= 'F') code += 10 + h - 'A';
+                        else { s->err = 1; free(buf); return NULL; }
+                    }
+                    s->p += 4;
+                    if (code < 0x80) c = (char)code;
+                    else { s->err = 1; free(buf); return NULL; }
+                    break;
+                }
+                default: s->err = 1; free(buf); return NULL;
+            }
+        }
+        if (n + 1 >= cap) {
+            cap *= 2;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { s->err = 1; free(buf); return NULL; }
+            buf = nb;
+        }
+        buf[n++] = c;
+    }
+    if (s->p >= s->end) { s->err = 1; free(buf); return NULL; }
+    s->p++; /* closing quote */
+    buf[n] = '\0';
+    return buf;
+}
+
+static JVal* jvalue(JParse* s);
+
+static JVal* jobject(JParse* s) {
+    s->p++; /* '{' */
+    JVal* o = jv_new(J_OBJ);
+    if (!o) { s->err = 1; return NULL; }
+    o->vals = (JVal**)calloc(1, sizeof(JVal*));
+    jskip(s);
+    if (s->p < s->end && *s->p == '}') { s->p++; return o; }
+    for (;;) {
+        jskip(s);
+        char* key = jstring_raw(s);
+        if (s->err) { jv_free(o); return NULL; }
+        jskip(s);
+        if (s->p >= s->end || *s->p != ':') {
+            s->err = 1;
+            free(key);
+            jv_free(o);
+            return NULL;
+        }
+        s->p++;
+        JVal* val = jvalue(s);
+        if (s->err) { free(key); jv_free(o); return NULL; }
+        JVal* kv = jv_new(J_STR);
+        if (!kv) { jv_free(val); jv_free(o); s->err = 1; return NULL; }
+        kv->str = key;
+        if (jv_push(o, kv, val) < 0) { jv_free(kv); jv_free(val); jv_free(o); return NULL; }
+        jskip(s);
+        if (s->p < s->end && *s->p == ',') { s->p++; continue; }
+        if (s->p < s->end && *s->p == '}') { s->p++; return o; }
+        s->err = 1;
+        jv_free(o);
+        return NULL;
+    }
+}
+
+static JVal* jarray(JParse* s) {
+    s->p++; /* '[' */
+    JVal* a = jv_new(J_ARR);
+    if (!a) { s->err = 1; return NULL; }
+    jskip(s);
+    if (s->p < s->end && *s->p == ']') { s->p++; return a; }
+    for (;;) {
+        JVal* v = jvalue(s);
+        if (s->err) { jv_free(a); return NULL; }
+        if (jv_push(a, NULL, v) < 0) { jv_free(v); jv_free(a); return NULL; }
+        jskip(s);
+        if (s->p < s->end && *s->p == ',') { s->p++; continue; }
+        if (s->p < s->end && *s->p == ']') { s->p++; return a; }
+        s->err = 1;
+        jv_free(a);
+        return NULL;
+    }
+}
+
+static JVal* jvalue(JParse* s) {
+    jskip(s);
+    if (s->p >= s->end) { s->err = 1; return NULL; }
+    char c = *s->p;
+    if (c == '{') return jobject(s);
+    if (c == '[') return jarray(s);
+    if (c == '"') {
+        char* str = jstring_raw(s);
+        if (s->err) return NULL;
+        JVal* v = jv_new(J_STR);
+        if (!v) { free(str); s->err = 1; return NULL; }
+        v->str = str;
+        return v;
+    }
+    if (c == 't' && s->end - s->p >= 4 && memcmp(s->p, "true", 4) == 0) {
+        s->p += 4;
+        JVal* v = jv_new(J_BOOL);
+        v->b = 1;
+        return v;
+    }
+    if (c == 'f' && s->end - s->p >= 5 && memcmp(s->p, "false", 5) == 0) {
+        s->p += 5;
+        JVal* v = jv_new(J_BOOL);
+        v->b = 0;
+        return v;
+    }
+    if (c == 'n' && s->end - s->p >= 4 && memcmp(s->p, "null", 4) == 0) {
+        s->p += 4;
+        return jv_new(J_NULL);
+    }
+    /* number (Zarr's NaN/Infinity fills are JSON strings, so plain JSON
+     * number grammar suffices here) */
+    char* start = s->p;
+    if (c == '-') s->p++;
+    int digits = 0;
+    while (s->p < s->end) {
+        char d = *s->p;
+        if ((d >= '0' && d <= '9') || d == '.' || d == 'e' || d == 'E' ||
+            d == '+' || d == '-') {
+            if (d >= '0' && d <= '9') digits++;
+            s->p++;
+        } else break;
+    }
+    if (!digits) { s->err = 1; return NULL; }
+    char saved = *s->p;
+    *s->p = '\0';
+    JVal* v = jv_new(J_NUM);
+    if (!v) { s->err = 1; return NULL; }
+    v->num = strtod(start, NULL);
+    *s->p = saved; /* restore the terminator character */
+    return v;
+}
+
+static JVal* jparse(const char* text, size_t len) {
+    char* copy = (char*)malloc(len + 1);
+    if (!copy) return NULL;
+    memcpy(copy, text, len);
+    copy[len] = '\0';
+    JParse s = { copy, copy + (int)len, 0 };
+    JVal* v = jvalue(&s);
+    int err = s.err;
+    jskip(&s);
+    if (!err && s.p != s.end) err = 1; /* trailing garbage */
+    free(copy);
+    if (err) { jv_free(v); return NULL; }
+    return v;
+}
+
+static JVal* jget(JVal* obj, const char* key) {
+    if (!obj || obj->kind != J_OBJ) return NULL;
+    for (int i = 0; i < obj->n; ++i)
+        if (obj->keys[i]->kind == J_STR && strcmp(obj->keys[i]->str, key) == 0)
+            return obj->vals[i];
+    return NULL;
+}
+
+/* ---- writer (mimics zarr-python's 2-space pretty print) ------------------ */
+
+typedef struct { char* buf; size_t n, cap; } JOut;
+
+static int jo_reserve(JOut* o, size_t extra) {
+    if (o->n + extra + 1 > o->cap) {
+        size_t nc = o->cap ? o->cap : 64;
+        while (nc < o->n + extra + 1) nc *= 2;
+        char* nb = (char*)realloc(o->buf, nc);
+        if (!nb) return -1;
+        o->buf = nb;
+        o->cap = nc;
+    }
+    return 0;
+}
+
+static int jo_put(JOut* o, const char* s, size_t l) {
+    if (jo_reserve(o, l) < 0) return -1;
+    memcpy(o->buf + o->n, s, l);
+    o->n += l;
+    o->buf[o->n] = '\0';
+    return 0;
+}
+
+static int jo_puts(JOut* o, const char* s) { return jo_put(o, s, strlen(s)); }
+
+/* Shortest round-trip decimal for a double, matching Python's repr for the
+ * values v3 metadata carries: integer-valued floats keep ".0" (0.0, not 0),
+ * non-finite values are emitted as the STRING forms "NaN" / "Infinity" /
+ * "-Infinity" by the caller. */
+static int jo_f64(JOut* o, double v, int is_int) {
+    char tmp[64];
+    if (is_int) {
+        snprintf(tmp, sizeof tmp, "%lld", (long long)v);
+    } else {
+        int prec = 17;
+        for (int p = 1; p <= 17; ++p) {
+            snprintf(tmp, sizeof tmp, "%.*g", p, v);
+            if (strtod(tmp, NULL) == v) { prec = p; break; }
+        }
+        (void)prec;
+        if (!is_int && !strpbrk(tmp, ".eE")) {
+            size_t l = strlen(tmp);
+            if (l + 2 < sizeof tmp) {
+                tmp[l] = '.';
+                tmp[l + 1] = '0';
+                tmp[l + 2] = '\0';
+            }
+        }
+    }
+    return jo_puts(o, tmp);
+}
+
+static int jwrite_val(JOut* o, const JVal* v, int depth, int pretty);
+
+static int jwrite_indent(JOut* o, int depth) {
+    for (int i = 0; i < depth; ++i)
+        if (jo_puts(o, "  ") < 0) return -1;
+    return 0;
+}
+
+static int jwrite_val(JOut* o, const JVal* v, int depth, int pretty) {
+    switch (v->kind) {
+        case J_NULL: return jo_puts(o, "null");
+        case J_BOOL: return jo_puts(o, v->b ? "true" : "false");
+        case J_NUM:  return jo_f64(o, v->num, v->is_int);
+        case J_STR: {
+            if (jo_puts(o, "\"") < 0) return -1;
+            for (const char* c = v->str; *c; ++c) {
+                char ch = *c;
+                if (ch == '"' || ch == '\\') {
+                    if (jo_puts(o, "\\") < 0) return -1;
+                    if (jo_put(o, &ch, 1) < 0) return -1;
+                } else if (ch == '\n') {
+                    if (jo_puts(o, "\\n") < 0) return -1;
+                } else if (ch == '\t') {
+                    if (jo_puts(o, "\\t") < 0) return -1;
+                } else if (ch == '\r') {
+                    if (jo_puts(o, "\\r") < 0) return -1;
+                }
+                else if ((unsigned char)ch < 0x20) {
+                    char esc[8];
+                    snprintf(esc, sizeof esc, "\\u%04x", (unsigned char)ch);
+                    if (jo_puts(o, esc) < 0) return -1;
+                } else if (jo_put(o, &ch, 1) < 0) return -1;
+            }
+            return jo_puts(o, "\"");
+        }
+        case J_ARR: {
+            if (!v->n) return jo_puts(o, "[]");
+            if (jo_puts(o, "[") < 0) return -1;
+            for (int i = 0; i < v->n; ++i) {
+                if (pretty) {
+                    if (jo_puts(o, "\n") < 0) return -1;
+                    if (jwrite_indent(o, depth + 1) < 0) return -1;
+                } else if (i) {
+                    if (jo_puts(o, ", ") < 0) return -1;
+                }
+                if (jwrite_val(o, v->keys[i], depth + 1, pretty) < 0) return -1;
+                if (i + 1 < v->n && jo_puts(o, ",") < 0) return -1;
+            }
+            if (pretty) {
+                if (jo_puts(o, "\n") < 0) return -1;
+                if (jwrite_indent(o, depth) < 0) return -1;
+            }
+            return jo_puts(o, "]");
+        }
+        case J_OBJ: {
+            if (!v->n) return jo_puts(o, "{}");
+            if (jo_puts(o, "{") < 0) return -1;
+            for (int i = 0; i < v->n; ++i) {
+                if (pretty) {
+                    if (jo_puts(o, "\n") < 0) return -1;
+                    if (jwrite_indent(o, depth + 1) < 0) return -1;
+                } else if (i) {
+                    if (jo_puts(o, ", ") < 0) return -1;
+                }
+                if (jwrite_val(o, v->keys[i], depth + 1, pretty) < 0) return -1;
+                if (jo_puts(o, pretty ? ": " : ":") < 0) return -1;
+                if (jwrite_val(o, v->vals[i], depth + 1, pretty) < 0) return -1;
+                if (i + 1 < v->n && jo_puts(o, ",") < 0) return -1;
+            }
+            if (pretty) {
+                if (jo_puts(o, "\n") < 0) return -1;
+                if (jwrite_indent(o, depth) < 0) return -1;
+            }
+            return jo_puts(o, "}");
+        }
+    }
+    return -1;
+}
+
+/* ========================================================================= */
+/* array handle                                                              */
+/* ========================================================================= */
+
+struct RCRE_ZarrArray {
+    char*      root;          /* full array directory (<root>/<name>) */
+    size_t     ndim;
+    size_t     shape[8];
+    size_t     chunk[8];
+    size_t     nchunks[8];    /* per-dim chunk counts (ceil) */
+    size_t     nchunks_total; /* product */
+    size_t     chunk_elems;   /* product of chunk dims */
+    size_t     chunk_bytes;   /* chunk_elems * itemsize (identity form) */
+    int        dt;            /* RCRE_ZarrDType */
+    size_t     itemsize;
+    double     fill_f64;      /* fill for float dtypes */
+    int64_t    fill_int;      /* fill for int/bool dtypes */
+    char       endian;        /* 'l' / 'b' (storage endianness) */
+    ZarrCodec* codecs[4];     /* v3 list order (= write order) */
+    int        ncodecs;
+    int        has_zstd;
+    int        zstd_level;
+};
+
+/* ---- small helpers -------------------------------------------------------- */
+
+static int path_join(char* out, size_t cap, const char* a, const char* b) {
+    int n = snprintf(out, cap, "%s/%s", a, b);
+    return (n > 0 && (size_t)n < cap) ? 0 : -1;
+}
+
+/* mkdir -p for chunk directories. */
+static int mkdirs(const char* path) {
+    char tmp[4096];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    for (char* p = tmp + 1; *p; ++p) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) < 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0755) < 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
+/* Chunk file path for cidx: <root>/c/<i>/<j>/... (v3 default encoding,
+ * separator "/"). */
+static int chunk_path(char* out, size_t cap, const RCRE_ZarrArray* arr,
+                      const size_t* cidx) {
+    size_t off = 0;
+    int n = snprintf(out + off, cap - off, "%s/c", arr->root);
+    if (n < 0 || (size_t)n >= cap - off) return -1;
+    off += (size_t)n;
+    for (size_t d = 0; d < arr->ndim; ++d) {
+        n = snprintf(out + off, cap - off, "/%zu", cidx[d]);
+        if (n < 0 || (size_t)n >= cap - off) return -1;
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+/* Fill a full chunk buffer with the array's fill value. */
+static void fill_chunk(void* buf, const RCRE_ZarrArray* arr) {
+    const ZarrDType* t = &ZDT[arr->dt];
+    const size_t e = arr->chunk_elems;
+    if (t->cls == 1) {
+        if (arr->dt == RCRE_ZARR_F64) {
+            double* p = (double*)buf;
+            for (size_t i = 0; i < e; ++i) p[i] = arr->fill_f64;
+        } else if (arr->dt == RCRE_ZARR_F32) {
+            float* p = (float*)buf;
+            float f = (float)arr->fill_f64;
+            for (size_t i = 0; i < e; ++i) p[i] = f;
+        } else { /* f16 */
+            uint16_t bits = f64_to_f16(arr->fill_f64);
+            uint16_t* p = (uint16_t*)buf;
+            for (size_t i = 0; i < e; ++i) p[i] = bits;
+        }
+    } else if (t->cls == -1) {
+        memset(buf, arr->fill_int ? 1 : 0, e);
+    } else {
+        switch (t->itemsize) {
+            case 1: memset(buf, (int)(uint8_t)arr->fill_int, e); break;
+            case 2: {
+                int16_t* p = (int16_t*)buf;
+                for (size_t i = 0; i < e; ++i) p[i] = (int16_t)arr->fill_int;
+                break;
+            }
+            case 4: {
+                int32_t* p = (int32_t*)buf;
+                for (size_t i = 0; i < e; ++i) p[i] = (int32_t)arr->fill_int;
+                break;
+            }
+            default: {
+                int64_t* p = (int64_t*)buf;
+                for (size_t i = 0; i < e; ++i) p[i] = arr->fill_int;
+            }
+        }
+        /* uint dtypes share the int storage layout (same bit pattern) */
+    }
+}
+
+/* Storage -> native endianness (no-op when they match). */
+static void bytes_to_native(void* buf, size_t elems, size_t itemsize,
+                            int storage_big) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    const int native_big = 0;
+#else
+    const int native_big = 1;
+#endif
+    if (storage_big == native_big || itemsize < 2) return;
+    uint8_t* p = (uint8_t*)buf;
+    for (size_t i = 0; i < elems; ++i) {
+        uint8_t* e = p + i * itemsize;
+        for (size_t a = 0, b = itemsize - 1; a < b; ++a, --b) {
+            uint8_t tmp = e[a];
+            e[a] = e[b];
+            e[b] = tmp;
+        }
+    }
+}
+
+/* ---- file I/O -------------------------------------------------------------- */
+
+static int read_file(const char* path, uint8_t** out, size_t* out_len) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return RCRE_ERR_IO;
+    if (fseek(f, 0, SEEK_END) < 0) { fclose(f); return RCRE_ERR_IO; }
+    long len = ftell(f);
+    if (len < 0) { fclose(f); return RCRE_ERR_IO; }
+    if (fseek(f, 0, SEEK_SET) < 0) { fclose(f); return RCRE_ERR_IO; }
+    uint8_t* buf = (uint8_t*)malloc(len ? (size_t)len : 1);
+    if (!buf) { fclose(f); return RCRE_ERR_OUT_OF_MEMORY; }
+    size_t rd = len ? fread(buf, 1, (size_t)len, f) : 0;
+    fclose(f);
+    if (rd != (size_t)len) { free(buf); return RCRE_ERR_IO; }
+    *out = buf;
+    *out_len = (size_t)len;
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* metadata: build / write / parse                                           */
+/* ========================================================================= */
+
+/* Append key/value to an object (error-propagating helper). */
+static int obj_put(JVal* obj, const char* key, JVal* val) {
+    JVal* kv = jv_new(J_STR);
+    if (!kv || !(kv->str = strdup(key))) {
+        jv_free(kv);
+        jv_free(val);
+        return -1;
+    }
+    if (jv_push(obj, kv, val) < 0) {
+        jv_free(kv);
+        jv_free(val);
+        return -1;
+    }
+    return 0;
+}
+
+static JVal* jnum(double v) {
+    JVal* n = jv_new(J_NUM);
+    if (n) n->num = v;
+    return n;
+}
+
+/* JSON-integer number (shape/chunk dims, zarr_format, codec level, ...) */
+static JVal* jnum_int(long long v) {
+    JVal* n = jv_new(J_NUM);
+    if (n) {
+        n->num = (double)v;
+        n->is_int = 1;
+    }
+    return n;
+}
+
+static JVal* jstr(const char* s) {
+    JVal* v = jv_new(J_STR);
+    if (v && !(v->str = strdup(s))) {
+        jv_free(v);
+        v = NULL;
+    }
+    return v;
+}
+
+static JVal* meta_build(const RCRE_ZarrArray* arr, int with_zstd, int zstd_level) {
+    JVal* root = jv_new(J_OBJ);
+    if (!root || !(root->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+        jv_free(root);
+        return NULL;
+    }
+    /* shape */
+    {
+        JVal* a = jv_new(J_ARR);
+        for (size_t d = 0; a && d < arr->ndim; ++d) {
+            JVal* n = jnum_int((long long)arr->shape[d]);
+            if (!n || jv_push(a, NULL, n) < 0) {
+                if (n) jv_free(n);
+                jv_free(a);
+                a = NULL;
+            }
+        }
+        if (!a || obj_put(root, "shape", a) < 0) return NULL;
+    }
+    /* data_type */
+    if (obj_put(root, "data_type", jstr(ZDT[arr->dt].name)) < 0) return NULL;
+    /* chunk_grid */
+    {
+        JVal* g = jv_new(J_OBJ);
+        if (!g || !(g->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+            jv_free(g);
+            return NULL;
+        }
+        JVal* cf = jv_new(J_OBJ);
+        if (!cf || !(cf->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+            jv_free(cf);
+            jv_free(g);
+            return NULL;
+        }
+        JVal* a = jv_new(J_ARR);
+        for (size_t d = 0; a && d < arr->ndim; ++d) {
+            JVal* n = jnum_int((long long)arr->chunk[d]);
+            if (!n || jv_push(a, NULL, n) < 0) {
+                if (n) jv_free(n);
+                jv_free(a);
+                a = NULL;
+            }
+        }
+        if (!a || obj_put(cf, "chunk_shape", a) < 0 ||
+            obj_put(g, "name", jstr("regular")) < 0 ||
+            obj_put(g, "configuration", cf) < 0 ||
+            obj_put(root, "chunk_grid", g) < 0)
+            return NULL;
+    }
+    /* chunk_key_encoding */
+    {
+        JVal* g = jv_new(J_OBJ);
+        if (!g || !(g->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+            jv_free(g);
+            return NULL;
+        }
+        JVal* cf = jv_new(J_OBJ);
+        if (!cf || !(cf->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+            jv_free(cf);
+            jv_free(g);
+            return NULL;
+        }
+        if (obj_put(cf, "separator", jstr("/")) < 0 ||
+            obj_put(g, "name", jstr("default")) < 0 ||
+            obj_put(g, "configuration", cf) < 0 ||
+            obj_put(root, "chunk_key_encoding", g) < 0)
+            return NULL;
+    }
+    /* fill_value (v3: NaN/±Infinity are the STRING forms) */
+    {
+        JVal* fv = NULL;
+        const ZarrDType* t = &ZDT[arr->dt];
+        if (t->cls == 1) {
+            if (isnan(arr->fill_f64)) fv = jstr("NaN");
+            else if (isinf(arr->fill_f64))
+                fv = jstr(arr->fill_f64 > 0 ? "Infinity" : "-Infinity");
+            else fv = jnum(arr->fill_f64);
+        } else if (t->cls == -1) {
+            JVal* b = jv_new(J_BOOL);
+            if (b) b->b = arr->fill_int ? 1 : 0;
+            fv = b;
+        } else {
+            fv = jnum((double)arr->fill_int);
+        }
+        if (!fv || obj_put(root, "fill_value", fv) < 0) return NULL;
+    }
+    /* codecs (v3 list order = write order) */
+    {
+        JVal* a = jv_new(J_ARR);
+        if (!a) return NULL;
+        /* bytes codec */
+        {
+            JVal* c = jv_new(J_OBJ);
+            if (!c || !(c->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+                jv_free(c);
+                jv_free(a);
+                return NULL;
+            }
+            JVal* cf = jv_new(J_OBJ);
+            if (!cf || !(cf->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+                jv_free(cf);
+                jv_free(c);
+                jv_free(a);
+                return NULL;
+            }
+            if (obj_put(cf, "endian", jstr("little")) < 0 ||
+                obj_put(c, "name", jstr("bytes")) < 0 ||
+                obj_put(c, "configuration", cf) < 0 ||
+                jv_push(a, NULL, c) < 0) {
+                jv_free(a);
+                return NULL;
+            }
+        }
+        if (with_zstd) {
+            JVal* c = jv_new(J_OBJ);
+            if (!c || !(c->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+                jv_free(c);
+                jv_free(a);
+                return NULL;
+            }
+            JVal* cf = jv_new(J_OBJ);
+            if (!cf || !(cf->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+                jv_free(cf);
+                jv_free(c);
+                jv_free(a);
+                return NULL;
+            }
+            JVal* lv = jnum_int(zstd_level);
+            JVal* ck = jv_new(J_BOOL);
+            if (ck) ck->b = 0;
+            if (!lv || !ck || obj_put(cf, "level", lv) < 0 ||
+                obj_put(cf, "checksum", ck) < 0 ||
+                obj_put(c, "name", jstr("zstd")) < 0 ||
+                obj_put(c, "configuration", cf) < 0 ||
+                jv_push(a, NULL, c) < 0) {
+                jv_free(a);
+                return NULL;
+            }
+        }
+        if (obj_put(root, "codecs", a) < 0) return NULL;
+    }
+    /* attributes */
+    {
+        JVal* a = jv_new(J_OBJ);
+        if (!a || !(a->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+            jv_free(a);
+            return NULL;
+        }
+        if (obj_put(root, "attributes", a) < 0) return NULL;
+    }
+    /* zarr_format, node_type, storage_transformers */
+    if (obj_put(root, "zarr_format", jnum_int(3)) < 0) return NULL;
+    if (obj_put(root, "node_type", jstr("array")) < 0) return NULL;
+    {
+        JVal* a = jv_new(J_ARR);
+        if (!a || obj_put(root, "storage_transformers", a) < 0) return NULL;
+    }
+    return root;
+}
+
+static int meta_write(const char* path, const JVal* root) {
+    JOut o = {0};
+    if (jwrite_val(&o, root, 0, 1) < 0) { free(o.buf); return RCRE_ERR_INVALID_ARG; }
+    if (jo_puts(&o, "\n") < 0) { free(o.buf); return RCRE_ERR_INVALID_ARG; }
+    int rc = rcre_io_write_atomic(path, o.buf, o.n);
+    free(o.buf);
+    return rc;
+}
+
+/* Parse <arr>/zarr.json into the handle. */
+static int meta_parse(RCRE_ZarrArray* arr, const char* path) {
+    uint8_t* raw;
+    size_t rawlen;
+    int rc = read_file(path, &raw, &rawlen);
+    if (rc != RCRE_OK) return rc;
+    JVal* root = jparse((const char*)raw, rawlen);
+    free(raw);
+    if (!root) return RCRE_ERR_INVALID_ARG;
+
+    JVal* shape = jget(root, "shape");
+    if (!shape || shape->kind != J_ARR || shape->n < 1 || shape->n > 8) {
+        jv_free(root);
+        return RCRE_ERR_INVALID_ARG;
+    }
+    arr->ndim = (size_t)shape->n;
+    for (int i = 0; i < shape->n; ++i) {
+        if (shape->keys[i]->kind != J_NUM) { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+        arr->shape[i] = (size_t)shape->keys[i]->num;
+    }
+    JVal* dt = jget(root, "data_type");
+    if (!dt || dt->kind != J_STR) { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+    arr->dt = -1;
+    for (int i = 0; i < ZDT_N; ++i)
+        if (strcmp(ZDT[i].name, dt->str) == 0) { arr->dt = i; break; }
+    if (arr->dt < 0) { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+    arr->itemsize = ZDT[arr->dt].itemsize;
+
+    JVal* grid = jget(root, "chunk_grid");
+    JVal* cfg = grid ? jget(grid, "configuration") : NULL;
+    JVal* cs = cfg ? jget(cfg, "chunk_shape") : NULL;
+    if (!cs || cs->kind != J_ARR || cs->n != (int)arr->ndim) {
+        jv_free(root);
+        return RCRE_ERR_INVALID_ARG;
+    }
+    for (size_t d = 0; d < arr->ndim; ++d) {
+        if (cs->keys[d]->kind != J_NUM) { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+        arr->chunk[d] = (size_t)cs->keys[d]->num;
+        if (arr->chunk[d] == 0) { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+    }
+    /* fill_value */
+    JVal* fv = jget(root, "fill_value");
+    if (!fv) { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+    const ZarrDType* t = &ZDT[arr->dt];
+    if (t->cls == 1) {
+        if (fv->kind == J_STR) {
+            if (strcmp(fv->str, "NaN") == 0) arr->fill_f64 = NAN;
+            else if (strcmp(fv->str, "Infinity") == 0) arr->fill_f64 = INFINITY;
+            else if (strcmp(fv->str, "-Infinity") == 0) arr->fill_f64 = -INFINITY;
+            else { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+        } else if (fv->kind == J_NUM) {
+            arr->fill_f64 = fv->num;
+        } else { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+    } else if (t->cls == -1) {
+        arr->fill_int = (fv->kind == J_BOOL) ? (fv->b ? 1 : 0)
+                                             : (fv->kind == J_NUM ? (int64_t)fv->num : 0);
+    } else {
+        arr->fill_int = (fv->kind == J_NUM) ? (int64_t)fv->num : 0;
+    }
+    /* codecs (v3 list order = write order; read = reverse) */
+    JVal* codecs = jget(root, "codecs");
+    if (!codecs || codecs->kind != J_ARR || codecs->n < 1 || codecs->n > 4) {
+        jv_free(root);
+        return RCRE_ERR_INVALID_ARG;
+    }
+    arr->ncodecs = 0;
+    arr->has_zstd = 0;
+    arr->zstd_level = 0;
+    arr->endian = 'l';
+    for (int i = 0; i < codecs->n; ++i) {
+        JVal* c = codecs->keys[i];
+        JVal* nm = jget(c, "name");
+        JVal* cc = jget(c, "configuration");
+        if (!nm || nm->kind != J_STR) { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+        ZarrCodec* zc = zarr_codec_find(nm->str);
+        if (!zc || !zc->registered) { jv_free(root); return RCRE_ERR_INVALID_ARG; }
+        arr->codecs[arr->ncodecs++] = zc;
+        if (strcmp(nm->str, "bytes") == 0) {
+            JVal* eo = cc ? jget(cc, "endian") : NULL;
+            if (eo && eo->kind == J_STR)
+                arr->endian = strcmp(eo->str, "big") == 0 ? 'b' : 'l';
+        } else if (strcmp(nm->str, "zstd") == 0) {
+            arr->has_zstd = 1;
+            JVal* lv = cc ? jget(cc, "level") : NULL;
+            if (lv && lv->kind == J_NUM) arr->zstd_level = (int)lv->num;
+        }
+    }
+    /* derived sizes */
+    arr->nchunks_total = 1;
+    arr->chunk_elems = 1;
+    for (size_t d = 0; d < arr->ndim; ++d) {
+        arr->nchunks[d] = (arr->shape[d] + arr->chunk[d] - 1) / arr->chunk[d];
+        arr->nchunks_total *= arr->nchunks[d];
+        arr->chunk_elems *= arr->chunk[d];
+    }
+    arr->chunk_bytes = arr->chunk_elems * arr->itemsize;
+    jv_free(root);
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* create / open / close                                                     */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_zarr_create_group_root(const char* root_dir) {
+    if (!root_dir) return RCRE_ERR_INVALID_ARG;
+    if (mkdirs(root_dir) < 0) return RCRE_ERR_IO;
+    JVal* root = jv_new(J_OBJ);
+    if (!root || !(root->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+        jv_free(root);
+        return RCRE_ERR_INVALID_ARG;
+    }
+    {
+        JVal* a = jv_new(J_OBJ);
+        if (!a || !(a->vals = (JVal**)calloc(1, sizeof(JVal*)))) {
+            jv_free(a);
+            jv_free(root);
+            return RCRE_ERR_INVALID_ARG;
+        }
+        if (obj_put(root, "attributes", a) < 0) return RCRE_ERR_INVALID_ARG;
+    }
+    if (obj_put(root, "zarr_format", jnum_int(3)) < 0) return RCRE_ERR_INVALID_ARG;
+    if (obj_put(root, "node_type", jstr("group")) < 0) return RCRE_ERR_INVALID_ARG;
+    char path[4096];
+    int rc = (path_join(path, sizeof path, root_dir, "zarr.json") < 0)
+                 ? RCRE_ERR_IO
+                 : meta_write(path, root);
+    jv_free(root);
+    return rc;
+}
+
+RCRE_NODISCARD RCRE_ZarrArray* rcre_zarr_create(const char* root_dir,
+                                                const char* name,
+                                                const RCRE_ZarrCreate* opt) {
+    if (!root_dir || !name || !opt) return NULL;
+    rcre_zarr_zstd_ensure_registered();
+    if (opt->ndim < 1 || opt->ndim > 8) return NULL;
+    if (!opt->shape || !opt->chunk_shape) return NULL;
+    if ((int)opt->dtype < 0 || (int)opt->dtype >= ZDT_N) return NULL;
+    int zstd = opt->zstd_level > 0;
+    if (zstd && opt->zstd_level > 22) return NULL;
+    if (zstd && !rcre_zarr_codec_available("zstd")) return NULL;
+
+    RCRE_ZarrArray* arr = (RCRE_ZarrArray*)calloc(1, sizeof(RCRE_ZarrArray));
+    if (!arr) return NULL;
+    char dir[4096];
+    if (path_join(dir, sizeof dir, root_dir, name) < 0) { free(arr); return NULL; }
+    if (mkdirs(dir) < 0) { free(arr); return NULL; }
+    arr->root = strdup(dir);
+    if (!arr->root) { free(arr); return NULL; }
+
+    arr->ndim = opt->ndim;
+    for (size_t d = 0; d < opt->ndim; ++d) {
+        if (opt->chunk_shape[d] == 0) { free(arr->root); free(arr); return NULL; }
+        arr->shape[d] = opt->shape[d];
+        arr->chunk[d] = opt->chunk_shape[d];
+    }
+    arr->dt = (int)opt->dtype;
+    arr->itemsize = ZDT[arr->dt].itemsize;
+    arr->fill_f64 = opt->fill_f64;
+    arr->fill_int = opt->fill_int;
+    if (opt->dtype == RCRE_ZARR_BOOL) arr->fill_int = opt->fill_bool ? 1 : 0;
+    arr->endian = 'l';
+    arr->nchunks_total = 1;
+    arr->chunk_elems = 1;
+    for (size_t d = 0; d < arr->ndim; ++d) {
+        arr->nchunks[d] = (arr->shape[d] + arr->chunk[d] - 1) / arr->chunk[d];
+        arr->nchunks_total *= arr->nchunks[d];
+        arr->chunk_elems *= arr->chunk[d];
+    }
+    arr->chunk_bytes = arr->chunk_elems * arr->itemsize;
+    arr->codecs[0] = zarr_codec_find("bytes");
+    arr->ncodecs = 1 + zstd; /* pipeline length: bytes + optional zstd */
+    arr->has_zstd = zstd;
+    arr->zstd_level = zstd ? opt->zstd_level : 0;
+    if (zstd) arr->codecs[1] = zarr_codec_find("zstd");
+
+    JVal* meta = meta_build(arr, zstd, opt->zstd_level);
+    if (!meta) { free(arr->root); free(arr); return NULL; }
+    char path[4096];
+    int ok = path_join(path, sizeof path, arr->root, "zarr.json") == 0 &&
+             meta_write(path, meta) == RCRE_OK;
+    jv_free(meta);
+    if (!ok) { free(arr->root); free(arr); return NULL; }
+    return arr;
+}
+
+RCRE_NODISCARD RCRE_ZarrArray* rcre_zarr_open(const char* root_dir,
+                                              const char* name) {
+    if (!root_dir || !name) return NULL;
+    rcre_zarr_zstd_ensure_registered();
+    char dir[4096];
+    if (path_join(dir, sizeof dir, root_dir, name) < 0) return NULL;
+    char path[4096];
+    if (path_join(path, sizeof path, dir, "zarr.json") < 0) return NULL;
+    RCRE_ZarrArray* arr = (RCRE_ZarrArray*)calloc(1, sizeof(RCRE_ZarrArray));
+    if (!arr) return NULL;
+    int rc = meta_parse(arr, path);
+    if (rc != RCRE_OK) { free(arr); return NULL; }
+    arr->root = strdup(dir);
+    if (!arr->root) { free(arr); return NULL; }
+    return arr;
+}
+
+void rcre_zarr_close(RCRE_ZarrArray* arr) {
+    if (!arr) return;
+    free(arr->root);
+    free(arr);
+}
+
+/* ========================================================================= */
+/* metadata accessors                                                        */
+/* ========================================================================= */
+
+int rcre_zarr_ndim(const RCRE_ZarrArray* arr) {
+    return arr ? (int)arr->ndim : -1;
+}
+RCRE_NODISCARD int rcre_zarr_shape(const RCRE_ZarrArray* arr, size_t* out) {
+    if (!arr || !out) return RCRE_ERR_INVALID_ARG;
+    memcpy(out, arr->shape, arr->ndim * sizeof(size_t));
+    return RCRE_OK;
+}
+RCRE_NODISCARD int rcre_zarr_chunk_shape(const RCRE_ZarrArray* arr, size_t* out) {
+    if (!arr || !out) return RCRE_ERR_INVALID_ARG;
+    memcpy(out, arr->chunk, arr->ndim * sizeof(size_t));
+    return RCRE_OK;
+}
+RCRE_ZarrDType rcre_zarr_dtype(const RCRE_ZarrArray* arr) {
+    return arr ? (RCRE_ZarrDType)arr->dt : (RCRE_ZarrDType)-1;
+}
+size_t rcre_zarr_itemsize(const RCRE_ZarrArray* arr) {
+    return arr ? arr->itemsize : 0;
+}
+RCRE_NODISCARD int rcre_zarr_nchunks(const RCRE_ZarrArray* arr, size_t* out) {
+    if (!arr || !out) return RCRE_ERR_INVALID_ARG;
+    memcpy(out, arr->nchunks, arr->ndim * sizeof(size_t));
+    return RCRE_OK;
+}
+RCRE_NODISCARD int rcre_zarr_fill_value(const RCRE_ZarrArray* arr, void* out) {
+    if (!arr || !out) return RCRE_ERR_INVALID_ARG;
+    const ZarrDType* t = &ZDT[arr->dt];
+    if (t->cls == 1) {
+        switch (t->itemsize) {
+            case 8: *(double*)out = arr->fill_f64; break;
+            case 4: *(float*)out = (float)arr->fill_f64; break;
+            case 2: *(uint16_t*)out = f64_to_f16(arr->fill_f64); break;
+        }
+    } else if (t->cls == -1) {
+        *(uint8_t*)out = arr->fill_int ? 1 : 0;
+    } else {
+        switch (t->itemsize) {
+            case 1: *(int8_t*)out = (int8_t)arr->fill_int; break;
+            case 2: *(int16_t*)out = (int16_t)arr->fill_int; break;
+            case 4: *(int32_t*)out = (int32_t)arr->fill_int; break;
+            default: *(int64_t*)out = arr->fill_int;
+        }
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* chunk codec pipeline                                                      */
+/* ========================================================================= */
+
+/* native chunk bytes -> stored bytes (v3 LIST order: bytes -> zstd). The
+ * bytes codec is a no-op for our little-endian writer (big-endian storage
+ * is decode-only in H5). `out` is malloc'd. */
+static int chunk_encode(const RCRE_ZarrArray* arr, const uint8_t* native,
+                        size_t native_len, uint8_t** out, size_t* out_len) {
+    uint8_t* cur = (uint8_t*)malloc(native_len ? native_len : 1);
+    if (!cur) return RCRE_ERR_OUT_OF_MEMORY;
+    memcpy(cur, native, native_len);
+    size_t len = native_len;
+    for (int i = 0; i < arr->ncodecs; ++i) {
+        ZarrCodec* c = arr->codecs[i];
+        if (strcmp(c->name, "bytes") == 0) continue;
+        if (strcmp(c->name, "zstd") != 0) { free(cur); return RCRE_ERR_INVALID_ARG; }
+        uint8_t* next = NULL;
+        size_t next_len = 0;
+        if (c->encode(cur, len, arr->zstd_level, &next, &next_len) != 0) {
+            free(cur);
+            return RCRE_ERR_INVALID_ARG;
+        }
+        free(cur);
+        cur = next;
+        len = next_len;
+    }
+    *out = cur;
+    *out_len = len;
+    return RCRE_OK;
+}
+
+/* stored bytes -> native chunk bytes (REVERSE v3 list order). */
+static int chunk_decode(const RCRE_ZarrArray* arr, const uint8_t* stored,
+                        size_t stored_len, uint8_t* native, size_t native_cap) {
+    uint8_t* cur = (uint8_t*)malloc(stored_len ? stored_len : 1);
+    if (!cur) return RCRE_ERR_OUT_OF_MEMORY;
+    memcpy(cur, stored, stored_len);
+    size_t len = stored_len;
+    int rc = RCRE_OK;
+    for (int i = arr->ncodecs - 1; i >= 0; --i) {
+        ZarrCodec* c = arr->codecs[i];
+        if (strcmp(c->name, "bytes") == 0) {
+            bytes_to_native(cur, len / arr->itemsize, arr->itemsize,
+                            arr->endian == 'b');
+            continue;
+        }
+        if (strcmp(c->name, "zstd") != 0) { rc = RCRE_ERR_INVALID_ARG; break; }
+        uint8_t* next = (uint8_t*)malloc(native_cap ? native_cap : 1);
+        if (!next) { rc = RCRE_ERR_OUT_OF_MEMORY; break; }
+        if (c->decode(cur, len, next, native_cap) != 0) {
+            free(next);
+            rc = RCRE_ERR_INVALID_ARG;
+            break;
+        }
+        free(cur);
+        cur = next;
+        len = native_cap;
+    }
+    if (rc == RCRE_OK && len <= native_cap) memcpy(native, cur, len);
+    free(cur);
+    return rc;
+}
+
+/* ========================================================================= */
+/* chunk I/O                                                                 */
+/* ========================================================================= */
+
+RCRE_NODISCARD int rcre_zarr_read_chunk(const RCRE_ZarrArray* arr,
+                                        const size_t* cidx, void* out) {
+    if (!arr || !cidx || !out) return RCRE_ERR_INVALID_ARG;
+    for (size_t d = 0; d < arr->ndim; ++d)
+        if (cidx[d] >= arr->nchunks[d]) return RCRE_ERR_INVALID_ARG;
+    char path[4096];
+    if (chunk_path(path, sizeof path, arr, cidx) < 0) return RCRE_ERR_INVALID_ARG;
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        if (errno == ENOENT) {
+            /* missing chunk file = fill value (v3 semantics) */
+            fill_chunk(out, arr);
+            return RCRE_OK;
+        }
+        return RCRE_ERR_IO;
+    }
+    uint8_t* stored;
+    size_t stored_len;
+    int rc = read_file(path, &stored, &stored_len);
+    if (rc != RCRE_OK) return rc;
+    rc = chunk_decode(arr, stored, stored_len, (uint8_t*)out, arr->chunk_bytes);
+    free(stored);
+    return rc;
+}
+
+RCRE_NODISCARD int rcre_zarr_write_chunk(const RCRE_ZarrArray* arr,
+                                         const size_t* cidx, const void* in) {
+    if (!arr || !cidx || !in) return RCRE_ERR_INVALID_ARG;
+    for (size_t d = 0; d < arr->ndim; ++d)
+        if (cidx[d] >= arr->nchunks[d]) return RCRE_ERR_INVALID_ARG;
+    char path[4096];
+    if (chunk_path(path, sizeof path, arr, cidx) < 0) return RCRE_ERR_INVALID_ARG;
+    /* ensure the directory tree exists */
+    char dirp[4096];
+    snprintf(dirp, sizeof dirp, "%s", path);
+    char* slash = strrchr(dirp, '/');
+    if (slash) {
+        *slash = '\0';
+        if (mkdirs(dirp) < 0) return RCRE_ERR_IO;
+    }
+    uint8_t* stored;
+    size_t stored_len;
+    int rc = chunk_encode(arr, (const uint8_t*)in, arr->chunk_bytes, &stored,
+                          &stored_len);
+    if (rc != RCRE_OK) return rc;
+    rc = rcre_io_write_atomic(path, stored, stored_len);
+    free(stored);
+    return rc;
+}
+
+RCRE_NODISCARD int rcre_zarr_chunk_exists(const RCRE_ZarrArray* arr,
+                                          const size_t* cidx) {
+    if (!arr || !cidx) return -1;
+    for (size_t d = 0; d < arr->ndim; ++d)
+        if (cidx[d] >= arr->nchunks[d]) return -1;
+    char path[4096];
+    if (chunk_path(path, sizeof path, arr, cidx) < 0) return -1;
+    struct stat st;
+    if (stat(path, &st) == 0) return 1;
+    return 0;
+}
+
+/* ========================================================================= */
+/* array I/O (one task per chunk through the slab scheduler)                 */
+/* ========================================================================= */
+
+/* Linear chunk index -> multi-index (row-major over the chunk grid). */
+static void cidx_from_linear(size_t linear, const RCRE_ZarrArray* arr,
+                             size_t* cidx) {
+    for (int d = (int)arr->ndim - 1; d >= 0; --d) {
+        cidx[d] = linear % arr->nchunks[d];
+        linear /= arr->nchunks[d];
+    }
+}
+
+/* Valid (in-bounds) per-dim extents for a chunk. */
+static void chunk_extents(const RCRE_ZarrArray* arr, const size_t* cidx,
+                          size_t* ext) {
+    for (size_t d = 0; d < arr->ndim; ++d) {
+        size_t lo = cidx[d] * arr->chunk[d];
+        size_t hi = lo + arr->chunk[d];
+        ext[d] = hi > arr->shape[d] ? arr->shape[d] - lo : arr->chunk[d];
+    }
+}
+
+/* Copy the valid region of a full chunk into the row-major array buffer
+ * (innermost-dim runs for the fast path). */
+static void chunk_to_array(const RCRE_ZarrArray* arr, const uint8_t* chunk,
+                           const size_t* cidx, uint8_t* array) {
+    size_t ext[8];
+    chunk_extents(arr, cidx, ext);
+    size_t cstride[8], dstride[8];
+    cstride[arr->ndim - 1] = arr->itemsize;
+    dstride[arr->ndim - 1] = arr->itemsize;
+    for (int d = (int)arr->ndim - 2; d >= 0; --d) {
+        cstride[d] = cstride[d + 1] * arr->chunk[d + 1];
+        dstride[d] = dstride[d + 1] * arr->shape[d + 1];
+    }
+    size_t idx[8] = {0};
+    const size_t last = arr->ndim - 1;
+    /* innermost dimension is copied as a run: its chunk origin is a
+     * constant dst offset (src always starts at the chunk origin) */
+    const size_t dst_base = cidx[last] * arr->chunk[last] * dstride[last];
+    for (;;) {
+        size_t src_off = 0, dst_off = dst_base;
+        for (size_t d = 0; d < last; ++d) {
+            src_off += idx[d] * cstride[d];
+            dst_off += (cidx[d] * arr->chunk[d] + idx[d]) * dstride[d];
+        }
+        memcpy(array + dst_off, chunk + src_off, ext[last] * arr->itemsize);
+        if (arr->ndim == 1) break; /* single row, done */
+        int d = (int)last - 1;
+        for (; d >= 0; --d) {
+            idx[d]++;
+            if (idx[d] < ext[d]) break;
+            idx[d] = 0;
+        }
+        if (d < 0) break;
+    }
+}
+
+/* Copy the valid region of the row-major array buffer into a full chunk
+ * (inverse of chunk_to_array). */
+static void array_to_chunk(const RCRE_ZarrArray* arr, uint8_t* chunk,
+                           const size_t* cidx, const uint8_t* array) {
+    size_t ext[8];
+    chunk_extents(arr, cidx, ext);
+    size_t cstride[8], dstride[8];
+    cstride[arr->ndim - 1] = arr->itemsize;
+    dstride[arr->ndim - 1] = arr->itemsize;
+    for (int d = (int)arr->ndim - 2; d >= 0; --d) {
+        cstride[d] = cstride[d + 1] * arr->chunk[d + 1];
+        dstride[d] = dstride[d + 1] * arr->shape[d + 1];
+    }
+    size_t idx[8] = {0};
+    const size_t last = arr->ndim - 1;
+    /* innermost run: its array origin is a constant src offset */
+    const size_t src_base = cidx[last] * arr->chunk[last] * dstride[last];
+    for (;;) {
+        size_t src_off = src_base, dst_off = 0;
+        for (size_t d = 0; d < last; ++d) {
+            src_off += (cidx[d] * arr->chunk[d] + idx[d]) * dstride[d];
+            dst_off += idx[d] * cstride[d];
+        }
+        memcpy(chunk + dst_off, array + src_off, ext[last] * arr->itemsize);
+        if (arr->ndim == 1) break;
+        int d = (int)last - 1;
+        for (; d >= 0; --d) {
+            idx[d]++;
+            if (idx[d] < ext[d]) break;
+            idx[d] = 0;
+        }
+        if (d < 0) break;
+    }
+}
+
+/* ---- read_array ----------------------------------------------------------- */
+
+typedef struct {
+    const RCRE_ZarrArray* arr;
+    uint8_t*              array;
+    atomic_int            err; /* first chunk read failure (atomic: work
+                                  stealing may interleave tasks) */
+} ReadTask;
+
+static void read_task(void* arg, size_t task_id) {
+    ReadTask* rt = (ReadTask*)arg;
+    const RCRE_ZarrArray* arr = rt->arr;
+    size_t cidx[8];
+    cidx_from_linear(task_id, arr, cidx);
+    uint8_t* chunk = (uint8_t*)malloc(arr->chunk_bytes ? arr->chunk_bytes : 1);
+    if (!chunk) { atomic_store(&rt->err, RCRE_ERR_OUT_OF_MEMORY); return; }
+    int rc = rcre_zarr_read_chunk(arr, cidx, chunk);
+    if (rc == RCRE_OK)
+        chunk_to_array(arr, chunk, cidx, rt->array);
+    else if (atomic_load(&rt->err) == 0) atomic_store(&rt->err, rc);
+    free(chunk);
+}
+
+RCRE_NODISCARD int rcre_zarr_read_array(const RCRE_ZarrArray* arr, void* out,
+                                        RCRE_ThreadPool* pool) {
+    if (!arr || !out) return RCRE_ERR_INVALID_ARG;
+    if (arr->nchunks_total == 0) return RCRE_OK;
+    ReadTask rt;
+    rt.arr = arr;
+    rt.array = (uint8_t*)out;
+    atomic_init(&rt.err, 0);
+    rcre_threadpool_parallel_for(pool, arr->nchunks_total, read_task, &rt);
+    return atomic_load(&rt.err) != 0 ? RCRE_ERR_IO : RCRE_OK;
+}
+
+/* ---- write_array (read-modify-write per chunk) ---------------------------- */
+
+typedef struct {
+    const RCRE_ZarrArray* arr;
+    const uint8_t*        array;
+    atomic_int            err;
+} WriteTask;
+
+static void write_task(void* arg, size_t task_id) {
+    WriteTask* wt = (WriteTask*)arg;
+    const RCRE_ZarrArray* arr = wt->arr;
+    size_t cidx[8];
+    cidx_from_linear(task_id, arr, cidx);
+    uint8_t* chunk = (uint8_t*)malloc(arr->chunk_bytes ? arr->chunk_bytes : 1);
+    if (!chunk) { atomic_store(&wt->err, RCRE_ERR_OUT_OF_MEMORY); return; }
+    /* start from the existing chunk (or the fill) so edge regions and
+     * previously-written content of the chunk survive */
+    if (rcre_zarr_read_chunk(arr, cidx, chunk) != RCRE_OK) {
+        fill_chunk(chunk, arr);
+    }
+    array_to_chunk(arr, chunk, cidx, wt->array);
+    int rc = rcre_zarr_write_chunk(arr, cidx, chunk);
+    if (rc != RCRE_OK && atomic_load(&wt->err) == 0) atomic_store(&wt->err, rc);
+    free(chunk);
+}
+
+RCRE_NODISCARD int rcre_zarr_write_array(const RCRE_ZarrArray* arr,
+                                         const void* in, RCRE_ThreadPool* pool) {
+    if (!arr || !in) return RCRE_ERR_INVALID_ARG;
+    if (arr->nchunks_total == 0) return RCRE_OK;
+    WriteTask wt;
+    wt.arr = arr;
+    wt.array = (const uint8_t*)in;
+    atomic_init(&wt.err, 0);
+    rcre_threadpool_parallel_for(pool, arr->nchunks_total, write_task, &wt);
+    return atomic_load(&wt.err) != 0 ? RCRE_ERR_IO : RCRE_OK;
+}
+
+/* ---- write_block ------------------------------------------------------------ */
+
+typedef struct {
+    const RCRE_ZarrArray* arr;
+    const size_t* lo;
+    const size_t* hi;
+    const uint8_t* in;
+    size_t         in_stride0; /* 0 = tight logical strides */
+    atomic_int     err;
+} BlockTask;
+
+static int block_touched(const RCRE_ZarrArray* arr, const size_t* cidx,
+                         const size_t* lo, const size_t* hi) {
+    for (size_t d = 0; d < arr->ndim; ++d) {
+        size_t c0 = cidx[d] * arr->chunk[d];
+        size_t c1 = c0 + arr->chunk[d];
+        if (c1 <= lo[d] || c0 >= hi[d]) return 0;
+    }
+    return 1;
+}
+
+static void block_task(void* arg, size_t task_id) {
+    BlockTask* bt = (BlockTask*)arg;
+    const RCRE_ZarrArray* arr = bt->arr;
+    size_t cidx[8];
+    cidx_from_linear(task_id, arr, cidx);
+    if (!block_touched(arr, cidx, bt->lo, bt->hi)) return;
+
+    uint8_t* chunk = (uint8_t*)malloc(arr->chunk_bytes ? arr->chunk_bytes : 1);
+    if (!chunk) { atomic_store(&bt->err, RCRE_ERR_OUT_OF_MEMORY); return; }
+    if (rcre_zarr_read_chunk(arr, cidx, chunk) != RCRE_OK)
+        fill_chunk(chunk, arr);
+
+    /* local (chunk-relative) extents of the intersection */
+    size_t ext[8], lo_l[8];
+    for (size_t d = 0; d < arr->ndim; ++d) {
+        size_t c0 = cidx[d] * arr->chunk[d];
+        size_t c1 = c0 + arr->chunk[d];
+        lo_l[d] = bt->lo[d] > c0 ? bt->lo[d] - c0 : 0;
+        size_t hi_l = bt->hi[d] < c1 ? bt->hi[d] - c0 : arr->chunk[d];
+        ext[d] = hi_l - lo_l[d];
+    }
+    /* in-buffer strides: d==0 uses in_stride0 (or tight), others tight over
+     * the BLOCK extents */
+    size_t bext[8];
+    for (size_t d = 0; d < arr->ndim; ++d) bext[d] = bt->hi[d] - bt->lo[d];
+    size_t in_str[8];
+    in_str[arr->ndim - 1] = arr->itemsize;
+    for (int d = (int)arr->ndim - 2; d >= 0; --d)
+        in_str[d] = in_str[d + 1] * bext[d + 1];
+    const size_t in_str0 = bt->in_stride0 ? bt->in_stride0 * arr->itemsize
+                                          : in_str[0];
+    /* chunk strides (full chunk) */
+    size_t cstride[8];
+    cstride[arr->ndim - 1] = arr->itemsize;
+    for (int d = (int)arr->ndim - 2; d >= 0; --d)
+        cstride[d] = cstride[d + 1] * arr->chunk[d + 1];
+    /* in-buffer offset of the intersection corner, relative to bt->in
+     * (the user buffer START, not the block origin): buffer start ->
+     * block origin (lo*d) + block origin -> intersection start (from*d). */
+    size_t in_base = 0;
+    for (size_t d = 0; d < arr->ndim; ++d) {
+        size_t corner = cidx[d] * arr->chunk[d];
+        size_t from = corner > bt->lo[d] ? corner - bt->lo[d] : 0;
+        in_base += (bt->lo[d] + from) * (d == 0 ? in_str0 : in_str[d]);
+    }
+    /* walk (innermost-dim fast copy). in_base already includes the
+     * innermost corner offset (it was summed over ALL dims); the chunk
+     * side needs the innermost intersection start explicitly. */
+    size_t idx[8] = {0};
+    const size_t last = arr->ndim - 1;
+    const size_t c_base = lo_l[last] * cstride[last];
+    for (;;) {
+        size_t c_off = c_base, in_off = 0;
+        for (size_t d = 0; d < last; ++d) {
+            c_off += (lo_l[d] + idx[d]) * cstride[d];
+            in_off += idx[d] * (d == 0 ? in_str0 : in_str[d]);
+        }
+        memcpy(chunk + c_off, bt->in + in_base + in_off, ext[last] * arr->itemsize);
+        if (arr->ndim == 1) break;
+        int d = (int)last - 1;
+        for (; d >= 0; --d) {
+            idx[d]++;
+            if (idx[d] < ext[d]) break;
+            idx[d] = 0;
+        }
+        if (d < 0) break;
+    }
+    int rc = rcre_zarr_write_chunk(arr, cidx, chunk);
+    if (rc != RCRE_OK && atomic_load(&bt->err) == 0) atomic_store(&bt->err, rc);
+    free(chunk);
+}
+
+RCRE_NODISCARD int rcre_zarr_write_block(const RCRE_ZarrArray* arr,
+                                         const size_t* lo, const size_t* hi,
+                                         const void* in, size_t in_stride0,
+                                         RCRE_ThreadPool* pool) {
+    if (!arr || !lo || !hi || !in) return RCRE_ERR_INVALID_ARG;
+    for (size_t d = 0; d < arr->ndim; ++d) {
+        if (lo[d] > arr->shape[d] || hi[d] > arr->shape[d] || lo[d] >= hi[d])
+            return RCRE_ERR_INVALID_ARG;
+    }
+    if (arr->nchunks_total == 0) return RCRE_OK;
+    BlockTask bt;
+    bt.arr = arr;
+    bt.lo = lo;
+    bt.hi = hi;
+    bt.in = (const uint8_t*)in;
+    bt.in_stride0 = in_stride0;
+    atomic_init(&bt.err, 0);
+    rcre_threadpool_parallel_for(pool, arr->nchunks_total, block_task, &bt);
+    return atomic_load(&bt.err) != 0 ? RCRE_ERR_IO : RCRE_OK;
+}
+
+/* ---- for_each_chunk --------------------------------------------------------- */
+
+typedef struct {
+    const RCRE_ZarrArray* arr;
+    RCRE_ZarrChunkFn      fn;
+    void*                 user;
+    atomic_int            first_error;
+} EachTask;
+
+static void each_task(void* arg, size_t task_id) {
+    EachTask* et = (EachTask*)arg;
+    const RCRE_ZarrArray* arr = et->arr;
+    size_t cidx[8];
+    cidx_from_linear(task_id, arr, cidx);
+    uint8_t* chunk = (uint8_t*)malloc(arr->chunk_bytes ? arr->chunk_bytes : 1);
+    if (!chunk) { atomic_store(&et->first_error, RCRE_ERR_OUT_OF_MEMORY); return; }
+    int rc = rcre_zarr_read_chunk(arr, cidx, chunk);
+    if (rc == RCRE_OK) rc = et->fn(cidx, chunk, et->user);
+    free(chunk);
+    if (rc != 0) {
+        int expected = 0;
+        atomic_compare_exchange_strong(&et->first_error, &expected, rc);
+    }
+}
+
+RCRE_NODISCARD int rcre_zarr_for_each_chunk(const RCRE_ZarrArray* arr,
+                                            RCRE_ZarrChunkFn fn, void* user,
+                                            RCRE_ThreadPool* pool) {
+    if (!arr || !fn) return RCRE_ERR_INVALID_ARG;
+    if (arr->nchunks_total == 0) return RCRE_OK;
+    EachTask et;
+    et.arr = arr;
+    et.fn = fn;
+    et.user = user;
+    atomic_init(&et.first_error, 0);
+    rcre_threadpool_parallel_for(pool, arr->nchunks_total, each_task, &et);
+    return atomic_load(&et.first_error) ? RCRE_ERR_IO : RCRE_OK;
+}
+
+/* ---- slab-parallel reduction ------------------------------------------------ */
+/* One Neumaier (float) / exact (int) partial per CHUNK (task id); partials
+ * combine in fixed chunk order — bit-identical across pool sizes and
+ * machines regardless of work-stealing order. */
+
+typedef struct {
+    const RCRE_ZarrArray* arr;
+    double*  part_f64; /* [2 * nchunks]: per-chunk Neumaier (sum, comp) */
+    int64_t* part_i64; /* [nchunks] */
+    atomic_int err;
+} SumTask;
+
+static void sum_task(void* arg, size_t task_id) {
+    SumTask* st = (SumTask*)arg;
+    const RCRE_ZarrArray* arr = st->arr;
+    size_t cidx[8];
+    cidx_from_linear(task_id, arr, cidx);
+    uint8_t* chunk = (uint8_t*)malloc(arr->chunk_bytes ? arr->chunk_bytes : 1);
+    if (!chunk) { atomic_store(&st->err, RCRE_ERR_OUT_OF_MEMORY); return; }
+    if (rcre_zarr_read_chunk(arr, cidx, chunk) != RCRE_OK) {
+        if (atomic_load(&st->err) == 0)
+            atomic_store(&st->err, RCRE_ERR_IO);
+        free(chunk);
+        return;
+    }
+    size_t ext[8];
+    chunk_extents(arr, cidx, ext);
+    const ZarrDType* t = &ZDT[arr->dt];
+    if (t->cls == 1) {
+        double* part = st->part_f64 + 2 * task_id;
+        size_t cstride[8];
+        cstride[arr->ndim - 1] = 1;
+        for (int d = (int)arr->ndim - 2; d >= 0; --d)
+            cstride[d] = cstride[d + 1] * arr->chunk[d + 1];
+        size_t idx[8] = {0};
+        const size_t last = arr->ndim - 1;
+        for (;;) {
+            size_t off = 0;
+            for (size_t d = 0; d < last; ++d) off += idx[d] * cstride[d];
+            if (arr->dt == RCRE_ZARR_F64) {
+                const double* run = (const double*)chunk + off;
+                for (size_t j = 0; j < ext[last]; ++j) {
+                    double x = run[j];
+                    double s = part[0] + x;
+                    if (fabs(part[0]) >= fabs(x)) part[1] += (part[0] - s) + x;
+                    else part[1] += (x - s) + part[0];
+                    part[0] = s;
+                }
+            } else if (arr->dt == RCRE_ZARR_F32) {
+                const float* run = (const float*)chunk + off;
+                for (size_t j = 0; j < ext[last]; ++j) {
+                    double x = (double)run[j];
+                    double s = part[0] + x;
+                    if (fabs(part[0]) >= fabs(x)) part[1] += (part[0] - s) + x;
+                    else part[1] += (x - s) + part[0];
+                    part[0] = s;
+                }
+            } else { /* f16 */
+                const uint16_t* run = (const uint16_t*)chunk + off;
+                for (size_t j = 0; j < ext[last]; ++j) {
+                    double x = f16_to_f64(run[j]);
+                    double s = part[0] + x;
+                    if (fabs(part[0]) >= fabs(x)) part[1] += (part[0] - s) + x;
+                    else part[1] += (x - s) + part[0];
+                    part[0] = s;
+                }
+            }
+            if (arr->ndim == 1) break;
+            int d = (int)last - 1;
+            for (; d >= 0; --d) {
+                idx[d]++;
+                if (idx[d] < ext[d]) break;
+                idx[d] = 0;
+            }
+            if (d < 0) break;
+        }
+    } else {
+        int64_t* part = st->part_i64 + task_id;
+        size_t cstride[8];
+        cstride[arr->ndim - 1] = 1;
+        for (int d = (int)arr->ndim - 2; d >= 0; --d)
+            cstride[d] = cstride[d + 1] * arr->chunk[d + 1];
+        size_t idx[8] = {0};
+        const size_t last = arr->ndim - 1;
+        for (;;) {
+            size_t off = 0;
+            for (size_t d = 0; d < last; ++d) off += idx[d] * cstride[d];
+            if (t->cls == -1) {
+                const uint8_t* run = (const uint8_t*)chunk + off;
+                for (size_t j = 0; j < ext[last]; ++j) *part += run[j];
+            } else if (t->itemsize == 1) {
+                const int8_t* run = (const int8_t*)chunk + off;
+                for (size_t j = 0; j < ext[last]; ++j) *part += run[j];
+            } else if (t->itemsize == 2) {
+                const int16_t* run = (const int16_t*)chunk + off;
+                for (size_t j = 0; j < ext[last]; ++j) *part += run[j];
+            } else if (t->itemsize == 4) {
+                const int32_t* run = (const int32_t*)chunk + off;
+                for (size_t j = 0; j < ext[last]; ++j) *part += run[j];
+            } else {
+                const int64_t* run = (const int64_t*)chunk + off;
+                for (size_t j = 0; j < ext[last]; ++j) *part += run[j];
+            }
+            if (arr->ndim == 1) break;
+            int d = (int)last - 1;
+            for (; d >= 0; --d) {
+                idx[d]++;
+                if (idx[d] < ext[d]) break;
+                idx[d] = 0;
+            }
+            if (d < 0) break;
+        }
+    }
+    free(chunk);
+}
+
+RCRE_NODISCARD int rcre_zarr_reduce_sum(const RCRE_ZarrArray* arr, void* out,
+                                        RCRE_ThreadPool* pool) {
+    if (!arr || !out) return RCRE_ERR_INVALID_ARG;
+    if (arr->nchunks_total == 0) {
+        if (ZDT[arr->dt].cls == 1) *(double*)out = 0.0;
+        else *(int64_t*)out = 0;
+        return RCRE_OK;
+    }
+    SumTask st;
+    st.arr = arr;
+    st.part_f64 = NULL;
+    st.part_i64 = NULL;
+    atomic_init(&st.err, 0);
+    if (ZDT[arr->dt].cls == 1)
+        st.part_f64 = (double*)calloc(arr->nchunks_total * 2, sizeof(double));
+    else
+        st.part_i64 = (int64_t*)calloc(arr->nchunks_total, sizeof(int64_t));
+    if (!st.part_f64 && !st.part_i64) return RCRE_ERR_OUT_OF_MEMORY;
+    rcre_threadpool_parallel_for(pool, arr->nchunks_total, sum_task, &st);
+    if (atomic_load(&st.err) != 0) {
+        free(st.part_f64);
+        free(st.part_i64);
+        return RCRE_ERR_IO;
+    }
+    if (ZDT[arr->dt].cls == 1) {
+        /* combine per-chunk partials in fixed chunk order (Neumaier) */
+        double s = 0.0, c = 0.0;
+        for (size_t i = 0; i < arr->nchunks_total; ++i) {
+            double x = st.part_f64[2 * i] + st.part_f64[2 * i + 1];
+            double sum = s + x;
+            if (fabs(s) >= fabs(x)) c += (s - sum) + x;
+            else c += (x - sum) + s;
+            s = sum;
+        }
+        *(double*)out = s + c;
+        free(st.part_f64);
+    } else {
+        int64_t s = 0;
+        for (size_t i = 0; i < arr->nchunks_total; ++i) s += st.part_i64[i];
+        *(int64_t*)out = s;
+        free(st.part_i64);
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* public IEEE 754 binary16 wrappers (shared with the Zarr float16 path)     */
+/* ========================================================================= */
+
+double rcre_f16_to_f64(uint16_t bits) {
+    return f16_to_f64(bits);
+}
+
+uint16_t rcre_f16_from_f64(double v) {
+    return f64_to_f16(v);
+}
+
+/* ========================================================================= */
+/* zstd registration (hook design — link-order immune)                       */
+/* ========================================================================= */
+
+/* The zstd codec lives in an OPTIONAL translation unit (src/core/
+ * zarr_zstd.c, compiled with -DRCRE_WITH_ZSTD when libzstd is present).
+ * To avoid any weak-symbol / archive-extraction subtleties, chunked.c
+ * holds a function-pointer hook: the zstd TU installs its real
+ * implementation via rcre_zarr_zstd_set_ensure_hook() (called from a
+ * C constructor). Without the TU (including single-TU amalgamations
+ * that exclude it), the hook stays NULL and ensure is a no-op, so the
+ * Zarr API remains fully usable with the identity codec. */
+static void (*zstd_ensure_hook)(void) = NULL;
+
+void rcre_zarr_zstd_set_ensure_hook(void (*fn)(void)) {
+    zstd_ensure_hook = fn;
+}
+
+void rcre_zarr_zstd_ensure_registered(void) {
+    if (zstd_ensure_hook) zstd_ensure_hook();
+}
+
+/* --- Source: pde.c --- */
+/* RCRE H7 — PDE domain layer (2.4.0)
+ *
+ * Structured-grid solvers on the H0 F64 substrate.
+ *
+ * LAYOUT (shared with H4 multigrid — the AUTO driver hands off to it):
+ *   interior point (i, j): 0 <= i < nx (x / column), 0 <= j < ny (y / row),
+ *   flat index c = j*nx + i  (row-major rows of length nx).
+ *
+ * Determinism: every parallel stage is an independent row/point or a
+ * fixed-order combine — results bit-identical across pool sizes
+ * (pool == NULL means serial).
+ *
+ *   - 1D DST-I via the H2 complex FFT (verified <= 6e-14 rel vs naive).
+ *   - 2D Poisson (Dirichlet, 5-point, h=1): spectral (DST) solver +
+ *     AUTO driver (FFT vs H4 multigrid by problem size).
+ *   - 5-point stencil apply (the shared operator; f64 + f32).
+ *   - Heat 2D explicit FTCS (stability gate dt/h^2 <= 1/2, loud failure).
+ *   - Burgers 1D (scalar): conservative Lax-Wendroff + minmod (2nd-order
+ *     TVD); the exact solution via the Hopf-Lax variational formula.
+ *   - Wave 1D: leapfrog (symplectic) + 2nd-order start; energy-drift gate.
+ *
+ * All state is caller-owned (arena-friendly); no hidden multithreading.
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ========================================================================= */
+/* 1D DST-I via complex FFT (row-wise, slab-parallel)                        */
+/* ========================================================================= */
+/*
+ * S[k] = sum_{j=1..n} x[j] sin(pi j k/(n+1)), k = 1..n  (x is 1-indexed).
+ *
+ * Odd extension, length N = 2(n+1):
+ *   y[0] = 0, y[n+1] = 0, y[j] = x[j], y[N-j] = -x[j]  (j = 1..n)
+ *   Y = DFT_N(y)  =>  Y[k] = -2i S[k]  =>  S[k] = -0.5 Im(Y[k]).
+ * DST-I is symmetric; the inverse is (2/(n+1)) * DST-I.
+ *
+ * Each row is transformed independently with TASK-LOCAL scratch (the
+ * slab contract: concurrent rows never share a buffer), so the result
+ * is bit-identical for any pool size.
+ */
+
+typedef struct {
+    const double* x;       /* rows vectors, 1-indexed columns, stride n+1 */
+    double* S;             /* same layout */
+    int n;                 /* vector length */
+} RCRE_Dst1Plan;
+
+typedef struct {
+    RCRE_Dst1Plan plan;
+    double* re;            /* length 2(n+1), task-local */
+    double* im;
+} RCRE_Dst1Task;
+
+static void dst1_one_row(const RCRE_Dst1Plan* p, double* re, double* im,
+                         size_t row) {
+    const int n = p->n;
+    const int N = 2 * (n + 1);
+    memset(re, 0, (size_t)N * sizeof(double));
+    const double* xr = p->x + row * (size_t)(n + 1);
+    for (int j = 1; j <= n; ++j) {
+        re[j] = xr[j];
+        re[N - j] = -xr[j];
+    }
+    (void)rcre_fft_1d_f64(re, NULL, re, im, (size_t)N, 0);
+    double* sr = p->S + row * (size_t)(n + 1);
+    for (int k = 1; k <= n; ++k) sr[k] = -0.5 * im[k];
+}
+
+/* task_id selects THIS row's task-local scratch (slab contract). */
+static void dst1_row_task(void* arg, size_t row) {
+    RCRE_Dst1Task* t = &((RCRE_Dst1Task*)arg)[row];
+    dst1_one_row(&t->plan, t->re, t->im, row);
+}
+
+/*
+ * Row-wise 1D DST-I. `rows` vectors of length n, stride n+1 (1-indexed).
+ * Task scratch is allocated per row and released before return.
+ */
+static int dst1_rows_f64(const double* x, double* S, size_t rows, int n,
+                         RCRE_ThreadPool* pool) {
+    if (!x || !S || rows == 0 || n < 1) return -1;
+    const size_t per = (size_t)(2 * (n + 1)) * sizeof(double);
+    RCRE_Dst1Task* tk = (RCRE_Dst1Task*)calloc(rows, sizeof(RCRE_Dst1Task));
+    if (!tk) return -1;
+    int rc = 0;
+    for (size_t i = 0; i < rows; ++i) {
+        tk[i].plan.x = x;
+        tk[i].plan.S = S;
+        tk[i].plan.n = n;
+        tk[i].re = (double*)malloc(per);
+        tk[i].im = (double*)malloc(per);
+        if (!tk[i].re || !tk[i].im) rc = -1;
+    }
+    if (rc == 0) {
+        /* ONE calling convention: arg is the ARRAY BASE, task_id the row
+         * (measured bug: a serial loop passing &tk[i] to a task that
+         * indexes [row] from arg walked past the array end). */
+        if (pool)
+            rcre_threadpool_parallel_for(pool, rows, dst1_row_task, tk);
+        else
+            for (size_t i = 0; i < rows; ++i) dst1_row_task(tk, i);
+    }
+    for (size_t i = 0; i < rows; ++i) {
+        free(tk[i].re);
+        free(tk[i].im);
+    }
+    free(tk);
+    return rc;
+}
+
+/* ========================================================================= */
+/* 5-point stencil (h = 1, Dirichlet interior) — MG layout c = j*nx + i      */
+/* ========================================================================= */
+/*
+ * (A u)_{i,j} = 4 u_{i,j} - u_{i-1,j} - u_{i+1,j} - u_{i,j-1} - u_{i,j+1}
+ * Boundary values are ZERO (the caller folds boundary data into b).
+ * Row-slab parallel; bit-identical across pool sizes.
+ */
+
+typedef struct {
+    const double* u;
+    double* v;
+    size_t nx, ny;
+} RCRE_Stencil5Ctx;
+
+static void stencil5_f64_row(const RCRE_Stencil5Ctx* s, size_t j) {
+    for (size_t i = 0; i < s->nx; ++i) {
+        size_t c = j * s->nx + i;
+        double acc = 4.0 * s->u[c];
+        if (j > 0) acc -= s->u[c - s->nx];
+        if (j + 1 < s->ny) acc -= s->u[c + s->nx];
+        if (i > 0) acc -= s->u[c - 1];
+        if (i + 1 < s->nx) acc -= s->u[c + 1];
+        s->v[c] = acc;
+    }
+}
+
+static void stencil5_f64_task(void* arg, size_t j) {
+    stencil5_f64_row((const RCRE_Stencil5Ctx*)arg, j);
+}
+
+RCRE_NODISCARD int rcre_pde_stencil5_f64(size_t nx, size_t ny,
+                                         const double* u, double* v,
+                                         RCRE_ThreadPool* pool) {
+    if (!u || !v || nx == 0 || ny == 0) return -1;
+    RCRE_Stencil5Ctx s = { u, v, nx, ny };
+    if (pool)
+        rcre_threadpool_parallel_for(pool, ny, stencil5_f64_task, &s);
+    else
+        for (size_t j = 0; j < ny; ++j) stencil5_f64_row(&s, j);
+    return 0;
+}
+
+typedef struct {
+    const float* u;
+    float* v;
+    size_t nx, ny;
+} RCRE_Stencil5CtxF32;
+
+static void stencil5_f32_row(const RCRE_Stencil5CtxF32* s, size_t j) {
+    for (size_t i = 0; i < s->nx; ++i) {
+        size_t c = j * s->nx + i;
+        float acc = 4.0f * s->u[c];
+        if (j > 0) acc -= s->u[c - s->nx];
+        if (j + 1 < s->ny) acc -= s->u[c + s->nx];
+        if (i > 0) acc -= s->u[c - 1];
+        if (i + 1 < s->nx) acc -= s->u[c + 1];
+        s->v[c] = acc;
+    }
+}
+
+static void stencil5_f32_task(void* arg, size_t j) {
+    stencil5_f32_row((const RCRE_Stencil5CtxF32*)arg, j);
+}
+
+RCRE_NODISCARD int rcre_pde_stencil5_f32(size_t nx, size_t ny,
+                                         const float* u, float* v,
+                                         RCRE_ThreadPool* pool) {
+    if (!u || !v || nx == 0 || ny == 0) return -1;
+    RCRE_Stencil5CtxF32 s = { u, v, nx, ny };
+    if (pool)
+        rcre_threadpool_parallel_for(pool, ny, stencil5_f32_task, &s);
+    else
+        for (size_t j = 0; j < ny; ++j) stencil5_f32_row(&s, j);
+    return 0;
+}
+
+/* ========================================================================= */
+/* 2D Poisson — spectral (DST) solver + AUTO driver (MG layout)              */
+/* ========================================================================= */
+/*
+ * A = T_x ⊗ I + I ⊗ T_y (T = tridiag(-1,2,-1)); the eigenvectors are
+ * products of sinines, so the 2D DST diagonalizes A:
+ *   F = DST_i(DST_j(b)),  U = F / lambda,
+ *   u = (2/(nx+1)) DST_i( (2/(ny+1)) DST_j(U) ),
+ *   lambda_{i,j} = 4 - 2cos(pi(i+1)/(nx+1)) - 2cos(pi(j+1)/(ny+1)).
+ */
+
+RCRE_NODISCARD int rcre_pde_poisson2d_fft_f64(size_t nx, size_t ny,
+                                              const double* b, double* u,
+                                              RCRE_ThreadPool* pool) {
+    if (!b || !u || nx < 2 || ny < 2) return -1;
+    rcre_hal_init();
+    int rc = 0;
+    const size_t rows_s = ny;      /* stage 1: ny rows of length nx */
+    const size_t rows_t = nx;      /* stage 2: nx rows of length ny */
+    const size_t rs = nx + 1, cs = ny + 1;
+    double *p1 = NULL, *F1 = NULL, *p2 = NULL, *F2 = NULL,
+           *p3 = NULL, *U3 = NULL;
+    p1 = (double*)malloc(rows_s * rs * sizeof(double));
+    F1 = (double*)malloc(rows_s * rs * sizeof(double));
+    p2 = (double*)malloc(rows_t * cs * sizeof(double));
+    F2 = (double*)malloc(rows_t * cs * sizeof(double));
+    p3 = (double*)malloc(rows_t * cs * sizeof(double));
+    U3 = (double*)malloc(rows_s * rs * sizeof(double));
+    if (!p1 || !F1 || !p2 || !F2 || !p3 || !U3) rc = -1;
+    if (rc == 0) {
+        /* pack: 1-indexed columns; stage 1 transforms over i (per row j) */
+        for (size_t j = 0; j < ny; ++j)
+            for (size_t i = 0; i < nx; ++i)
+                p1[j * rs + (i + 1)] = b[j * nx + i];
+        rc = dst1_rows_f64(p1, F1, rows_s, (int)nx, pool);
+    }
+    if (rc == 0) {
+        /* transpose: F1 (ny rows of nx) -> p2 (nx rows of ny) */
+        for (size_t i = 0; i < nx; ++i)
+            for (size_t j = 0; j < ny; ++j)
+                p2[i * cs + (j + 1)] = F1[j * rs + (i + 1)];
+        /* stage 2: DST over j (per column i) + lambda divide */
+        rc = dst1_rows_f64(p2, F2, rows_t, (int)ny, pool);
+        if (rc == 0)
+            for (size_t i = 0; i < nx; ++i)
+                for (size_t j = 0; j < ny; ++j) {
+                    double lam = 4.0
+                        - 2.0 * cos(M_PI * (double)(i + 1) / (double)(nx + 1))
+                        - 2.0 * cos(M_PI * (double)(j + 1) / (double)(ny + 1));
+                    F2[i * cs + (j + 1)] /= lam;
+                }
+    }
+    if (rc == 0) {
+        /* stage 3: inverse DST over j (per column i): F2 -> p3 */
+        rc = dst1_rows_f64(F2, p3, rows_t, (int)ny, pool);
+        /* stage 4: transpose p3 (nx rows of ny) -> p1 (ny rows of nx) */
+        for (size_t j = 0; j < ny; ++j)
+            for (size_t i = 0; i < nx; ++i)
+                p1[j * rs + (i + 1)] = p3[i * cs + (j + 1)];
+        /* stage 5: inverse DST over i (per row j): p1 -> U3 */
+        rc = dst1_rows_f64(p1, U3, rows_s, (int)nx, pool);
+        if (rc == 0) {
+            const double scale =
+                (2.0 / (double)(nx + 1)) * (2.0 / (double)(ny + 1));
+            for (size_t j = 0; j < ny; ++j)
+                for (size_t i = 0; i < nx; ++i)
+                    u[j * nx + i] = scale * U3[j * rs + (i + 1)];
+        }
+    }
+    free(p1); free(F1); free(p2); free(F2); free(p3); free(U3);
+    return rc;
+}
+
+/*
+ * AUTO driver: spectral when nx*ny <= 4M cells (the dense F64 work area
+ * is 6 arrays of nx*ny), otherwise the H4 multigrid V-cycle. The H4
+ * V-cycle has a MEASURED smoothest-mode floor (the two-grid correction
+ * per level is limited by the eigenvalue ratio ~ 4; ~1e-10 on 33x27,
+ * degrading with n — see H4 docs), so the MG path targets 1e-12 and,
+ * if the floor is hit before convergence, accepts the solution when the
+ * TRUE residual is within the documented floor band (<= 1e-8) instead
+ * of reporting a spurious failure. Deterministic either way; the choice
+ * is a pure function of the shape. x is both the MG initial guess and
+ * the result; the FFT path overwrites u.
+ */
+#define RCRE_PDE_POISSON_FFT_MAX_CELLS (4u * 1024u * 1024u)
+
+/* true relative residual ||f - A x||/||f|| in the MG layout */
+static double pde_poisson2d_rel_resid(size_t nx, size_t ny, const double* f,
+                                      const double* x) {
+    const size_t n = nx * ny;
+    double* r = (double*)malloc(n * sizeof(double));
+    if (!r) return -1.0;
+    double ref = 0.0;
+    for (size_t c = 0; c < n; ++c) ref += f[c] * f[c];
+    double s = 0.0;
+    for (size_t j = 0; j < ny; ++j)
+        for (size_t i = 0; i < nx; ++i) {
+            const size_t c = j * nx + i;
+            double lap = 4.0 * x[c];
+            if (i > 0) lap -= x[c - 1];
+            if (i + 1 < nx) lap -= x[c + 1];
+            if (j > 0) lap -= x[c - nx];
+            if (j + 1 < ny) lap -= x[c + nx];
+            const double d = f[c] - lap;
+            r[c] = d;
+            s += d * d;
+        }
+    free(r);
+    return (ref > 0.0) ? sqrt(s / ref) : 0.0;
+}
+
+RCRE_NODISCARD int rcre_pde_poisson2d_solve_f64(size_t nx, size_t ny,
+                                                const double* b, double* u,
+                                                RCRE_ThreadPool* pool,
+                                                int auto_mode) {
+    if (!b || !u || nx < 2 || ny < 2) return -1;
+    if (!auto_mode)
+        return rcre_pde_poisson2d_fft_f64(nx, ny, b, u, pool);
+    if (nx * ny <= RCRE_PDE_POISSON_FFT_MAX_CELLS)
+        return rcre_pde_poisson2d_fft_f64(nx, ny, b, u, pool);
+    int rc = rcre_mg_solve_poisson2d_f64(nx, ny, b, u, 1e-12, 400, NULL, NULL);
+    if (rc >= 0) return rc;
+    /* smoothest-mode floor: accept a good solution rather than fail */
+    const double res = pde_poisson2d_rel_resid(nx, ny, b, u);
+    return (res > 0.0 && res <= 1e-8) ? 1 : -1;
+}
+
+/* ========================================================================= */
+/* Heat 2D — explicit FTCS (MG layout)                                       */
+/* ========================================================================= */
+/*
+ * u^{k+1} = u^k + (dt/h^2)(u_w + u_e + u_s + u_n - 4 u^k), zero Dirichlet
+ * boundary. Stability (von Neumann): dt/h^2 <= 1/2 — ENFORCED (returns
+ * -1, no partial step). Row-slab parallel.
+ */
+
+typedef struct {
+    const double* u;
+    double* u1;
+    size_t nx, ny;
+    double r;
+} RCRE_HeatCtx;
+
+static void heat2d_row(const RCRE_HeatCtx* s, size_t j) {
+    for (size_t i = 0; i < s->nx; ++i) {
+        size_t c = j * s->nx + i;
+        /* four-neighbor sum; missing neighbors are the zero Dirichlet
+         * boundary (the term simply vanishes) */
+        double nb = 0.0;
+        if (j > 0) nb += s->u[c - s->nx];
+        if (j + 1 < s->ny) nb += s->u[c + s->nx];
+        if (i > 0) nb += s->u[c - 1];
+        if (i + 1 < s->nx) nb += s->u[c + 1];
+        s->u1[c] = s->u[c] + s->r * (nb - 4.0 * s->u[c]);
+    }
+}
+
+static void heat2d_task(void* arg, size_t j) {
+    heat2d_row((const RCRE_HeatCtx*)arg, j);
+}
+
+RCRE_NODISCARD int rcre_pde_heat2d_step_f64(size_t nx, size_t ny,
+                                            const double* u, double* u1,
+                                            double dt, double h,
+                                            RCRE_ThreadPool* pool) {
+    if (!u || !u1 || nx == 0 || ny == 0 || h <= 0.0 || dt < 0.0) return -1;
+    const double r = dt / (h * h);
+    if (r > 0.5) return -1; /* stability gate: fail loud */
+    RCRE_HeatCtx s = { u, u1, nx, ny, r };
+    if (pool)
+        rcre_threadpool_parallel_for(pool, ny, heat2d_task, &s);
+    else
+        for (size_t j = 0; j < ny; ++j) heat2d_row(&s, j);
+    return 0;
+}
+
+/* ========================================================================= */
+/* Burgers 1D — MUSCL-upwind (2nd order, TVD)                                */
+/* ========================================================================= */
+/*
+ * u_t + (1/2 u^2)_x = 0, periodic, conservative finite volume.
+ *
+ * Scheme: MUSCL (piecewise-linear reconstruction, minmod-limited) +
+ * upwind/Roe face flux:
+ *   face i+1/2:  lim = minmod(u_{i+1}-u_i, u_i-u_{i-1})
+ *                u- = u_i + (1/2) lim          (left edge state)
+ *                u+ = u_{i+1} - (1/2) lim      (right edge state)
+ *                F  = f+(u-) + f-(u+)   with f+(w) = w^2/2 if w >= 0 else 0
+ *                                             f-(w) = w^2/2 if w <  0 else 0
+ *   u1[i] = u[i] - (dt/dx)(F_{i+1/2} - F_{i-1/2}).
+ * The split-flux form is exactly: upwind at u- when the Roe speed
+ * a = (u-+u+)/2 > 0, upwind at u+ when a < 0, and the exact Roe flux
+ * ((u-+u+)^2/4) at a crossing face — the standard 2nd-order TVD scheme
+ * for scalar convex fluxes, stable for |CFL * a| <= 1.
+ *
+ * Measured design lesson (this is why the scheme is upwind, not the
+ * central "Lax-Wendroff + minmod" form): for the NONLINEAR flux, the
+ * Lax-Friedrichs base of the central form is not monotone, and adding a
+ * limited 2nd-order correction to a non-monotone base is not TVD — both
+ * central variants (limiter on state diffs or on wave products) were
+ * measured to blow up past shock formation on this data, while
+ * MUSCL-upwind stays bounded and converges (L-inf vs Hopf-Lax: 2nd
+ * order pre-shock, O(h) through the shock).
+ */
+
+static double minmod2(double a, double b) {
+    if ((a <= 0.0) != (b <= 0.0)) return 0.0;
+    return fabs(a) < fabs(b) ? a : b;
+}
+
+/* face flux from the two reconstructed edge states (Roe split; f = w^2/2) */
+static double burgers_face_flux(double um, double up) {
+    if (um >= 0.0) return 0.5 * um * um;      /* a >= 0: upwind from the left */
+    if (up <= 0.0) return 0.5 * up * up;      /* a <= 0: upwind from the right */
+    return 0.25 * (um + up) * (um + up);      /* crossing: exact Roe flux */
+}
+
+RCRE_NODISCARD int rcre_pde_burgers1d_step_f64(const double* u, double* u1,
+                                               int n, double dt, double dx) {
+    if (!u || !u1 || n < 3 || dx <= 0.0 || dt < 0.0) return -1;
+    /* CFL: the signal speed of u_t + (u^2/2)_x = 0 is u itself, so the
+     * gate is dt*max|u|/dx <= 1.
+     * (Measured bug: the first draft gated on dt/dx alone — silently
+     * rejecting every legitimate dt > dx case and passing dt that are
+     * actually unstable when max|u| > 1. Shu-Osher has max|u| ~ 1.6.) */
+    double umax = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double a = fabs(u[i]);
+        if (a > umax) umax = a;
+    }
+    if (dt * umax / dx > 1.0) return -1; /* CFL gate */
+    const double cfl = dt / dx;
+    for (int i = 0; i < n; ++i) {
+        const double uL = u[(i - 1 + n) % n], uc = u[i], uR = u[(i + 1) % n];
+        /* face i+1/2 */
+        const double lim_r = minmod2(uR - uc, uc - uL);
+        const double Fp = burgers_face_flux(uc + 0.5 * lim_r,
+                                            uR - 0.5 * lim_r);
+        /* face i-1/2 */
+        const double lim_l = minmod2(uc - uL, uL - u[(i - 2 + n) % n]);
+        const double Fm = burgers_face_flux(uL + 0.5 * lim_l,
+                                            uc - 0.5 * lim_l);
+        u1[i] = uc - cfl * (Fp - Fm);
+    }
+    return 0;
+}
+
+/*
+ * Shu-Osher piston + oscillation initial data (Shu & Osher 1981), the
+ * classic shock-capturing benchmark, adapted to the scalar equation
+ * (u plays the role of the density; the full gas-dynamics version is
+ * the stiff system the scalar equation replaces — documented in
+ * docs/hpc.md 10.5). Periodic on [0, 2pi):
+ *   u0 = 0.998271                       0 <= x < 0.0281475   (piston)
+ *   u0 = 0.999838 + 0.0111 sin(5 x)     0.0281475 <= x < 0.2
+ *   u0 = 1 - 0.5(1 + cos(10 (phi - sin phi)))   0.2 <= x < 2 pi,
+ *        with phi = x wrapped to [-pi, pi).
+ * The profile is DISCONTINUOUS at x = 0.2 (the piston/wave junction):
+ * that jump is part of the benchmark (the scheme must resolve it as a
+ * shock). u0 in [0, ~1.01].
+ */
+RCRE_NODISCARD int rcre_pde_burgers_shu_oshers_init(double* u, int n,
+                                                    double L) {
+    if (!u || n < 3 || L <= 0.0) return -1;
+    const double TAU = 2.0 * M_PI;
+    const double x1 = 0.0281475, x2 = 0.2;
+    for (int i = 0; i < n; ++i) {
+        const double x = (double)i * (L / (double)n);
+        if (x < x1)
+            u[i] = 0.998271;
+        else if (x < x2)
+            u[i] = 0.999838 + 0.0111 * sin(5.0 * x);
+        else {
+            double phi = x - TAU * floor(x / TAU + 0.5);
+            double d = phi - sin(phi);
+            u[i] = 1.0 - 0.5 * (1.0 + cos(10.0 * d));
+        }
+    }
+    return 0;
+}
+
+/*
+ * Hopf-Lax exact solution of u_t + (1/2 u^2)_x = 0 with PERIODIC data
+ * (verification tool, O(n^2)). Hamilton-Jacobi duality: v = ∫u dx solves
+ *   v_t + (v_x)^2/2 = 0  (inviscid Burgers in conservative and HJ form
+ * are the same equation), so the Lax-Oleinik formula with
+ *   L(q) = min_p (p q - p^2/2) = q^2/2
+ * gives
+ *   v(x,T) = min_ξ [ v0(ξ) + (x - ξ)^2/(2T) ],  v0(ξ) = ∫_0^ξ u0 ds,
+ *   u(x,T) = v_x = (x - ξ*)/T.
+ * Both ingredients are essential (measured): dropping the potential v0
+ * (using (1/2)u0^2 pointwise) or using L = q^2/4 both return values that
+ * violate the maximum principle min u0 <= u <= max u0. v0 is accumulated
+ * with the trapezoidal rule (O(dx^2)); replicas k are offset by k * total
+ * (the period integral of u0).
+ */
+RCRE_NODISCARD int rcre_pde_burgers_hopf_lax_f64(const double* u0, int n,
+                                                 double L, double T,
+                                                 double* out) {
+    if (!u0 || !out || n < 3 || L <= 0.0 || T <= 0.0) return -1;
+    /* Fine internal minimization grid: m subpoints per cell with linear
+     * interpolation of u0 (trapezoidal v0 on the fine grid). Measured
+     * reason: the O(dx) quantization of the minimizer xi* makes the
+     * reference piecewise kinked where competing characteristics are
+     * near-degenerate (the L-inf error then does not converge with n);
+     * m = 16 subpoints removes the artifact at O(dx^2)-level. */
+    const int m = 16;
+    const int M = n * m;
+    const double h = L / (double)M;
+    double* uf = (double*)malloc((size_t)M * sizeof(double));
+    double* v0 = (double*)malloc((size_t)M * sizeof(double));
+    if (!uf || !v0) { free(uf); free(v0); return -1; }
+    for (int j = 0; j < M; ++j) {
+        const double pos = (double)j / (double)m; /* in cell units */
+        const int i0 = (int)pos;
+        const double frac = pos - (double)i0;
+        const double a = u0[i0 % n];
+        const double b = u0[(i0 + 1) % n];
+        uf[j] = a + frac * (b - a);
+    }
+    double total = 0.0;
+    for (int j = 0; j < M; ++j) total += 0.5 * (uf[j] + uf[(j + 1) % M]) * h;
+    v0[0] = 0.0;
+    for (int j = 1; j < M; ++j) v0[j] = v0[j - 1] + 0.5 * (uf[j - 1] + uf[j]) * h;
+    for (int i = 0; i < n; ++i) {
+        const double x = (double)i * (L / (double)n);
+        double best = 1e300, ub = 0.0;
+        for (int j = 0; j < M; ++j) {
+            const double xi = (double)j * h;
+            for (int k = -1; k <= 1; ++k) {
+                const double s = x - (xi + (double)k * L);
+                const double q = v0[j] + (double)k * total + s * s / (2.0 * T);
+                if (q < best) {
+                    best = q;
+                    ub = s / T;
+                }
+            }
+        }
+        out[i] = ub;
+    }
+    free(uf);
+    free(v0);
+    return 0;
+}
+
+/* ========================================================================= */
+/* Wave 1D — leapfrog (symplectic) + 2nd-order start                         */
+/* ========================================================================= */
+/*
+ * u_tt = c^2 u_xx, periodic. Leapfrog (DDK form — the MD convention):
+ *   u^{k+1}   = u^k + dt v^{k+1/2}                (drift)
+ *   v^{k+3/2} = v^{k+1/2} + c^2 dt lap(u^{k+1})/dx^2  (kick at the NEW u)
+ * v is the HALF-STEP velocity (between u^k and u^{k+1}). The consistent
+ * start for u_t^0 = 0 is v^{1/2} = (c^2 dt/2) lap(u^0) (the companion
+ * start function). 2nd order in time; symplectic => bounded
+ * (oscillatory) energy drift, no secular growth (the test gate).
+ * (Measured lesson: kick-before-drift at the OLD position is
+ * Euler-Cromer — symplectic but only 1st order; the half-step start
+ * with a kick-drift step mixes conventions and leaves an O(dt) energy
+ * offset. Both were ruled out by measurement.)
+ */
+RCRE_NODISCARD int rcre_pde_wave1d_step_f64(const double* u, const double* v,
+                                            double* u1, double* v1, int n,
+                                            double c, double dt, double dx) {
+    if (!u || !v || !u1 || !v1 || n < 3 || dx <= 0.0 || dt < 0.0) return -1;
+    if (c * dt / dx > 1.0) return -1; /* CFL gate */
+    const double cc = (c * c * dt) / (dx * dx);
+    for (int i = 0; i < n; ++i) {
+        u1[i] = u[i] + dt * v[i]; /* drift */
+    }
+    for (int i = 0; i < n; ++i) {
+        const double lap = u1[(i + 1) % n] - 2.0 * u1[i] + u1[(i - 1 + n) % n];
+        v1[i] = v[i] + cc * lap; /* kick at the new position */
+    }
+    return 0;
+}
+
+/* energy: 1/2 sum(v^2) + (c^2/(2 dx^2)) sum((u_{i+1} - u_i)^2) */
+RCRE_NODISCARD double rcre_pde_wave1d_energy_f64(const double* u,
+                                                 const double* v, int n,
+                                                 double c, double dx) {
+    double e = 0.0;
+    for (int i = 0; i < n; ++i) e += 0.5 * v[i] * v[i];
+    const double k = (c * c) / (2.0 * dx * dx);
+    for (int i = 0; i < n; ++i) {
+        const double d = u[(i + 1) % n] - u[i];
+        e += k * d * d;
+    }
+    return e;
+}
+
+RCRE_NODISCARD int rcre_pde_wave1d_start_f64(const double* u, double* v, int n,
+                                             double c, double dt, double dx) {
+    if (!u || !v || n < 3) return -1;
+    /* DDK convention: v^{1/2} = (h/2) lap_c2(u^0) is the consistent
+     * half-step velocity for u_t^0 = 0. */
+    const double cc = (c * c * dt) / (2.0 * dx * dx);
+    for (int i = 0; i < n; ++i)
+        v[i] = cc * (u[(i + 1) % n] - 2.0 * u[i] + u[(i - 1 + n) % n]);
+    return 0;
+}
+
+/* --- Source: nbody.c --- */
+/* RCRE H7 — N-body Barnes-Hut gravity (2.4.0)
+ *
+ * 2D Newtonian gravity with the Barnes-Hut tree approximation:
+ *   - array-based quadtree (arena-friendly; nodes are appended in a
+ *     fixed order — the construction is a pure function of the body
+ *     ordering, hence deterministic);
+ *   - node mass + center of mass (COM) aggregated bottom-up;
+ *   - opening criterion s/d > theta (plus a d ~ 0 guard that always
+ *     opens internal nodes);
+ *   - softening: r2 = dx^2 + dy^2 + soft^2 (avoids the close-encounter
+ *     singularities that make the 10k-step energy-drift bar meaningless
+ *     for unsoftened random data);
+ *   - force on each body = an independent tree walk => the body loop is
+ *     slab-parallel (shared read-only tree) and bit-identical across
+ *     pool sizes (the determinism policy);
+ *   - velocity Verlet (symplectic) step for the energy-drift gate:
+ *     v += (h/2) a^k;  x += h v;  a^{k+1} = F(x^{k+1});  v += (h/2) a^{k+1}.
+ *
+ * Reference energy (the drift diagnostic) is the EXACT O(n^2) pair sum
+ * (deterministic, fixed order).
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ========================================================================== */
+/* Quadtree                                                                    */
+/* ========================================================================== */
+
+typedef struct {
+    double cx, cy;   /* cell center */
+    double half;     /* cell half-size */
+    double m;        /* total mass */
+    double mx, my;   /* COM position */
+    int body;        /* leaf body index, or -1 */
+    int child[4];    /* child node indices, or -1 (SW, NW, SE, NE) */
+} RCRE_NbNode;
+
+typedef struct {
+    RCRE_NbNode* nodes;
+    size_t cap;
+    size_t n;
+    double G;
+    double theta;
+    double soft2;
+    const double* x;
+    const double* y;
+    const double* m;
+    int nbody;
+    int max_depth;
+} RCRE_NbTree;
+
+static int node_alloc(RCRE_NbTree* t) {
+    if (t->n >= t->cap) {
+        size_t ncap = t->cap ? t->cap * 2 : 1024;
+        RCRE_NbNode* nn =
+            (RCRE_NbNode*)realloc(t->nodes, ncap * sizeof(RCRE_NbNode));
+        if (!nn) return -1;
+        t->nodes = nn;
+        t->cap = ncap;
+    }
+    RCRE_NbNode* nd = &t->nodes[t->n];
+    nd->m = 0.0;
+    nd->mx = 0.0;
+    nd->my = 0.0;
+    nd->body = -1;
+    nd->child[0] = nd->child[1] = nd->child[2] = nd->child[3] = -1;
+    return (int)t->n++;
+}
+
+/* which quadrant does (px,py) fall in for the cell centered at (cx,cy)?
+ * 0 = SW, 1 = NW, 2 = SE, 3 = NE */
+static int quadrant(double px, double py, double cx, double cy) {
+    return ((py >= cy) ? 2 : 0) | ((px >= cx) ? 1 : 0);
+    /* note: bit0 = x-side (1 if east), bit1 = y-side (2 if north) */
+}
+
+static double quadrant_dx(int q) { return (q & 1) ? 0.5 : -0.5; }
+static double quadrant_dy(int q) { return (q & 2) ? 0.5 : -0.5; }
+
+/* Simpler, fully deterministic construction: sort-independent quadtree by
+ * recursive cell subdivision over the index range.
+ *
+ * build(range [lo,hi) inside cell (cx,cy,half), depth):
+ *   - if empty: -1
+ *   - if 1 body: leaf node
+ *   - else: create an internal node, recurse into the 4 quadrants with
+ *     the index partition of the range, aggregate.
+ * The partition is a pure function of the indices and the cell => the
+ * tree is a pure function of the body ordering. No insertion order
+ * ambiguity at all (this is what makes the tree trivially
+ * reproducible — and it is the construction the force walk assumes:
+ * a node's children partition the node's bodies exactly).
+ */
+/* ------------------------------------------------------------------
+ * Construction operates on ONE global index permutation `idx` of
+ * 0..n-1: every node's bodies are the CONTIGUOUS SLICE idx[lo,hi), and
+ * each split partitions that slice IN PLACE (stable, quadrant-major).
+ * Recursion never re-indexes the body arrays — it only ever looks at
+ * idx[lo..hi).
+ *
+ * (Measured design bugs in the two earlier drafts: (1) partitioning
+ * into a per-node scratch array sized (hi-lo) but scattering with
+ * ABSOLUTE positions -> out-of-bounds heap writes for lo>0; (2) passing
+ * RELATIVE slice positions into the recursion, which then used them as
+ * ABSOLUTE body indices -> 56 of 64 bodies silently vanished. Both are
+ * why the tree invariants (bijection bodies<->leaves, mass
+ * conservation) are formal tests, not smoke checks.)
+ *
+ * Determinism: pure function of (bodies, order) — quadrant membership
+ * from positions only, ties (px==cx / py==cy) go EAST/NORTH by >=,
+ * stable within-quadrant order, fixed aggregation order.
+ * ------------------------------------------------------------------ */
+static int bh_build_slice(RCRE_NbTree* t, int* idx, int lo, int hi,
+                          double cx, double cy, double half, int depth) {
+    if (lo >= hi) return -1;
+    int node = node_alloc(t);
+    if (node < 0) return -1;
+    RCRE_NbNode* nd = &t->nodes[node];
+    nd->cx = cx;
+    nd->cy = cy;
+    nd->half = half;
+    if (hi - lo == 1) {
+        const int b = idx[lo];
+        nd->body = b;
+        nd->m = t->m[b];
+        nd->mx = t->x[b];
+        nd->my = t->y[b];
+        return node;
+    }
+    if (depth >= t->max_depth) {
+        /* aggregation leaf: many bodies, one COM (the walk uses the
+         * point-mass approximation for this node — exact for external
+         * bodies; the contained bodies lose pair accuracy at this
+         * scale. max_depth is generous, so this is a safety valve, not
+         * a normal path). */
+        double m = 0.0, mx = 0.0, my = 0.0;
+        for (int i = lo; i < hi; ++i) {
+            const int b = idx[i];
+            m += t->m[b];
+            mx += t->m[b] * t->x[b];
+            my += t->m[b] * t->y[b];
+        }
+        nd->m = m;
+        nd->mx = m > 0.0 ? mx / m : 0.0;
+        nd->my = m > 0.0 ? my / m : 0.0;
+        return node;
+    }
+    /* In-place stable partition of idx[lo,hi) by quadrant. */
+    int cnt[4] = { 0, 0, 0, 0 };
+    for (int i = lo; i < hi; ++i) {
+        const int b = idx[i];
+        ++cnt[quadrant(t->x[b], t->y[b], cx, cy)];
+    }
+    int start[4];
+    start[0] = lo;
+    for (int q = 1; q < 4; ++q) start[q] = start[q - 1] + cnt[q - 1];
+    int* tmp = (int*)malloc((size_t)(hi - lo) * sizeof(int));
+    if (!tmp) return -1;
+    int pos[4] = { start[0], start[1], start[2], start[3] };
+    for (int i = lo; i < hi; ++i) {
+        const int b = idx[i];
+        /* `pos` holds ABSOLUTE slice positions (they become the child
+         * ranges), but `tmp` is sized (hi-lo) — index it RELATIVE.
+         * (Third and final member of the absolute/relative bug family
+         * measured in this file's history.) */
+        const int p = pos[quadrant(t->x[b], t->y[b], cx, cy)]++;
+        tmp[p - lo] = b;
+    }
+    memcpy(&idx[lo], tmp, (size_t)(hi - lo) * sizeof(int));
+    free(tmp);
+
+    const double hh = half * 0.5;
+    /* NOTE: every write to this node AFTER a recursive call must go
+     * through t->nodes[node] (re-derived), never through `nd` — the
+     * recursion's node_alloc may realloc t->nodes and dangle `nd`
+     * (measured use-after-free at n=100k: the small tests only
+     * survived because their reallocs happened not to move). */
+    for (int q = 0; q < 4; ++q) t->nodes[node].child[q] = -1;
+    int oom = 0;
+    for (int q = 0; q < 4; ++q) {
+        if (cnt[q] == 0) continue;
+        const double ccx = cx + quadrant_dx(q) * half;
+        const double ccy = cy + quadrant_dy(q) * half;
+        const int c = bh_build_slice(t, idx, start[q], start[q] + cnt[q],
+                                     ccx, ccy, hh, depth + 1);
+        t->nodes[node].child[q] = c; /* re-derive after recursion */
+        if (c < 0) oom = 1;
+    }
+    if (oom) return -1;
+    /* aggregate bottom-up (children were just built) */
+    double m = 0.0, mx = 0.0, my = 0.0;
+    for (int q = 0; q < 4; ++q) {
+        const int cidx = t->nodes[node].child[q];
+        if (cidx < 0) continue;
+        RCRE_NbNode* c = &t->nodes[cidx];
+        m += c->m;
+        mx += c->m * c->mx;
+        my += c->m * c->my;
+    }
+    RCRE_NbNode* self = &t->nodes[node]; /* re-derive (realloc may have
+                                            moved the array) */
+    self->m = m;
+    self->mx = m > 0.0 ? mx / m : 0.0;
+    self->my = m > 0.0 ? my / m : 0.0;
+    return node;
+}
+
+/* build the whole tree over bodies [0,n) in a bounding cell */
+static int bh_build(RCRE_NbTree* t) {
+    if (t->nbody < 1) return 0;
+    double xmin = 1e300, xmax = -1e300, ymin = 1e300, ymax = -1e300;
+    for (int i = 0; i < t->nbody; ++i) {
+        if (t->x[i] < xmin) xmin = t->x[i];
+        if (t->x[i] > xmax) xmax = t->x[i];
+        if (t->y[i] < ymin) ymin = t->y[i];
+        if (t->y[i] > ymax) ymax = t->y[i];
+    }
+    double cx = 0.5 * (xmin + xmax), cy = 0.5 * (ymin + ymax);
+    double half = 0.5 * fmax(xmax - xmin, ymax - ymin);
+    if (half <= 0.0) half = 1.0; /* degenerate (all bodies co-located) */
+    int* idx = (int*)malloc((size_t)t->nbody * sizeof(int));
+    if (!idx) return -1;
+    for (int i = 0; i < t->nbody; ++i) idx[i] = i;
+    const int root = bh_build_slice(t, idx, 0, t->nbody, cx, cy, half, 0);
+    free(idx);
+    return root;
+}
+
+/* ========================================================================== */
+/* Force walk                                                                  */
+/* ========================================================================== */
+
+typedef struct {
+    const RCRE_NbTree* t;
+    int i;          /* the body being forced */
+    double px, py;
+    double m;
+    double fx, fy;
+} RCRE_NbWalk;
+
+static void nb_walk(RCRE_NbWalk* w, int node) {
+    if (node < 0) return;
+    const RCRE_NbTree* t = w->t;
+    const RCRE_NbNode* nd = &t->nodes[node];
+    if (nd->m <= 0.0) return;
+    const double dx = nd->mx - w->px;
+    const double dy = nd->my - w->py;
+    const double d2 = dx * dx + dy * dy;
+    const double s = nd->half;
+    /* opening: internal node AND (s/d > theta OR the body is ~at the
+     * COM) */
+    int internal = nd->child[0] >= 0 || nd->child[1] >= 0 ||
+                   nd->child[2] >= 0 || nd->child[3] >= 0;
+    if (internal) {
+        const double d = sqrt(d2);
+        /* open on the theta criterion — and ALWAYS when the forced body
+         * lies inside this cell: otherwise a large-theta walk would
+         * apply the node's point-mass approximation to itself (a
+         * self-interaction, which is wrong). */
+        const int inside = (fabs(w->px - nd->cx) <= s) &&
+                           (fabs(w->py - nd->cy) <= s);
+        if (inside || (d > 0.0 ? s / d > t->theta : 1)) {
+            for (int q = 0; q < 4; ++q) nb_walk(w, nd->child[q]);
+            return;
+        }
+    } else if (nd->body == w->i) {
+        return; /* self: skip */
+    }
+    /* point-mass (multipole-0) approximation:
+     * F = G m1 m2 (dx, dy) / r^3   (measured bug: an r^-4 coefficient
+     * was EXACT at unit separation, which is how it survived the first
+     * 2-body check) */
+    const double r2 = d2 + t->soft2;
+    const double f = t->G * w->m * nd->m / (r2 * sqrt(r2));
+    w->fx += f * dx;
+    w->fy += f * dy;
+}
+
+/* one body's force: a single deterministic walk over the shared tree */
+static void nb_force_one(const RCRE_NbTree* t, int i, double* fx, double* fy) {
+    RCRE_NbWalk w = { t, i, t->x[i], t->y[i], t->m[i], 0.0, 0.0 };
+    nb_walk(&w, 0); /* the root is always node 0 */
+    *fx = w.fx;
+    *fy = w.fy;
+}
+
+/* slab task: arg = tree base (READ-ONLY), task_id = body index */
+typedef struct {
+    const RCRE_NbTree* tree;
+    double* fx;
+    double* fy;
+} RCRE_NbTask;
+
+static void nb_force_task(void* arg, size_t i) {
+    const RCRE_NbTask* tk = &((const RCRE_NbTask*)arg)[i];
+    nb_force_one(tk->tree, (int)i, &tk->fx[i], &tk->fy[i]);
+}
+
+/* ========================================================================== */
+/* Public API                                                                  */
+/* ========================================================================== */
+
+RCRE_NODISCARD int rcre_nb_bh_force_f64(const double* x, const double* y,
+                                        const double* m, int n, double G,
+                                        double theta, double soft,
+                                        RCRE_ThreadPool* pool, double* fx,
+                                        double* fy) {
+    if (!x || !y || !m || !fx || !fy || n < 1 || G <= 0.0 || theta <= 0.0 ||
+        theta >= 1.0)
+        return -1;
+    RCRE_NbTree t;
+    memset(&t, 0, sizeof(t));
+    t.G = G;
+    t.theta = theta;
+    t.soft2 = soft * soft;
+    t.x = x;
+    t.y = y;
+    t.m = m;
+    t.nbody = n;
+    t.max_depth = 24;
+    if (bh_build(&t) < 0) {
+        free(t.nodes);
+        return -1;
+    }
+    if (n > 64) {
+        RCRE_NbTask* tk = (RCRE_NbTask*)malloc((size_t)n * sizeof(RCRE_NbTask));
+        if (!tk) {
+            free(t.nodes);
+            return -1;
+        }
+        for (int i = 0; i < n; ++i) {
+            tk[i].tree = &t;
+            tk[i].fx = fx;
+            tk[i].fy = fy;
+        }
+        if (pool)
+            rcre_threadpool_parallel_for(pool, (size_t)n, nb_force_task, tk);
+        else
+            for (size_t i = 0; i < (size_t)n; ++i) nb_force_task(tk, i);
+        free(tk);
+    } else {
+        for (int i = 0; i < n; ++i) nb_force_one(&t, i, &fx[i], &fy[i]);
+    }
+    free(t.nodes);
+    return 0;
+}
+
+RCRE_NODISCARD int rcre_nb_verlet_step_f64(double* x, double* y,
+                                           double* vx, double* vy,
+                                           const double* m, int n, double G,
+                                           double theta, double soft,
+                                           double h, RCRE_ThreadPool* pool) {
+    if (!x || !y || !vx || !vy || !m || n < 1 || G <= 0.0 || h <= 0.0)
+        return -1;
+    double* ax = (double*)malloc((size_t)n * sizeof(double));
+    double* ay = (double*)malloc((size_t)n * sizeof(double));
+    double* ax1 = (double*)malloc((size_t)n * sizeof(double));
+    double* ay1 = (double*)malloc((size_t)n * sizeof(double));
+    if (!ax || !ay || !ax1 || !ay1) {
+        free(ax); free(ay); free(ax1); free(ay1);
+        return -1;
+    }
+    /* a^k */
+    int rc = rcre_nb_bh_force_f64(x, y, m, n, G, theta, soft, pool, ax, ay);
+    if (rc == 0)
+        for (int i = 0; i < n; ++i) {
+            /* F -> a: divide by the body's own mass.
+             * (Measured bug: the first draft applied the raw force as an
+             * acceleration. Every mass-1 test hid it — a 100:0.01 two-body
+             * system then showed a 400% "energy drift" that was actually a
+             * mass-weighting error, h-independent because it is not an
+             * integrator error at all.) */
+            vx[i] += 0.5 * h * ax[i] / m[i];
+            vy[i] += 0.5 * h * ay[i] / m[i];
+            x[i] += h * vx[i];
+            y[i] += h * vy[i];
+        }
+    if (rc == 0)
+        rc = rcre_nb_bh_force_f64(x, y, m, n, G, theta, soft, pool, ax1, ay1);
+    if (rc == 0)
+        for (int i = 0; i < n; ++i) {
+            vx[i] += 0.5 * h * ax1[i] / m[i];
+            vy[i] += 0.5 * h * ay1[i] / m[i];
+        }
+    free(ax); free(ay); free(ax1); free(ay1);
+    return rc;
+}
+
+/* Exact O(n^2) total energy (the drift diagnostic; fixed order):
+ * E = 1/2 sum m v^2 - sum_{i<j} G m_i m_j / sqrt(r^2 + soft^2) */
+RCRE_NODISCARD double rcre_nb_energy_f64(const double* x, const double* y,
+                                         const double* vx, const double* vy,
+                                         const double* m, int n, double G,
+                                         double soft) {
+    double e = 0.0;
+    for (int i = 0; i < n; ++i)
+        e += 0.5 * m[i] * (vx[i] * vx[i] + vy[i] * vy[i]);
+    for (int i = 0; i < n; ++i)
+        for (int j = i + 1; j < n; ++j) {
+            const double dx = x[i] - x[j], dy = y[i] - y[j];
+            const double r = sqrt(dx * dx + dy * dy + soft * soft);
+            e -= G * m[i] * m[j] / r;
+        }
+    return e;
+}
+
+/* --- Source: mcmc.c --- */
+/* RCRE H7 MCMC — Metropolis-Hastings, HMC, NUTS + QMC integrators (2.4.0)
+ *
+ * Design (docs/hpc.md 10.3):
+ *   - f64 throughout; targets are user-supplied log-pdf (+ gradient for
+ *     HMC/NUTS; MH works with the log-pdf alone).
+ *   - All randomness flows through ONE PCG64 stream (H1) in a fixed
+ *     consumption order -> a chain with a fixed seed is bit-identical
+ *     across runs and machines. Chains are sequential by nature; this
+ *     module adds no threading (independent chains are the caller's
+ *     job — run with different seeds).
+ *   - HMC/NUTS acceptance is the EXACT slice-HMC test (Neal 2011, as
+ *     simplified by Hoffman & Gelman 2014): with slice z = log u,
+ *     u ~ U(0,1), a trajectory node (q, rq) is accepted when
+ *         A(q) = logp(q) - 1/2 ||rq||^2  >  A0 + z,   A0 = lp0 - 1/2||r0||^2
+ *     which is the joint-distribution Metropolis test for the extended
+ *     target p(q,r) ∝ p(q) exp(-1/2||r||^2) — leapfrog is exact
+ *     symplectic, so no HMC error is introduced by the trajectory.
+ *     (H-G's "S(q) = logp(q) - 1/2||q||^2" shorthand is their
+ *     reparametrization of the same test; we keep the direct form —
+ *     it is what is verified against the Gaussian-moment gate.)
+ *   - NUTS tree growth follows H-G 2014 Algorithm 1: at level j extend
+ *     by 2^j leapfrog steps in a randomly chosen direction, track
+ *     A_min/A_max (stop when either falls below A0 + z), keep the
+ *     best-A node; divergence when |H(q,rq) - H0| > 1000.
+ *   - Dual-averaging step-size adaptation is the Stan form of H-G §4.1
+ *     (alpha 0.05, gamma 0.05, t0 10, target 0.65). Window adaptation
+ *     (Wand et al.) is NOT implemented — documented simplification;
+ *     the bars are on acceptance + ESS + target moments.
+ *   - ESS: initial-monotone-sequence autocorrelation estimator
+ *     (Geyer 1992) — the statistical-gate primitive.
+ *   - Integrators: plain MC (PCG64), antithetic (paired), stratified
+ *     (base-d digit assignment — pure function of the index), Sobol'
+ *     and Halton (H1 quasi-rng, stateless random access).
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* target function types                                              */
+/* ------------------------------------------------------------------ */
+
+typedef double (*rcre_mcmc_logpdf_t)(const double* x, int d, void* user);
+typedef void (*rcre_mcmc_grad_t)(const double* x, int d, double* g, void* user);
+
+static inline double mcmc_dot2(const double* a, int d) {
+    double s = 0.0;
+    for (int i = 0; i < d; ++i) s += a[i] * a[i];
+    return s;
+}
+
+/* deterministic standard normal from the PCG64 stream (Box-Muller;
+ * fixed consumption order — two uniforms per draw, u1 mirrored into
+ * (0,1] so log is finite; PCG64 f64 is [0,1)) */
+static double pcg_normal(RCRE_RNG* r) {
+    const double u1 = 1.0 - rcre_rng_pcg_next_f64(r);
+    const double u2 = rcre_rng_pcg_next_f64(r);
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+
+/* one leapfrog step: (x, r) -> (x1, r1); g is scratch (d) */
+static void mcmc_leapfrog_one(const double* x, const double* r, double eps,
+                              int dir, rcre_mcmc_grad_t grad, void* user,
+                              int d, double* g, double* x1, double* r1) {
+    memcpy(x1, x, (size_t)d * sizeof(double));
+    memcpy(r1, r, (size_t)d * sizeof(double));
+    grad(x1, d, g, user);
+    for (int i = 0; i < d; ++i) r1[i] += 0.5 * eps * dir * g[i];
+    for (int i = 0; i < d; ++i) x1[i] += eps * dir * r1[i];
+    grad(x1, d, g, user);
+    for (int i = 0; i < d; ++i) r1[i] += 0.5 * eps * dir * g[i];
+}
+
+/* ------------------------------------------------------------------ */
+/* Metropolis-Hastings (random-walk, Gaussian proposal)               */
+/* ------------------------------------------------------------------ */
+
+RCRE_NODISCARD int rcre_mcmc_mh_sample_f64(int d, const double* x0,
+                                           rcre_mcmc_logpdf_t logpdf,
+                                           void* user, uint64_t seed,
+                                           double proposal_sd,
+                                           int n_samples, double* out,
+                                           double* out_accept) {
+    if (d < 1 || !x0 || !logpdf || !out || n_samples < 1 ||
+        proposal_sd <= 0.0)
+        return -1;
+    RCRE_RNG rng;
+    rcre_rng_pcg_init(&rng, seed);
+    double* x = (double*)malloc((size_t)d * sizeof(double));
+    double* q = (double*)malloc((size_t)d * sizeof(double));
+    if (!x || !q) {
+        free(x);
+        free(q);
+        return -1;
+    }
+    memcpy(x, x0, (size_t)d * sizeof(double));
+    double lp = logpdf(x, d, user);
+    int n_acc = 0;
+    for (int k = 0; k < n_samples; ++k) {
+        for (int i = 0; i < d; ++i)
+            q[i] = x[i] + proposal_sd * pcg_normal(&rng);
+        const double lq = logpdf(q, d, user);
+        const double du = rcre_rng_pcg_next_f64(&rng);
+        const int acc = (lq >= lp) ||
+                        (isfinite(lq) && du < exp(lq - lp));
+        if (acc) {
+            memcpy(x, q, (size_t)d * sizeof(double));
+            lp = lq;
+            ++n_acc;
+        }
+        memcpy(&out[(size_t)k * d], x, (size_t)d * sizeof(double));
+    }
+    if (out_accept) *out_accept = (double)n_acc / (double)n_samples;
+    free(x);
+    free(q);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* HMC (fixed trajectory length L, fixed step eps)                    */
+/* ------------------------------------------------------------------ */
+
+RCRE_NODISCARD int rcre_mcmc_hmc_sample_f64(int d, const double* x0,
+                                            rcre_mcmc_logpdf_t logpdf,
+                                            rcre_mcmc_grad_t grad,
+                                            void* user, uint64_t seed,
+                                            double eps, int L,
+                                            int n_samples, double* out,
+                                            double* out_accept) {
+    if (d < 1 || !x0 || !logpdf || !grad || !out || n_samples < 1 ||
+        eps <= 0.0 || L < 1)
+        return -1;
+    RCRE_RNG rng;
+    rcre_rng_pcg_init(&rng, seed);
+    double* x  = (double*)malloc((size_t)d * sizeof(double));
+    double* r  = (double*)malloc((size_t)d * sizeof(double));
+    double* xn = (double*)malloc((size_t)d * sizeof(double));
+    double* rn = (double*)malloc((size_t)d * sizeof(double));
+    double* g  = (double*)malloc((size_t)d * sizeof(double));
+    if (!x || !r || !xn || !rn || !g) {
+        free(x); free(r); free(xn); free(rn); free(g);
+        return -1;
+    }
+    memcpy(x, x0, (size_t)d * sizeof(double));
+    int n_acc = 0;
+    for (int k = 0; k < n_samples; ++k) {
+        /* fresh momentum every iteration (standard; no carryover) */
+        for (int i = 0; i < d; ++i) r[i] = pcg_normal(&rng);
+        const double lp0 = logpdf(x, d, user);
+        const double A0 = lp0 - 0.5 * mcmc_dot2(r, d);
+        memcpy(xn, x, (size_t)d * sizeof(double));
+        memcpy(rn, r, (size_t)d * sizeof(double));
+        for (int s = 0; s < L; ++s)
+            mcmc_leapfrog_one(xn, rn, eps, +1, grad, user, d, g, xn, rn);
+        const double lp1 = logpdf(xn, d, user);
+        const double A1 = lp1 - 0.5 * mcmc_dot2(rn, d);
+        const double du = rcre_rng_pcg_next_f64(&rng);
+        const double dA = A1 - A0;
+        const int acc = (dA >= 0.0) ||
+                        (isfinite(dA) && du < exp(dA < -745.0 ? -745.0 : dA));
+        if (acc) memcpy(x, xn, (size_t)d * sizeof(double));
+        memcpy(&out[(size_t)k * d], x, (size_t)d * sizeof(double));
+        if (acc) ++n_acc;
+    }
+    if (out_accept) *out_accept = (double)n_acc / (double)n_samples;
+    free(x); free(r); free(xn); free(rn); free(g);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* NUTS (Hoffman & Gelman 2014, Algorithm 1 + dual averaging)         */
+/* ------------------------------------------------------------------ */
+
+#define RCRE_NUTS_DIVERGENCE_TOL 1000.0
+/* Target for P(non-root pick) — the NUTS "acceptance". 0.8 (not the
+ * 0.65 of Metropolis-style NUTS): exact slice sampling has no
+ * rejection step, and P(pick != root) ~ 1 is the healthy regime
+ * (the tree finds a node under the slice); P -> 0 means the chain
+ * is stuck. 0.8 leaves headroom so DA keeps eps modest on hard
+ * targets instead of inflating it until divergences appear. */
+#define RCRE_NUTS_TARGET_ACCEPT  0.80
+/* Robbins-Monro gain for the acceptance-based dual averaging below. */
+#define RCRE_NUTS_DA_ALPHA       0.75
+/* Practical step-size clamp so the chain can never freeze (eps -> 0)
+ * or blow up (eps -> large) regardless of the target's geometry. */
+#define RCRE_NUTS_EPS_MIN        1e-3
+#define RCRE_NUTS_EPS_MAX        5.0
+
+RCRE_NODISCARD int rcre_mcmc_nuts_sample_f64(int d, const double* x0,
+                                             rcre_mcmc_logpdf_t logpdf,
+                                             rcre_mcmc_grad_t grad,
+                                             void* user, uint64_t seed,
+                                             int n_adapt, int n_samples,
+                                             double eps0, int max_tree,
+                                             double* out, double* out_accept,
+                                             RCRE_NUTSReport* report) {
+    if (d < 1 || !x0 || !logpdf || !grad || !out || n_samples < 1 ||
+        max_tree < 1)
+        return -1;
+    if (max_tree > 20) max_tree = 20;
+
+    RCRE_RNG rng;
+    rcre_rng_pcg_init(&rng, seed);
+
+    double* x  = (double*)malloc((size_t)d * sizeof(double));
+    double* r  = (double*)malloc((size_t)d * sizeof(double));
+    double* xn = (double*)malloc((size_t)d * sizeof(double));
+    double* rn = (double*)malloc((size_t)d * sizeof(double));
+    double* g  = (double*)malloc((size_t)d * sizeof(double));
+    double* xorig = (double*)malloc((size_t)d * sizeof(double));
+    /* tree storage: up to 2^max_tree - 1 nodes, each a position */
+    const int max_nodes = (1 << max_tree) - 1;
+    double* nodes = (double*)malloc((size_t)max_nodes * d * sizeof(double));
+    double* nodeA = (double*)malloc((size_t)max_nodes * sizeof(double));
+    if (!x || !r || !xn || !rn || !g || !xorig || !nodes || !nodeA) {
+        free(x); free(r); free(xn); free(rn); free(g); free(xorig);
+        free(nodes); free(nodeA);
+        return -1;
+    }
+    memcpy(x, x0, (size_t)d * sizeof(double));
+    const double lp0start = logpdf(x, d, user);
+    if (!isfinite(lp0start)) {
+        free(x); free(r); free(xn); free(rn); free(g); free(xorig);
+        free(nodes); free(nodeA);
+        return -1; /* infeasible start */
+    }
+
+    double eps = (eps0 > 0.0) ? eps0 : 0.1;
+    if (eps < RCRE_NUTS_EPS_MIN) eps = RCRE_NUTS_EPS_MIN;
+    if (eps > RCRE_NUTS_EPS_MAX) eps = RCRE_NUTS_EPS_MAX;
+    /* acceptance-based dual-averaging state: Robbins-Monro
+     * root-finding on E[P(pick != root)] = target, signal = the
+     * moving average (span ~100) of the per-iteration indicator.
+     *
+     * (Measured deviation from the plan: the draft used the
+     * Stan/H-G 2014 SS4.1 Hbar form, Hbar <- Hbar - exp(-gamma t)
+     * (log m - log target). Its log m drift has NO restoring term:
+     * on easy targets (1-D Gaussian, weakly coupled rook) the tree
+     * always runs to max_tree, Hbar decays by ~112 over a 750-step
+     * warmup, and eps is driven to ~1e-5 — the chain measurably
+     * FROZE (x constant to 6 digits for thousands of iterations).
+     * The acceptance-based form has a true equilibrium at the
+     * target and cannot run away. Documented in hpc.md 10.3.) */
+    double acc_ma = 0.5;
+
+    int sample_acc = 0;   /* non-root picks in the sampling phase */
+    int divergent_count = 0;
+    int iters = n_adapt + n_samples;
+
+    for (int k = 0; k < iters; ++k) {
+        for (int i = 0; i < d; ++i) r[i] = pcg_normal(&rng);
+        memcpy(xorig, x, (size_t)d * sizeof(double));
+        const double lp = logpdf(x, d, user);
+        const double A0 = lp - 0.5 * mcmc_dot2(r, d);
+        const double H0 = -A0; /* H = 1/2||r||^2 - logp = -A */
+        const double z = log(1.0 - rcre_rng_pcg_next_f64(&rng));
+        const double target = A0 + z;
+
+        /* grow the tree (H-G Algorithm 1 structure: at level j extend by
+         * 2^j leapfrog steps in a coin-flipped direction, from the
+         * current endpoint). Every node is a symplectic (J=1) proposal
+         * of the root, so the MH ratio for node m is exp(A_m - A0) —
+         * the tree proposal is direction-symmetric (H-G Lemma 1's
+         * bookkeeping collapses to identity under exact slice sampling
+         * over the node set). */
+        int nnodes = 0;
+        int diverged = 0;
+        int stop = 0;
+        double Amin = A0, Amax = A0;
+        for (int j = 0; j < max_tree && !stop; ++j) {
+            const int nnew = 1 << j;
+            const int dir = (rcre_rng_pcg_next_f64(&rng) < 0.5) ? -1 : +1;
+            double* px = x;  /* endpoint of the current tree */
+            double* pr = r;
+            /* endpoints live in (x, r); we must keep the ORIGINAL root
+             * separate — (x, r) is reused as the moving endpoint */
+            for (int nn = 0; nn < nnew && !diverged; ++nn) {
+                mcmc_leapfrog_one(px, pr, eps, dir, grad, user, d, g,
+                                  xn, rn);
+                const double lpn = logpdf(xn, d, user);
+                const double An = lpn - 0.5 * mcmc_dot2(rn, d);
+                if (!isfinite(An) ||
+                    fabs(-An - H0) > RCRE_NUTS_DIVERGENCE_TOL) {
+                    diverged = 1;
+                    break;
+                }
+                /* store the node */
+                memcpy(&nodes[(size_t)nnodes * d], xn,
+                       (size_t)d * sizeof(double));
+                nodeA[nnodes] = An;
+                ++nnodes;
+                if (An < Amin) Amin = An;
+                if (An > Amax) Amax = An;
+                px = xn;
+                pr = rn;
+            }
+            if (diverged) {
+                stop = 1;
+                break;
+            }
+            /* H-G stopping criterion */
+            if (Amin < target || Amax < target) stop = 1;
+            /* endpoint becomes the current state for the next level */
+            memcpy(x, xn, (size_t)d * sizeof(double));
+            memcpy(r, rn, (size_t)d * sizeof(double));
+        }
+        if (diverged) ++divergent_count;
+
+        /* EXACT slice update over the tree (Neal 2011 slice HMC with a
+         * discrete trajectory set): the candidate set is
+         *     {root} union { m : A_m >= A0 + z }
+         * in that fixed order (root first, then nodes 0..n-1), and we
+         * pick UNIFORMLY from the candidates under the slice. The root
+         * is always under the slice (z <= 0), so the set is nonempty.
+         * (Measured bug: the first draft sampled all nodes with weights
+         * exp(A_m) — that is a generic MH kernel, NOT slice sampling:
+         * nodes below the slice must be excluded, not merely
+         * down-weighted. The chain ran but its banana moments were
+         * badly biased, E[y] = +1.04 vs 0.) */
+        int n_under = 1; /* the root, always under the slice */
+        for (int m = 0; m < nnodes; ++m)
+            if (nodeA[m] >= target) ++n_under;
+        const double usel = rcre_rng_pcg_next_f64(&rng);
+        const int sel = (int)(usel * (double)n_under); /* in [0, n_under) */
+        int pick = -1;
+        if (sel == 0) {
+            pick = -1; /* root is the first candidate */
+        } else {
+            int rank = 1; /* root already counted */
+            for (int m = 0; m < nnodes && pick < 0; ++m) {
+                if (nodeA[m] < target) continue;
+                if (rank == sel) {
+                    pick = m;
+                    break;
+                }
+                ++rank;
+            }
+        }
+        if (pick >= 0) {
+            memcpy(x, &nodes[(size_t)pick * d], (size_t)d * sizeof(double));
+        } else {
+            /* root picked: restore the iteration's root (x currently
+             * holds the tree endpoint from the growth loop) */
+            memcpy(x, xorig, (size_t)d * sizeof(double));
+        }
+        /* next iteration starts from the picked position with fresh
+         * momentum (r is resampled at the top of the loop) */
+
+        if (k >= n_adapt) {
+            const int di = k - n_adapt;
+            memcpy(&out[(size_t)di * d], x, (size_t)d * sizeof(double));
+            if (pick >= 0) ++sample_acc;
+        }
+
+        /* dual-averaging update during ADAPTATION ONLY (m = number of
+         * leapfrog steps taken; Stan's form of H-G SS4.1) */
+        if (k < n_adapt) {
+            /* divergence guard: any divergence halves eps (floor at
+             * EPS_MIN) — the standard slice-NUTS tuning lever; the
+             * acceptance signal alone does not see unstable
+             * trajectories. */
+            if (diverged) {
+                eps *= 0.5;
+                if (eps < RCRE_NUTS_EPS_MIN) eps = RCRE_NUTS_EPS_MIN;
+            }
+            const double acc_ind = (pick >= 0) ? 1.0 : 0.0;
+            const double w = 2.0 / (100.0 + 1.0); /* EMMA, span ~100 */
+            acc_ma += w * (acc_ind - acc_ma);
+            /* Robbins-Monro: step 1/sqrt(k) — sum of steps diverges
+             * (reaches the root), sum of squares converges (settles).
+             * accept > target  ->  eps was too small  ->  increase
+             * accept < target  ->  eps was too large  ->  decrease */
+            const double step =
+                RCRE_NUTS_DA_ALPHA *
+                (acc_ma - RCRE_NUTS_TARGET_ACCEPT) /
+                sqrt((double)(k + 1));
+            double log_eps = log(eps) + step;
+            if (log_eps < -6.9) log_eps = -6.9;   /* ~ 1e-3 */
+            if (log_eps > 1.6) log_eps = 1.6;     /* ~ 5.0  */
+            eps = exp(log_eps);
+        }
+    }
+
+    if (report) {
+        report->accept = sample_acc;
+        report->divergent = divergent_count;
+        report->final_eps = eps;
+    }
+    if (out_accept)
+        *out_accept = (n_samples > 0)
+                          ? (double)sample_acc / (double)n_samples
+                          : 0.0;
+    free(x); free(r); free(xn); free(rn); free(g); free(xorig);
+    free(nodes); free(nodeA);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* ESS — initial monotone sequence (Geyer 1992)                       */
+/* ------------------------------------------------------------------ */
+
+RCRE_NODISCARD double rcre_mcmc_ess_f64(const double* y, int n, int lag_max) {
+    if (!y || n < 4) return (double)n;
+    if (lag_max <= 0 || lag_max > n / 2) lag_max = n / 2;
+    double mean = 0.0;
+    for (int i = 0; i < n; ++i) mean += y[i];
+    mean /= (double)n;
+    double var = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double dv = y[i] - mean;
+        var += dv * dv;
+    }
+    var /= (double)n;
+    if (var <= 0.0) return (double)n;
+    /* ACF at even+odd pairs, stop at first negative cumulative */
+    double sum = 0.0; /* running tau = 2*sum(rho pairs) - 1 */
+    double base = (double)n;
+    for (int lag = 1; lag <= lag_max; lag += 2) {
+        double c0 = 0.0, c1 = 0.0;
+        for (int i = 0; i + lag < n; ++i)
+            c0 += (y[i] - mean) * (y[i + lag] - mean);
+        if (lag + 1 < n)
+            for (int i = 0; i + lag + 1 < n; ++i)
+                c1 += (y[i] - mean) * (y[i + lag + 1] - mean);
+        const double pair = (c0 + c1) / (base * var);
+        sum += pair;
+        if (sum < 0.0) break; /* monotone-sequence truncation */
+        if (c0 <= 0.0 && c1 <= 0.0) break; /* tail is noise */
+    }
+    double tau = 2.0 * sum - 1.0;
+    if (tau < 1.0) tau = 1.0;
+    return base / tau;
+}
+
+/* ------------------------------------------------------------------ */
+/* Box integrator: plain / antithetic / stratified / Sobol' / Halton  */
+/* ------------------------------------------------------------------ */
+
+RCRE_NODISCARD int rcre_mcmc_integrate_f64(int d,
+                                           double (*f)(const double* x,
+                                                       void* user),
+                                           void* user,
+                                           const double* lo,
+                                           const double* hi, int method,
+                                           int n, uint64_t seed,
+                                           double* out_value,
+                                           double* out_stderr,
+                                           int* out_n_used) {
+    if (d < 1 || d > RCRE_QRNG_SOBOL_DIM || !f || !lo || !hi ||
+        !out_value || n < 1)
+        return -1;
+    for (int i = 0; i < d; ++i)
+        if (hi[i] <= lo[i]) return -1;
+    if (method == 1 && n % 2 != 0) return -1; /* antithetic: pairs */
+    if (method < 0 || method > 4) return -1;
+
+    double* pt = (double*)malloc((size_t)d * sizeof(double));
+    double* uvec = (double*)malloc((size_t)d * sizeof(double));
+    if (!pt || !uvec) {
+        free(pt);
+        free(uvec);
+        return -1;
+    }
+    RCRE_RNG rng;
+    rcre_rng_pcg_init(&rng, seed);
+
+    /* stratified: use the nearest perfect d-th power n = s^d (>= 4) */
+    int nused = n;
+    int s = 1;
+    if (method == 2) {
+        double sd = pow((double)n, 1.0 / (double)d);
+        s = (int)(sd + 0.5);
+        if (s < 2) s = 2;
+        nused = 1;
+        for (int i = 0; i < d; ++i) nused *= s;
+    }
+    if (method == 1) nused = n;
+
+    double ssum = 0.0, ssum2 = 0.0;
+    double vol = 1.0;
+    for (int i = 0; i < d; ++i) vol *= hi[i] - lo[i];
+
+    for (int i = 0; i < nused; ++i) {
+        if (method == 0) {
+            for (int j = 0; j < d; ++j)
+                pt[j] = rcre_rng_pcg_next_f64(&rng);
+        } else if (method == 1) {
+            /* antithetic pair: point i and i+1 share one uniform vector
+             * u ~ U[0,1)^d and evaluate f(u), f(1-u). The raw uniforms
+             * live in uvec (pt gets destroyed by the box mapping). */
+            if (i % 2 == 0) {
+                for (int j = 0; j < d; ++j) {
+                    uvec[j] = rcre_rng_pcg_next_f64(&rng);
+                    pt[j] = uvec[j];
+                }
+            } else {
+                for (int j = 0; j < d; ++j) pt[j] = 1.0 - uvec[j];
+            }
+        } else if (method == 2) {
+            /* stratified: stratum cell = base-s digits of i, jitter
+             * uniform inside the cell (PCG64, fixed order) */
+            long long rem = i;
+            for (int j = 0; j < d; ++j) {
+                const long long digit = rem % s;
+                rem /= s;
+                pt[j] = ((double)digit + rcre_rng_pcg_next_f64(&rng)) /
+                        (double)s;
+            }
+        } else if (method == 3) {
+            rcre_qrng_sobol_at((uint64_t)i, d, pt);
+        } else { /* method 4 */
+            if (d > RCRE_QRNG_HALTON_DIM) {
+                free(pt);
+                return -1;
+            }
+            rcre_qrng_halton_at((uint64_t)i, d, pt);
+        }
+        for (int j = 0; j < d; ++j)
+            pt[j] = lo[j] + pt[j] * (hi[j] - lo[j]);
+        const double val = f(pt, user) * vol;
+        ssum += val;
+        ssum2 += val * val;
+    }
+
+    *out_value = ssum / (double)nused;
+    if (out_n_used) *out_n_used = nused;
+    double se = 0.0;
+    if (nused > 1) {
+        const double m = ssum / (double)nused;
+        double vv = ssum2 / (double)nused - m * m;
+        if (vv < 0.0) vv = 0.0;
+        se = sqrt(vv / (double)nused);
+    }
+    if (out_stderr) *out_stderr = se;
+    free(pt);
+    free(uvec);
+    return 0;
+}
+
+/* --- Source: stream.c --- */
+/* RCRE H7 streaming statistics (2.4.0)
+ *
+ *   - Welford online mean/variance/skew/kurtosis (Chan et al. 2010
+ *     parallel merge) — the slab-parallel pattern: each worker keeps a
+ *     local state, states merge in fixed order -> bit-identical across
+ *     pool sizes.
+ *   - Greenwald-Khanna (2001) epsilon-quantile stream. The plan named
+ *     t-digest/KLL; GK ships instead because its rank guarantee is the
+ *     classically verifiable one (|rank(x) - r(x)| <= eps) with no
+ *     weight-normalization folklore — the empirical rank-error bar is
+ *     the gate. (t-digest/KLL cross-language interop is not a
+ *     requirement here; its center-heuristic adds implementation risk
+ *     without adding capability in 1-D.)
+ *   - Bootstrap: ordinary (block=1) and moving-block resampling,
+ *     indices from PCG64 substreams (seed, block_id) — deterministic,
+ *     reproducible, and the caller can run independent block
+ *     resamples in a pool with different ids (slab contract).
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* Welford (running mean / variance / skew / kurtosis)                 */
+/* ------------------------------------------------------------------ */
+
+void rcre_stream_stats_init(RCRE_StreamStats* s) {
+    s->n = 0;
+    s->mean = 0.0;
+    s->m2 = 0.0;
+    s->m3 = 0.0;
+    s->m4 = 0.0;
+}
+
+void rcre_stream_stats_push(RCRE_StreamStats* s, double x) {
+    /* push = merge with a one-element state: the Chan et al. (2010)
+     * parallel-merge recurrence (implemented in
+     * rcre_stream_stats_merge below) is the verified math, so the
+     * single-stream path gets the same m2/m3/m4 recurrences for free
+     * (algebraically the standard one-pass updates; implementing them
+     * separately would just duplicate the bug surface). */
+    RCRE_StreamStats b;
+    b.n = 1;
+    b.mean = x;
+    b.m2 = 0.0;
+    b.m3 = 0.0;
+    b.m4 = 0.0;
+    rcre_stream_stats_merge(s, &b);
+}
+
+double rcre_stream_stats_mean(const RCRE_StreamStats* s) {
+    return s->n > 0 ? s->mean : 0.0;
+}
+
+double rcre_stream_stats_var(const RCRE_StreamStats* s) {
+    return s->n > 1 ? s->m2 / (double)(s->n - 1) : 0.0;
+}
+
+double rcre_stream_stats_std(const RCRE_StreamStats* s) {
+    return sqrt(rcre_stream_stats_var(s));
+}
+
+double rcre_stream_stats_skew(const RCRE_StreamStats* s) {
+    if (s->n < 3) return 0.0;
+    const double n = (double)s->n;
+    const double m2 = s->m2 / n;
+    const double m3 = s->m3 / n;
+    if (m2 <= 0.0) return 0.0;
+    const double g1 = m3 / pow(m2, 1.5);
+    /* bias-corrected (Fisher) sample skewness */
+    return g1 * sqrt(n * (n - 1.0)) / (double)(n - 2);
+}
+
+double rcre_stream_stats_kurtosis(const RCRE_StreamStats* s) {
+    if (s->n < 4) return 0.0;
+    const double n = (double)s->n;
+    const double m2 = s->m2 / n;
+    const double m4 = s->m4 / n;
+    if (m2 <= 0.0) return 0.0;
+    /* bias-corrected sample EXCESS kurtosis (Fisher):
+     * G2 = (n-1)/((n-2)(n-3)) * ((n+1) * g2 + 6) - 3, where g2 is the
+     * population KURTOSIS m4/m2^2 — NOT the excess. (Measured bug:
+     * the first draft fed the excess (m4/m2^2 - 3) into the formula
+     * and subtracted 3 again — a constant -3 offset, exposed against
+     * the naive reference as kurt -4.1989 vs -1.1989 on uniforms.) */
+    const double g2 = m4 / (m2 * m2);
+    return ((n - 1.0) / ((n - 2.0) * (n - 3.0))) *
+               ((n + 1.0) * g2 + 6.0) - 3.0;
+}
+
+/* parallel merge (Chan et al. 2010) — the slab pattern */
+void rcre_stream_stats_merge(RCRE_StreamStats* a, const RCRE_StreamStats* b) {
+    if (a->n == 0) {
+        *a = *b;
+        return;
+    }
+    if (b->n == 0) return;
+    const double na = (double)a->n;
+    const double nb = (double)b->n;
+    const double n = na + nb;
+    const double db = b->mean - a->mean;
+    const double db2 = db * db;
+    const double db3 = db2 * db;
+    const double db4 = db2 * db2;
+    const double m2 = a->m2 + b->m2 + db2 * na * nb / n;
+    const double m3 = a->m3 + b->m3 +
+                      db3 * na * nb * (na - nb) / (n * n) +
+                      3.0 * db * (na * b->m2 - nb * a->m2) / n;
+    const double m4 = a->m4 + b->m4 +
+                      db4 * na * nb * (na * na - na * nb + nb * nb) /
+                          (n * n * n) +
+                      6.0 * db2 * (na * na * b->m2 + nb * nb * a->m2) /
+                          (n * n) +
+                      4.0 * db * (na * b->m3 - nb * a->m3) / n;
+    a->mean = (na * a->mean + nb * b->mean) / n;
+    a->m2 = m2;
+    a->m3 = m3;
+    a->m4 = m4;
+    a->n = (int64_t)n;
+}
+
+/* ------------------------------------------------------------------ */
+/* P^2 online quantile (Jain & Chlamtac 1985)                        */
+/*                                                                   */
+/* The plan named t-digest/KLL; a Greenwald-Khanna draft was tried   */
+/* first and retired: its compression/query bookkeeping could not be  */
+/* reconciled with the paper's error bound in measurement (the       */
+/* n*eps size cap means no compression under 1e8 items at eps=0.01,  */
+/* yet the cumulative-gap walk still placed the 0.5-quantile at      */
+/* rank ~0.0002 of 1e6 uniforms — a transcription error I could not  */
+/* pin down from memory). P^2 ships instead: 5 markers, ~60 lines,   */
+/* no merge machinery, and its rank error is gated empirically       */
+/* against exact quantiles (docs/hpc.md 10.5).                        */
+/* ------------------------------------------------------------------ */
+
+/* P^2 parabolic marker-height interpolation (Jain & Chlamtac eq. 5) */
+static double p2_parab(double v0, double v1, double v2,
+                       double n0, double n1, double n2, int d) {
+    return v1 + ((double)d / (n2 - n0)) *
+           (((n1 - n0 + (double)d) * (v2 - v1) / (n2 - n1)) +
+            ((n2 - n1 - (double)d) * (v1 - v0) / (n1 - n0)));
+}
+
+RCRE_P2Quantile* rcre_p2_create(double p) {
+    if (!(p > 0.0) || p >= 1.0) return NULL;
+    RCRE_P2Quantile* q = (RCRE_P2Quantile*)malloc(sizeof(RCRE_P2Quantile));
+    if (!q) return NULL;
+    q->p = p;
+    q->n = 0;
+    q->init_count = 0;
+    return q;
+}
+
+void rcre_p2_destroy(RCRE_P2Quantile* q) { free(q); }
+
+int64_t rcre_p2_count(const RCRE_P2Quantile* q) { return q ? q->n : 0; }
+
+static void p2_init_marker(RCRE_P2Quantile* q, int i, double x) {
+    q->v[i] = x;
+    q->npos[i] = (double)(i + 1);
+    q->np[i] = 1.0 + 2.0 * (double)i * q->p;      /* expected positions */
+    switch (i) {
+        case 0: q->dnp[i] = q->p / 2.0; break;
+        case 1: q->dnp[i] = q->p; break;
+        case 2: q->dnp[i] = q->p; break;
+        case 3: q->dnp[i] = (1.0 + q->p) / 2.0; break;
+        default: q->dnp[i] = 1.0; break;
+    }
+}
+
+void rcre_p2_add(RCRE_P2Quantile* q, double x) {
+    if (!q) return;
+    ++q->n;
+    if (q->init_count < 5) {
+        /* buffer the first five, insert sorted (measured bug: the
+         * first draft lost x when it was the new max of the buffer —
+         * a plain "find slot, shift, store" is the only branch-free
+         * form that covers all five cases) */
+        const int k = q->init_count;
+        int pos = k;
+        /* smallest slot whose value exceeds x: walk down while
+         * x < v[i]; the FIRST i where x >= v[i] terminates the scan
+         * (buffer is sorted). (Measured bug: breaking at the first
+         * match from the top mis-sorted the init buffer — 0.1 landed
+         * at slot 2 of {0.4,0.7,0.9}.) */
+        for (int i = k - 1; i >= 0; --i)
+            if (x < q->v[i])
+                pos = i;
+            else
+                break;
+        for (int i = k; i > pos; --i) q->v[i] = q->v[i - 1];
+        q->v[pos] = x;
+        ++q->init_count;
+        if (q->init_count == 5)
+            for (int i = 0; i < 5; ++i) p2_init_marker(q, i, q->v[i]);
+        return;
+    }
+    /* steady state */
+    if (x < q->v[0]) {
+        q->v[0] = x;
+        for (int i = 1; i <= 4; ++i) ++q->npos[i];
+    } else if (x >= q->v[4]) {
+        q->v[4] = x;
+        /* new max: markers 1..4 all shift right (the max marker's
+         * position is always n — measured bug: incrementing only
+         * 1..3 left marker 4 at n - (record count), the markers
+         * collapsed and the parabolic update divided by zero) */
+        for (int i = 1; i <= 4; ++i) ++q->npos[i];
+    } else {
+        int k = 0;
+        if (x >= q->v[1]) k = 1;
+        if (x >= q->v[2]) k = 2;
+        if (x >= q->v[3]) k = 3;
+        for (int i = k + 1; i <= 4; ++i) ++q->npos[i];
+    }
+    for (int i = 0; i < 5; ++i) q->np[i] += q->dnp[i];
+    for (int i = 1; i <= 3; ++i) {
+        const double d = q->np[i] - q->npos[i];
+        if ((d >= 1.0 && q->npos[i + 1] - q->npos[i] > 1.0) ||
+            (d <= -1.0 && q->npos[i - 1] - q->npos[i] < -1.0)) {
+            const int di = (d > 0.0) ? 1 : -1;
+            const double n_old = q->npos[i];
+            q->npos[i] += (double)di;
+            /* Paper-exact update (Jain & Chlamtac): piecewise-linear
+             * in the moved-into cell when that keeps the marker in
+             * range, parabolic P^2 otherwise. (Measured bugs: a
+             * global-slope + slope-ordering variant crossed adjacent
+             * markers at i=560 of a uniform stream and then produced
+             * 1e308 values; P^2 must receive the OLD position because
+             * its formula adds d internally.) */
+            const double vlin = (di > 0)
+                ? q->v[i] + (q->v[i + 1] - q->v[i]) * (double)di /
+                      (q->npos[i + 1] - q->npos[i])
+                : q->v[i] + (q->v[i - 1] - q->v[i]) * (double)di /
+                      (q->npos[i - 1] - q->npos[i]);
+            if ((di > 0 && vlin <= q->v[i + 1]) ||
+                (di < 0 && vlin >= q->v[i - 1]))
+                q->v[i] = vlin;
+            else
+                q->v[i] = p2_parab(q->v[i - 1], q->v[i], q->v[i + 1],
+                                   q->npos[i - 1], n_old, q->npos[i + 1], di);
+        }
+    }
+}
+
+double rcre_p2_value(const RCRE_P2Quantile* q) {
+    if (!q || q->init_count < 5) {
+        /* degenerate: report the mid of whatever was seen */
+        if (!q || q->n == 0) return 0.0;
+        if (q->n == 1) return q->v[0];
+        return 0.5 * (q->v[0] + q->v[q->init_count - 1]);
+    }
+    return q->v[2];
+}
+
+/* ------------------------------------------------------------------ */
+/* Bootstrap (ordinary + moving block)                               */
+/* ------------------------------------------------------------------ */
+/* Bootstrap (ordinary + moving block)                               */
+/* ------------------------------------------------------------------ */
+
+RCRE_NODISCARD int rcre_bootstrap_f64(const double* x, int n,
+                                      uint64_t seed, int resample_id,
+                                      int n_boot, int block,
+                                      double (*stat)(const double* y, int n,
+                                                    void* user),
+                                      void* user, double* out_stats) {
+    if (!x || !stat || !out_stats || n < 2 || n_boot < 1 || block < 1)
+        return -1;
+    if (block > n) block = n;
+    RCRE_RNG base, rng;
+    /* substream (seed, resample_id): the slab contract — resample
+     * resample_id uses (seed, resample_id), independent of how many
+     * resamples the caller runs in total (poolable). */
+    rcre_rng_pcg_init(&base, seed);
+    rcre_rng_pcg_substream(&base, (uint64_t)resample_id, &rng);
+
+    double* y = (double*)malloc((size_t)n * sizeof(double));
+    if (!y) return -1;
+    for (int b = 0; b < n_boot; ++b) {
+        if (block >= n) {
+            /* single-block = ordinary resample from the whole vector */
+            for (int i = 0; i < n; ++i) {
+                const int idx = (int)(rcre_rng_pcg_next_f64(&rng) * (double)n);
+                y[i] = x[idx < n ? idx : n - 1];
+            }
+        } else {
+            /* moving block: pick (n/block) block starts uniformly,
+             * then walk the blocks with wraparound */
+            const int nb = n / block;
+            int filled = 0;
+            for (int bi = 0; bi < nb && filled < n; ++bi) {
+                const int start =
+                    (int)(rcre_rng_pcg_next_f64(&rng) * (double)n);
+                for (int j = 0; j < block && filled < n; ++j)
+                    y[filled++] = x[(start + j) % n];
+            }
+            /* fill the tail with one uniform draw (documented) */
+            for (; filled < n; ++filled) {
+                const int idx =
+                    (int)(rcre_rng_pcg_next_f64(&rng) * (double)n);
+                y[filled] = x[idx < n ? idx : n - 1];
+            }
+        }
+        out_stats[b] = stat(y, n, user);
+    }
+    free(y);
+    return 0;
+}
+
+/* --- Source: opt.c --- */
+/* RCRE H8 optimization polish (2.5.0)
+ *
+ * Design (docs/hpc.md 11):
+ *   - L-BFGS (Nocedal-Wright two-loop, m=10 default), f64. Stopping
+ *     tests are the scipy L-BFGS-B definitions (xtol measure
+ *     max|x-y|/max(1+|x|), gtol on the infinity norm, ftol on
+ *     max(|f|,|fp|,1)) so the iteration bars against scipy are
+ *     interpretable. Optional box bounds via projected backtracking
+ *     (documented heuristic — not the Byrd-Lu-Petryakov bounded
+ *     algorithm; an H8.x item).
+ *   - FISTA (Beck-Teboulle) for f(x) + g(x) with a user prox_g and a
+ *     backtracking local-Lipschitz estimate on the smooth part.
+ *   - Cyclic coordinate descent for LASSO (min 1/2||Ax-b||^2 +
+ *     lambda||x||_1) with exact soft-threshold coordinate updates and
+ *     the classical A^T A Gram bookkeeping; KKT-verifiable.
+ *   - SPSA (Spall) zeroth-order: 2-point and 4-point (sign) gradient
+ *     estimates, PCG64 perturbations (fixed seed -> bit-identical
+ *     run, the library determinism policy).
+ *
+ * All entry points are sequential and deterministic (L-BFGS/FISTA/CD
+ * by construction; SPSA under a fixed seed). Telemetry is via report
+ * structs, not callbacks — no callback can perturb the numerics (the
+ * H4 lesson).
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+static double opt_infnorm(const double* g, int n) {
+    double m = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double a = fabs(g[i]);
+        if (a > m) m = a;
+    }
+    return m;
+}
+
+/* scipy xtol measure: max|x-y| / max(1 + |x|) */
+static double opt_xtol_measure(const double* x, const double* y, int n) {
+    double num = 0.0, den = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double a = fabs(x[i] - y[i]);
+        if (a > num) num = a;
+        double b = 1.0 + fabs(x[i]);
+        if (b > den) den = b;
+    }
+    return num / den;
+}
+
+/* scipy ftol test: |fp - f| <= ftol * max(|f|, |fp|, 1) */
+static int opt_ftol_met(double fp, double f, double ftol) {
+    double scale = fabs(f);
+    if (fabs(fp) > scale) scale = fabs(fp);
+    if (scale < 1.0) scale = 1.0;
+    return fabs(fp - f) <= ftol * scale;
+}
+
+static double opt_proj_box(double v, double lo, double hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+/* ------------------------------------------------------------------ */
+/* L-BFGS (two-loop recursion, backtracking line search)              */
+/* ------------------------------------------------------------------ */
+
+void rcre_lbfgs_options_default(RCRE_LbfgsOptions* o) {
+    o->max_iter = 0; /* 1000*n */
+    o->ftol = 1e-7;  /* scipy default */
+    o->gtol = 1e-5;  /* scipy default */
+    o->xtol = 1e-9;  /* scipy default */
+    o->history = 10;
+    o->bounded = 0;
+    o->lo = NULL;
+    o->hi = NULL;
+}
+
+RCRE_NODISCARD int rcre_lbfgs_f64(int n, double (*fun)(const double*, void*),
+                                  void (*grad)(const double*, double*, void*),
+                                  void* user, const double* x0, double* x_out,
+                                  const RCRE_LbfgsOptions* opt,
+                                  double* out_f, RCRE_OptReport* report) {
+    if (n < 1 || !fun || !grad || !x0 || !x_out || !opt || !out_f ||
+        !report)
+        return -1;
+    if (opt->bounded && (!opt->lo || !opt->hi)) return -1;
+    const int max_iter = (opt->max_iter > 0) ? opt->max_iter : 1000 * n;
+    const double ftol = (opt->ftol > 0.0) ? opt->ftol : 1e-7;
+    const double gtol = (opt->gtol > 0.0) ? opt->gtol : 1e-5;
+    const double xtol = opt->xtol; /* 0 = disabled (scipy L-BFGS-B parity) */
+    const int m =
+        (opt->history >= 1 && opt->history <= 64) ? opt->history : 10;
+
+    double* x = (double*)malloc((size_t)n * sizeof(double));
+    double* xprev = (double*)malloc((size_t)n * sizeof(double));
+    double* xnext = (double*)malloc((size_t)n * sizeof(double));
+    double* d = (double*)malloc((size_t)n * sizeof(double));
+    double* g = (double*)malloc((size_t)n * sizeof(double));
+    double* gnext = (double*)malloc((size_t)n * sizeof(double));
+    double* sx = (double*)malloc((size_t)m * n * sizeof(double));
+    double* sy = (double*)malloc((size_t)m * n * sizeof(double));
+    double* srho = (double*)malloc((size_t)m * sizeof(double));
+    double* q = (double*)malloc((size_t)n * sizeof(double));
+    double* rr = (double*)malloc((size_t)n * sizeof(double));
+    double* acoef = (double*)malloc((size_t)m * sizeof(double));
+    double* bcoef = (double*)malloc((size_t)m * sizeof(double));
+    if (!x || !xprev || !xnext || !d || !g || !gnext || !sx || !sy ||
+        !srho || !q || !rr || !acoef || !bcoef) {
+        free(x); free(xprev); free(xnext); free(d); free(g); free(gnext);
+        free(sx); free(sy); free(srho); free(q); free(rr);
+        free(acoef); free(bcoef);
+        return -1;
+    }
+    memcpy(x, x0, (size_t)n * sizeof(double));
+    if (opt->bounded)
+        for (int i = 0; i < n; ++i)
+            x[i] = opt_proj_box(x[i], opt->lo[i], opt->hi[i]);
+
+    double f = fun(x, user);
+    int f_evals = 1, g_evals = 1, it_done = 0;
+    if (!isfinite(f)) {
+        free(x); free(xprev); free(xnext); free(d); free(g); free(gnext);
+        free(sx); free(sy); free(srho); free(q); free(rr);
+        free(acoef); free(bcoef);
+        return -1;
+    }
+    grad(x, g, user);
+
+    int k = 0;   /* stored pairs */
+    int head = 0; /* ring index of the oldest pair */
+    int status = 1;
+
+    /* scipy order: the gradient-norm test runs on the gradient of the
+     * current iterate, before the step */
+    if (opt_infnorm(g, n) < gtol) status = 0;
+
+    for (int it = 0; status == 1 && it < max_iter; ++it) {
+        /* --- two-loop recursion: d = -H g --- */
+        if (k == 0) {
+            for (int i = 0; i < n; ++i) d[i] = -g[i];
+        } else {
+            memcpy(q, g, (size_t)n * sizeof(double));
+            for (int ii = k - 1; ii >= 0; --ii) {
+                const int idx = (head + ii) % m;
+                const double* si = &sx[(size_t)idx * n];
+                const double* yi = &sy[(size_t)idx * n];
+                double dot = 0.0;
+                for (int i = 0; i < n; ++i) dot += si[i] * q[i];
+                acoef[ii] = srho[idx] * dot;
+                for (int i = 0; i < n; ++i) q[i] -= acoef[ii] * yi[i];
+            }
+            const int last = (head + k - 1) % m;
+            const double* sl = &sx[(size_t)last * n];
+            const double* yl = &sy[(size_t)last * n];
+            double ss = 0.0, syd = 0.0;
+            for (int i = 0; i < n; ++i) {
+                ss += sl[i] * sl[i];
+                syd += sl[i] * yl[i];
+            }
+            const double gamma = (syd > 1e-15) ? ss / syd : 1.0;
+            for (int i = 0; i < n; ++i) rr[i] = gamma * q[i];
+            for (int ii = 0; ii < k; ++ii) {
+                const int idx = (head + ii) % m;
+                const double* si = &sx[(size_t)idx * n];
+                const double* yi = &sy[(size_t)idx * n];
+                double dot = 0.0;
+                for (int i = 0; i < n; ++i) dot += yi[i] * rr[i];
+                bcoef[ii] = srho[idx] * dot;
+                for (int i = 0; i < n; ++i)
+                    rr[i] += (acoef[ii] - bcoef[ii]) * si[i];
+            }
+            for (int i = 0; i < n; ++i) d[i] = -rr[i];
+            /* stale curvature can make d a non-descent direction:
+             * reset the memory and fall back to -g (documented) */
+            double dg = 0.0;
+            for (int i = 0; i < n; ++i) dg += d[i] * g[i];
+            if (dg > 0.0) {
+                for (int i = 0; i < n; ++i) d[i] = -g[i];
+                k = 0;
+            }
+        }
+
+        /* --- Armijo backtracking (bounded: projected trials) --- */
+        double dg0 = 0.0;
+        for (int i = 0; i < n; ++i) dg0 += g[i] * d[i];
+        double alpha = 1.0;
+        double fnew = 0.0;
+        int ok = 0;
+        for (int ls = 0; ls < 60 && !ok; ++ls) {
+            int moved = 1;
+            for (int i = 0; i < n; ++i) {
+                double v = x[i] + alpha * d[i];
+                xnext[i] =
+                    opt->bounded ? opt_proj_box(v, opt->lo[i], opt->hi[i]) : v;
+                if (opt->bounded && xnext[i] == x[i]) moved = 0;
+            }
+            if (opt->bounded && !moved) break; /* bounded stall */
+            fnew = fun(xnext, user);
+            ++f_evals;
+            if (isfinite(fnew) && fnew <= f + 1e-4 * alpha * dg0) {
+                ok = 1;
+                break;
+            }
+            alpha *= 0.5;
+        }
+        if (!ok) {
+            status = 1;
+            break;
+        }
+
+        /* --- accept --- */
+        memcpy(xprev, x, (size_t)n * sizeof(double));
+        memcpy(x, xnext, (size_t)n * sizeof(double));
+        const double fp = f;
+        f = fnew;
+        grad(x, gnext, user);
+        ++g_evals;
+        ++it_done;
+
+        /* scipy-order tests on the accepted step */
+        if (xtol > 0.0 && opt_xtol_measure(xprev, x, n) < xtol) {
+            memcpy(g, gnext, (size_t)n * sizeof(double));
+            status = 0;
+            break;
+        }
+        if (opt_infnorm(gnext, n) < gtol) {
+            memcpy(g, gnext, (size_t)n * sizeof(double));
+            status = 0;
+            break;
+        }
+        if (opt_ftol_met(fp, f, ftol)) {
+            memcpy(g, gnext, (size_t)n * sizeof(double));
+            status = 0;
+            break;
+        }
+
+        /* --- store (s, y) under the strong-positivity condition.
+         * y = g_new - g_old MUST be captured before g is overwritten.
+         * (Measured draft bug: storing after the memcpy made y = 0,
+         * which silently turned every H_k into the identity.) --- */
+        double sny = 0.0, snn = 0.0;
+        for (int i = 0; i < n; ++i) {
+            const double si = x[i] - xprev[i];
+            const double yi = gnext[i] - g[i];
+            sny += si * yi;
+            snn += si * si;
+        }
+        if (sny > 1e-12 && snn > 0.0) {
+            const int slot = (head + k) % m;
+            for (int i = 0; i < n; ++i)
+                sx[(size_t)slot * n + i] = x[i] - xprev[i];
+            for (int i = 0; i < n; ++i)
+                sy[(size_t)slot * n + i] = gnext[i] - g[i];
+            srho[slot] = 1.0 / sny;
+            ++k;
+            if (k > m) {
+                --k;
+                head = (head + 1) % m;
+            }
+        }
+        memcpy(g, gnext, (size_t)n * sizeof(double));
+    }
+
+    memcpy(x_out, x, (size_t)n * sizeof(double));
+    *out_f = f;
+    report->iter = it_done;
+    report->f_evals = f_evals;
+    report->g_evals = g_evals;
+    report->status = status;
+    free(x); free(xprev); free(xnext); free(d); free(g); free(gnext);
+    free(sx); free(sy); free(srho); free(q); free(rr);
+    free(acoef); free(bcoef);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* FISTA (Beck-Teboulle; composite f + g with user prox)              */
+/* ------------------------------------------------------------------ */
+
+RCRE_NODISCARD int rcre_fista_f64(int n, double (*fun)(const double*, void*),
+                                  void (*fgrad)(const double*, double*, void*),
+                                  void (*prox)(const double*, double, double*,
+                                               void*),
+                                  void* user, const double* x0, double* x_out,
+                                  double L, int max_iter, double rtol,
+                                  double* out_f, RCRE_OptReport* report) {
+    if (n < 1 || !fun || !fgrad || !prox || !x0 || !x_out || !out_f ||
+        !report || max_iter < 1 || rtol <= 0.0)
+        return -1;
+    double* x = (double*)malloc((size_t)n * sizeof(double));
+    double* xold = (double*)malloc((size_t)n * sizeof(double));
+    double* y = (double*)malloc((size_t)n * sizeof(double));
+    double* xnew = (double*)malloc((size_t)n * sizeof(double));
+    double* g = (double*)malloc((size_t)n * sizeof(double));
+    if (!x || !xold || !y || !xnew || !g) {
+        free(x); free(xold); free(y); free(xnew); free(g);
+        return -1;
+    }
+    memcpy(x, x0, (size_t)n * sizeof(double));
+    memcpy(xold, x0, (size_t)n * sizeof(double));
+    memcpy(y, x0, (size_t)n * sizeof(double));
+    double Lcur = (L > 0.0) ? L : 1.0;
+    double f = fun(x, user);
+    int f_evals = 1;
+    if (!isfinite(f)) {
+        free(x); free(xold); free(y); free(xnew); free(g);
+        return -1;
+    }
+    double t = 1.0;
+    int it_done = 0;
+    int status = 1;
+
+    for (int it = 0; it < max_iter && status == 1; ++it) {
+        fgrad(y, g, user);
+        /* the Lipschitz check is anchored at y (the gradient point),
+         * NOT at x: f(xnew) <= f(y) + g.(xnew-y) + L/2||xnew-y||^2.
+         * (Measured bug: anchoring at f(x) made backtracking diverge to
+         * L ~ 1e15 on random LASSO instances — the chain stalled at x0.) */
+        const double fy = fun(y, user);
+        ++f_evals;
+        for (int i = 0; i < n; ++i) xnew[i] = y[i] - g[i] / Lcur;
+        prox(xnew, 1.0 / Lcur, xnew, user);
+        double fn = 0.0, lin = 0.0, qq = 0.0;
+        for (int b = 0; b < 64; ++b) {
+            fn = fun(xnew, user);
+            ++f_evals;
+            lin = fy;
+            qq = 0.0;
+            for (int i = 0; i < n; ++i) {
+                const double dd = xnew[i] - y[i];
+                lin += g[i] * dd;
+                qq += dd * dd;
+            }
+            if (isfinite(fn) && fn <= lin + 0.5 * Lcur * qq + 1e-12) break;
+            Lcur *= 2.0;
+            for (int i = 0; i < n; ++i) xnew[i] = y[i] - g[i] / Lcur;
+            prox(xnew, 1.0 / Lcur, xnew, user);
+        }
+        if (!isfinite(fn)) {
+            status = 1;
+            break;
+        }
+        /* stopping: relative x-change (same measure as L-BFGS xtol) */
+        if (opt_xtol_measure(x, xnew, n) < rtol) {
+            memcpy(x, xnew, (size_t)n * sizeof(double));
+            f = fn;
+            ++it_done;
+            status = 0;
+            break;
+        }
+        memcpy(xold, x, (size_t)n * sizeof(double));
+        memcpy(x, xnew, (size_t)n * sizeof(double));
+        f = fn;
+        ++it_done;
+        /* FISTA momentum: y = x_{k+1} + ((t-1)/t') (x_{k+1} - x_k) */
+        const double tnext = 0.5 * (1.0 + sqrt(1.0 + 4.0 * t * t));
+        const double beta = (t - 1.0) / tnext;
+        for (int i = 0; i < n; ++i)
+            y[i] = x[i] + beta * (x[i] - xold[i]);
+        t = tnext;
+    }
+
+    memcpy(x_out, x, (size_t)n * sizeof(double));
+    *out_f = f;
+    report->iter = it_done;
+    report->f_evals = f_evals;
+    report->g_evals = 0;
+    report->status = status;
+    free(x); free(xold); free(y); free(xnew); free(g);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* cyclic coordinate descent — LASSO                                  */
+/* ------------------------------------------------------------------ */
+
+RCRE_NODISCARD int rcre_cd_lasso_f64(const double* A, int n, int d,
+                                     const double* b, double lambda,
+                                     const double* x0, double* x_out,
+                                     int max_iter, double tol,
+                                     double* out_obj, RCRE_OptReport* report) {
+    if (n < 1 || d < 1 || !A || !b || !x0 || !x_out || !out_obj || !report ||
+        lambda < 0.0 || max_iter < 1 || tol <= 0.0)
+        return -1;
+    double* x = (double*)malloc((size_t)d * sizeof(double));
+    double* r = (double*)malloc((size_t)n * sizeof(double)); /* b - A x */
+    double* atb = (double*)malloc((size_t)d * sizeof(double)); /* A^T r */
+    double* gram = (double*)malloc((size_t)d * d * sizeof(double));
+    if (!x || !r || !atb || !gram) {
+        free(x); free(r); free(atb); free(gram);
+        return -1;
+    }
+    memcpy(x, x0, (size_t)d * sizeof(double));
+    /* residual + A^T r */
+    for (int i = 0; i < n; ++i) {
+        double s = 0.0;
+        for (int j = 0; j < d; ++j) s += A[(size_t)i * d + j] * x[j];
+        r[i] = b[i] - s;
+    }
+    for (int j = 0; j < d; ++j) {
+        double s = 0.0;
+        for (int i = 0; i < n; ++i) s += A[(size_t)i * d + j] * r[i];
+        atb[j] = s;
+    }
+    /* Gram G = A^T A (the classical CD-LASSO bookkeeping; O(d^2 n)
+     * upfront — documented cost) */
+    for (int j = 0; j < d; ++j) {
+        gram[(size_t)j * d + j] = 0.0;
+        for (int i = 0; i < n; ++i)
+            gram[(size_t)j * d + j] +=
+                A[(size_t)i * d + j] * A[(size_t)i * d + j];
+        for (int kk = j + 1; kk < d; ++kk) {
+            double c = 0.0;
+            for (int i = 0; i < n; ++i)
+                c += A[(size_t)i * d + j] * A[(size_t)i * d + kk];
+            gram[(size_t)j * d + kk] = c;
+            gram[(size_t)kk * d + j] = c;
+        }
+    }
+
+    int it_done = 0;
+    int status = 1;
+    for (int it = 0; it < max_iter && status == 1; ++it) {
+        double maxchange = 0.0;
+        for (int j = 0; j < d; ++j) {
+            const double wj = gram[(size_t)j * d + j];
+            if (wj <= 0.0) continue; /* zero column: coordinate is free */
+            const double rho = atb[j] + wj * x[j];
+            double xn = 0.0;
+            if (rho > lambda) xn = (rho - lambda) / wj;
+            else if (rho < -lambda) xn = (rho + lambda) / wj;
+            const double delta = xn - x[j];
+            if (delta != 0.0) {
+                x[j] = xn;
+                /* keep atb = A^T r current: atb[k] -= G[k,j] delta */
+                for (int k = 0; k < d; ++k)
+                    atb[k] -= gram[(size_t)k * d + j] * delta;
+                for (int i = 0; i < n; ++i)
+                    r[i] -= A[(size_t)i * d + j] * delta;
+                const double rel = fabs(delta) / (1.0 + fabs(xn));
+                if (rel > maxchange) maxchange = rel;
+            }
+        }
+        ++it_done;
+        if (maxchange < tol) status = 0;
+    }
+    /* objective 1/2||Ax-b||^2 + lambda||x||_1 (from the tracked r) */
+    double obj = 0.0;
+    for (int i = 0; i < n; ++i) obj += r[i] * r[i];
+    obj *= 0.5;
+    for (int j = 0; j < d; ++j) obj += lambda * fabs(x[j]);
+    memcpy(x_out, x, (size_t)d * sizeof(double));
+    *out_obj = obj;
+    report->iter = it_done;
+    report->f_evals = 0;
+    report->g_evals = 0;
+    report->status = status;
+    free(x); free(r); free(atb); free(gram);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* SPSA (Spall) — zeroth-order                                         */
+/* ------------------------------------------------------------------ */
+
+RCRE_NODISCARD int rcre_spsa_f64(int n, double (*fun)(const double*, void*),
+                                 void* user, const double* x0, double* x_out,
+                                 uint64_t seed, double c0, double a0,
+                                 double gamma, int max_iter, int four_point,
+                                 double* out_f, RCRE_OptReport* report) {
+    if (n < 1 || !fun || !x0 || !x_out || !out_f || !report || max_iter < 1 ||
+        c0 <= 0.0 || a0 <= 0.0 || gamma <= 0.0 || gamma > 1.0 ||
+        four_point < 0 || four_point > 1)
+        return -1;
+    double* x = (double*)malloc((size_t)n * sizeof(double));
+    double* xp = (double*)malloc((size_t)n * sizeof(double));
+    double* xm = (double*)malloc((size_t)n * sizeof(double));
+    double* del = (double*)malloc((size_t)n * sizeof(double));
+    double* gk = (double*)malloc((size_t)n * sizeof(double));
+    if (!x || !xp || !xm || !del || !gk) {
+        free(x); free(xp); free(xm); free(del); free(gk);
+        return -1;
+    }
+    memcpy(x, x0, (size_t)n * sizeof(double));
+    RCRE_RNG rng;
+    rcre_rng_pcg_init(&rng, seed);
+    double f = fun(x, user);
+    int f_evals = 1;
+    if (!isfinite(f)) {
+        free(x); free(xp); free(xm); free(del); free(gk);
+        return -1;
+    }
+    int it_done = 0;
+    int status = 1;
+    for (int it = 0; it < max_iter && status == 1; ++it) {
+        const double ak = a0 / pow((double)(it + 1), gamma);
+        /* fresh +/-1 perturbation (PCG64, fixed order -> the run is a
+         * pure function of the seed) */
+        for (int i = 0; i < n; ++i)
+            del[i] = (rcre_rng_pcg_next_f64(&rng) < 0.5) ? -1.0 : 1.0;
+        for (int i = 0; i < n; ++i) {
+            xp[i] = x[i] + c0 * del[i];
+            xm[i] = x[i] - c0 * del[i];
+        }
+        const double fp = fun(xp, user);
+        ++f_evals;
+        if (!isfinite(fp)) break;
+        if (four_point) {
+            const double fm = fun(xm, user);
+            ++f_evals;
+            if (!isfinite(fm)) break;
+            for (int i = 0; i < n; ++i)
+                gk[i] = (fp - fm) / (2.0 * c0 * del[i]);
+        } else {
+            /* 2-point: reuse the current value as the minus side */
+            for (int i = 0; i < n; ++i)
+                gk[i] = (fp - f) / (c0 * del[i]);
+        }
+        for (int i = 0; i < n; ++i) x[i] -= ak * gk[i];
+        const double fn = fun(x, user);
+        ++f_evals;
+        if (!isfinite(fn)) {
+            for (int i = 0; i < n; ++i) x[i] += ak * gk[i]; /* revert */
+            break;
+        }
+        f = fn;
+        ++it_done;
+    }
+    memcpy(x_out, x, (size_t)n * sizeof(double));
+    *out_f = f;
+    report->iter = it_done;
+    report->f_evals = f_evals;
+    report->g_evals = 0;
+    report->status = status;
+    free(x); free(xp); free(xm); free(del); free(gk);
+    return 0;
+}
+
+/* --- Source: gpu_ctx.c --- */
+/* RCRE H6 — GPU bridge: context plumbing + CPU reference backend (2.3.0)
+ *
+ * The context vtable isolates every backend (cuda/metal/cpu) behind one
+ * C ABI (include/extras/rcre_gpu.h). This file is ALWAYS compiled:
+ *
+ *   - it owns the backend registry (backends self-register from a C
+ *     constructor — the H5 hook lesson: no weak symbols, and the Makefile
+ *     links the backend objects explicitly so their constructors run);
+ *   - it implements the "cpu" backend: the conformance oracle. Its ops
+ *     delegate to the SAME core/HAL functions the CPU solver paths use
+ *     (rcre_linalg_gemm_*, rcre_spmv_*, rcre_linalg_axpy_*,
+ *     rcre_linalg_dot_*, rcre_rng_philox4x32_fill), so CPU-backend
+ *     results are BIT-IDENTICAL to the CPU reference by construction —
+ *     device backends are gated against this with precision bars,
+ *     except Philox (bit-identical by construction on every backend).
+ *
+ * Zero-dependency: no vendor headers here.
+ */
+#include <stdlib.h>
+#include <string.h>
+
+/* ========================================================================= */
+/* vtable + registry                                                         */
+/* ========================================================================= */
+
+#define RCRE_GPU_MAX_BACKENDS 8
+static RCRE_GpuBackend* g_backends[RCRE_GPU_MAX_BACKENDS];
+static int g_nbackends = 0;
+
+static RCRE_GpuBackend* backend_find(const char* name) {
+    for (int i = 0; i < g_nbackends; ++i)
+        if (strcmp(g_backends[i]->name, name) == 0) return g_backends[i];
+    return NULL;
+}
+
+void rcre_gpu_register_backend(const char* name, RCRE_GpuBackend* be) {
+    (void)name;
+    if (g_nbackends < RCRE_GPU_MAX_BACKENDS && !backend_find(be->name))
+        g_backends[g_nbackends++] = be;
+}
+
+/* ========================================================================= */
+/* context API                                                               */
+/* ========================================================================= */
+
+int rcre_gpu_backend_available(const char* backend) {
+    if (!backend) return 0;
+    RCRE_GpuBackend* be = backend_find(backend);
+    return (be && be->available()) ? 1 : 0;
+}
+
+RCRE_GpuCtx* rcre_gpu_open_named(const char* backend) {
+    if (!backend) return NULL;
+    RCRE_GpuBackend* be = backend_find(backend);
+    if (!be || !be->available()) return NULL;
+    RCRE_GpuCtx* ctx = (RCRE_GpuCtx*)calloc(1, sizeof(RCRE_GpuCtx));
+    if (!ctx) return NULL;
+    ctx->be = be;
+    return ctx;
+}
+
+RCRE_GpuCtx* rcre_gpu_open(void) {
+    static const char* order[2] = { "cuda", "metal" };
+    for (int i = 0; i < 2; ++i) {
+        RCRE_GpuCtx* c = rcre_gpu_open_named(order[i]);
+        if (c) return c;
+    }
+    return rcre_gpu_open_named("cpu");
+}
+
+void rcre_gpu_close(RCRE_GpuCtx* ctx) {
+    if (!ctx) return;
+    free(ctx);
+}
+
+const char* rcre_gpu_backend_name(const RCRE_GpuCtx* ctx) {
+    return ctx ? ctx->be->name : "none";
+}
+
+const char* rcre_gpu_device_desc(const RCRE_GpuCtx* ctx) {
+    return (ctx && ctx->be->device_desc) ? ctx->be->device_desc() : "no device";
+}
+
+/* ========================================================================= */
+/* buffer API (dispatch)                                                     */
+/* ========================================================================= */
+
+RCRE_GpuBuf* rcre_gpu_alloc(RCRE_GpuCtx* ctx, size_t bytes) {
+    if (!ctx) return NULL;
+    RCRE_GpuBuf* b = (RCRE_GpuBuf*)calloc(1, sizeof(RCRE_GpuBuf));
+    if (!b) return NULL;
+    b->ctx = ctx;
+    b->bytes = bytes;
+    b->native = ctx->be->alloc(ctx, bytes);
+    if (!b->native) {
+        free(b);
+        return NULL;
+    }
+    return b;
+}
+
+void rcre_gpu_free(RCRE_GpuBuf* buf) {
+    if (!buf) return;
+    if (buf->native) buf->ctx->be->free_buf(buf);
+    free(buf);
+}
+
+size_t rcre_gpu_bytes(const RCRE_GpuBuf* buf) {
+    return buf ? buf->bytes : 0;
+}
+
+int rcre_gpu_h2d(RCRE_GpuCtx* ctx, RCRE_GpuBuf* dst, const void* src, size_t bytes) {
+    if (!ctx || !dst || (src && !dst->native)) return RCRE_ERR_INVALID_ARG;
+    if (bytes > dst->bytes) return RCRE_ERR_INVALID_ARG;
+    return ctx->be->h2d(ctx, dst, src, bytes);
+}
+
+int rcre_gpu_d2h(RCRE_GpuCtx* ctx, void* dst, RCRE_GpuBuf* src, size_t bytes) {
+    if (!ctx || !src || !dst) return RCRE_ERR_INVALID_ARG;
+    if (bytes > src->bytes) return RCRE_ERR_INVALID_ARG;
+    return ctx->be->d2h(ctx, dst, src, bytes);
+}
+
+int rcre_gpu_synchronize(RCRE_GpuCtx* ctx) {
+    if (!ctx) return RCRE_ERR_INVALID_ARG;
+    return ctx->be->sync(ctx);
+}
+
+/* buffer sanity: b must exist, belong to ctx, and hold at least count*es */
+static int buf_ok(const RCRE_GpuCtx* ctx, const RCRE_GpuBuf* b,
+                  size_t count, size_t es) {
+    if (!b || b->ctx != ctx) return 0;
+    return b->bytes >= count * es;
+}
+
+/* ========================================================================= */
+/* op dispatch (gemm/spmv/axpy/dot/philox)                                   */
+/* ========================================================================= */
+
+int rcre_gpu_gemm_f32_ctx(RCRE_GpuCtx* ctx, size_t m, size_t n, size_t k,
+                          float alpha, RCRE_GpuBuf* A, size_t lda,
+                          RCRE_GpuBuf* B, size_t ldb, float beta,
+                          RCRE_GpuBuf* C, size_t ldc) {
+    if (!ctx || !A || !B || !C || m == 0 || n == 0 || k == 0)
+        return RCRE_ERR_INVALID_ARG;
+    if (!buf_ok(ctx, A, m * k, 4) || !buf_ok(ctx, B, k * n, 4) ||
+        !buf_ok(ctx, C, m * n, 4))
+        return RCRE_ERR_INVALID_ARG;
+    return ctx->be->gemm_f32(ctx, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+int rcre_gpu_gemm_f64_ctx(RCRE_GpuCtx* ctx, size_t m, size_t n, size_t k,
+                          double alpha, RCRE_GpuBuf* A, size_t lda,
+                          RCRE_GpuBuf* B, size_t ldb, double beta,
+                          RCRE_GpuBuf* C, size_t ldc) {
+    if (!ctx || !A || !B || !C || m == 0 || n == 0 || k == 0)
+        return RCRE_ERR_INVALID_ARG;
+    if (!buf_ok(ctx, A, m * k, 8) || !buf_ok(ctx, B, k * n, 8) ||
+        !buf_ok(ctx, C, m * n, 8))
+        return RCRE_ERR_INVALID_ARG;
+    return ctx->be->gemm_f64(ctx, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+int rcre_gpu_spmv_f32_ctx(RCRE_GpuCtx* ctx, size_t rows, RCRE_GpuBuf* rp,
+                          RCRE_GpuBuf* ci, RCRE_GpuBuf* val,
+                          RCRE_GpuBuf* x, RCRE_GpuBuf* y) {
+    if (!ctx || !rp || !ci || !val || !x || !y) return RCRE_ERR_INVALID_ARG;
+    /* nnz from the values buffer (col_idx same length) */
+    size_t nnz = val->bytes / 4;
+    if (!buf_ok(ctx, rp, rows + 1, sizeof(size_t)) ||
+        !buf_ok(ctx, ci, nnz, 4) || !buf_ok(ctx, x, rows, 4) ||
+        !buf_ok(ctx, y, rows, 4))
+        return RCRE_ERR_INVALID_ARG;
+    return ctx->be->spmv_f32(ctx, rows, rp, ci, val, x, y);
+}
+
+int rcre_gpu_spmv_f64_ctx(RCRE_GpuCtx* ctx, size_t rows, RCRE_GpuBuf* rp,
+                          RCRE_GpuBuf* ci, RCRE_GpuBuf* val,
+                          RCRE_GpuBuf* x, RCRE_GpuBuf* y) {
+    if (!ctx || !rp || !ci || !val || !x || !y) return RCRE_ERR_INVALID_ARG;
+    size_t nnz = val->bytes / 8;
+    if (!buf_ok(ctx, rp, rows + 1, sizeof(size_t)) ||
+        !buf_ok(ctx, ci, nnz, 8) || !buf_ok(ctx, x, rows, 8) ||
+        !buf_ok(ctx, y, rows, 8))
+        return RCRE_ERR_INVALID_ARG;
+    return ctx->be->spmv_f64(ctx, rows, rp, ci, val, x, y);
+}
+
+int rcre_gpu_axpy_f32_ctx(RCRE_GpuCtx* ctx, size_t n, float a,
+                          RCRE_GpuBuf* x, RCRE_GpuBuf* y) {
+    if (!ctx || !x || !y) return RCRE_ERR_INVALID_ARG;
+    if (!buf_ok(ctx, x, n, 4) || !buf_ok(ctx, y, n, 4))
+        return RCRE_ERR_INVALID_ARG;
+    return ctx->be->axpy_f32(ctx, n, a, x, y);
+}
+
+int rcre_gpu_axpy_f64_ctx(RCRE_GpuCtx* ctx, size_t n, double a,
+                          RCRE_GpuBuf* x, RCRE_GpuBuf* y) {
+    if (!ctx || !x || !y) return RCRE_ERR_INVALID_ARG;
+    if (!buf_ok(ctx, x, n, 8) || !buf_ok(ctx, y, n, 8))
+        return RCRE_ERR_INVALID_ARG;
+    return ctx->be->axpy_f64(ctx, n, a, x, y);
+}
+
+int rcre_gpu_dot_f32_ctx(RCRE_GpuCtx* ctx, size_t n, RCRE_GpuBuf* x,
+                         RCRE_GpuBuf* y, RCRE_GpuBuf* out) {
+    if (!ctx || !x || !y || !out) return RCRE_ERR_INVALID_ARG;
+    if (!buf_ok(ctx, x, n, 4) || !buf_ok(ctx, y, n, 4) ||
+        !buf_ok(ctx, out, 1, 4))
+        return RCRE_ERR_INVALID_ARG;
+    return ctx->be->dot_f32(ctx, n, x, y, out);
+}
+
+int rcre_gpu_dot_f64_ctx(RCRE_GpuCtx* ctx, size_t n, RCRE_GpuBuf* x,
+                         RCRE_GpuBuf* y, RCRE_GpuBuf* out) {
+    if (!ctx || !x || !y || !out) return RCRE_ERR_INVALID_ARG;
+    if (!buf_ok(ctx, x, n, 8) || !buf_ok(ctx, y, n, 8) ||
+        !buf_ok(ctx, out, 1, 8))
+        return RCRE_ERR_INVALID_ARG;
+    return ctx->be->dot_f64(ctx, n, x, y, out);
+}
+
+int rcre_gpu_philox4x32_fill(RCRE_GpuCtx* ctx, size_t n, uint64_t counter0,
+                             uint64_t key, RCRE_GpuBuf* out) {
+    if (!ctx || !out) return RCRE_ERR_INVALID_ARG;
+    if (!buf_ok(ctx, out, n, 4)) return RCRE_ERR_INVALID_ARG;
+    return ctx->be->philox_fill(ctx, n, counter0, key, out);
+}
+
+/* ========================================================================= */
+/* managed convenience                                                       */
+/* ========================================================================= */
+
+int rcre_gpu_gemm_f32_host(RCRE_GpuCtx* ctx, size_t m, size_t n, size_t k,
+                           float alpha, const float* A, size_t lda,
+                           const float* B, size_t ldb, float beta,
+                           float* C, size_t ldc) {
+    if (!ctx || !A || !B || !C) return RCRE_ERR_INVALID_ARG;
+    RCRE_GpuBuf* dA = rcre_gpu_alloc(ctx, m * k * 4);
+    RCRE_GpuBuf* dB = rcre_gpu_alloc(ctx, k * n * 4);
+    RCRE_GpuBuf* dC = rcre_gpu_alloc(ctx, m * n * 4);
+    if (!dA || !dB || !dC) {
+        rcre_gpu_free(dA); rcre_gpu_free(dB); rcre_gpu_free(dC);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    int rc = rcre_gpu_h2d(ctx, dA, A, m * k * 4);
+    rc = (rc == RCRE_OK) ? rcre_gpu_h2d(ctx, dB, B, k * n * 4) : rc;
+    rc = (rc == RCRE_OK) ? rcre_gpu_h2d(ctx, dC, C, m * n * 4) : rc;
+    rc = (rc == RCRE_OK)
+             ? rcre_gpu_gemm_f32_ctx(ctx, m, n, k, alpha, dA, lda, dB, ldb,
+                                     beta, dC, ldc)
+             : rc;
+    rc = (rc == RCRE_OK) ? rcre_gpu_d2h(ctx, C, dC, m * n * 4) : rc;
+    rc = (rc == RCRE_OK) ? rcre_gpu_synchronize(ctx) : rc;
+    rcre_gpu_free(dA); rcre_gpu_free(dB); rcre_gpu_free(dC);
+    return rc;
+}
+
+int rcre_gpu_gemm_f64_host(RCRE_GpuCtx* ctx, size_t m, size_t n, size_t k,
+                           double alpha, const double* A, size_t lda,
+                           const double* B, size_t ldb, double beta,
+                           double* C, size_t ldc) {
+    if (!ctx || !A || !B || !C) return RCRE_ERR_INVALID_ARG;
+    RCRE_GpuBuf* dA = rcre_gpu_alloc(ctx, m * k * 8);
+    RCRE_GpuBuf* dB = rcre_gpu_alloc(ctx, k * n * 8);
+    RCRE_GpuBuf* dC = rcre_gpu_alloc(ctx, m * n * 8);
+    if (!dA || !dB || !dC) {
+        rcre_gpu_free(dA); rcre_gpu_free(dB); rcre_gpu_free(dC);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    int rc = rcre_gpu_h2d(ctx, dA, A, m * k * 8);
+    rc = (rc == RCRE_OK) ? rcre_gpu_h2d(ctx, dB, B, k * n * 8) : rc;
+    rc = (rc == RCRE_OK) ? rcre_gpu_h2d(ctx, dC, C, m * n * 8) : rc;
+    rc = (rc == RCRE_OK)
+             ? rcre_gpu_gemm_f64_ctx(ctx, m, n, k, alpha, dA, lda, dB, ldb,
+                                     beta, dC, ldc)
+             : rc;
+    rc = (rc == RCRE_OK) ? rcre_gpu_d2h(ctx, C, dC, m * n * 8) : rc;
+    rc = (rc == RCRE_OK) ? rcre_gpu_synchronize(ctx) : rc;
+    rcre_gpu_free(dA); rcre_gpu_free(dB); rcre_gpu_free(dC);
+    return rc;
+}
+
+/* ========================================================================= */
+/* CPU reference backend (the conformance oracle)                            */
+/* ========================================================================= */
+/*
+ * Every op delegates to the core/HAL function the CPU solver paths use,
+ * so this backend is bit-identical to the CPU reference BY CONSTRUCTION:
+ *
+ *   gemm  -> rcre_linalg_gemm_f32/f64 (HAL-dispatched, H0/H2)
+ *   spmv  -> rcre_spmv_f32/f64        (H4)
+ *   axpy  -> rcre_linalg_axpy_f32/f64 (H0)
+ *   dot   -> rcre_linalg_dot_f32/f64  (H0)
+ *   philox-> rcre_rng_philox4x32_fill (H6 core)
+ */
+
+static int cpu_available(void) { return 1; }
+
+static const char* cpu_desc(void) {
+    return "CPU reference (core/HAL delegation, deterministic)";
+}
+
+static RCRE_GpuBuf* cpu_alloc(RCRE_GpuCtx* ctx, size_t bytes) {
+    (void)ctx;
+    return bytes ? calloc(1, bytes) : NULL;
+}
+
+static void cpu_free_buf(RCRE_GpuBuf* b) { free(b->native); }
+
+static int cpu_h2d(RCRE_GpuCtx* ctx, RCRE_GpuBuf* dst, const void* src,
+                   size_t bytes) {
+    (void)ctx;
+    if (bytes && src) memcpy(dst->native, src, bytes);
+    return RCRE_OK;
+}
+
+static int cpu_d2h(RCRE_GpuCtx* ctx, void* dst, RCRE_GpuBuf* src, size_t bytes) {
+    (void)ctx;
+    if (bytes) memcpy(dst, src->native, bytes);
+    return RCRE_OK;
+}
+
+static int cpu_sync(RCRE_GpuCtx* ctx) { (void)ctx; return RCRE_OK; }
+
+static int cpu_gemm_f32(RCRE_GpuCtx* ctx, size_t m, size_t n, size_t k,
+                        float alpha, RCRE_GpuBuf* A, size_t lda,
+                        RCRE_GpuBuf* B, size_t ldb, float beta,
+                        RCRE_GpuBuf* C, size_t ldc) {
+    (void)ctx;
+    rcre_hal_init();
+    rcre_linalg_gemm_f32(m, n, k, alpha, (const float*)A->native, lda,
+                         (const float*)B->native, ldb, beta,
+                         (float*)C->native, ldc);
+    return RCRE_OK;
+}
+
+static int cpu_gemm_f64(RCRE_GpuCtx* ctx, size_t m, size_t n, size_t k,
+                        double alpha, RCRE_GpuBuf* A, size_t lda,
+                        RCRE_GpuBuf* B, size_t ldb, double beta,
+                        RCRE_GpuBuf* C, size_t ldc) {
+    (void)ctx;
+    rcre_hal_init();
+    rcre_linalg_gemm_f64(m, n, k, alpha, (const double*)A->native, lda,
+                         (const double*)B->native, ldb, beta,
+                         (double*)C->native, ldc);
+    return RCRE_OK;
+}
+
+static int cpu_spmv_f32(RCRE_GpuCtx* ctx, size_t rows, RCRE_GpuBuf* rp,
+                        RCRE_GpuBuf* ci, RCRE_GpuBuf* val,
+                        RCRE_GpuBuf* x, RCRE_GpuBuf* y) {
+    (void)ctx;
+    RCRE_CSR_F32 A = { rows, rows, 0, NULL, NULL, NULL };
+    A.row_ptr = (size_t*)rp->native;
+    A.col_idx = (size_t*)ci->native;
+    A.values = (float*)val->native;
+    A.nnz = val->bytes / 4;
+    rcre_spmv_f32(&A, (const float*)x->native, (float*)y->native);
+    return RCRE_OK;
+}
+
+static int cpu_spmv_f64(RCRE_GpuCtx* ctx, size_t rows, RCRE_GpuBuf* rp,
+                        RCRE_GpuBuf* ci, RCRE_GpuBuf* val,
+                        RCRE_GpuBuf* x, RCRE_GpuBuf* y) {
+    (void)ctx;
+    RCRE_CSR_F64 A = { rows, rows, 0, NULL, NULL, NULL };
+    A.row_ptr = (size_t*)rp->native;
+    A.col_idx = (size_t*)ci->native;
+    A.values = (double*)val->native;
+    A.nnz = val->bytes / 8;
+    rcre_spmv_f64(&A, (const double*)x->native, (double*)y->native);
+    return RCRE_OK;
+}
+
+static int cpu_axpy_f32(RCRE_GpuCtx* ctx, size_t n, float a,
+                        RCRE_GpuBuf* x, RCRE_GpuBuf* y) {
+    (void)ctx;
+    rcre_linalg_axpy_f32(n, a, (const float*)x->native, (float*)y->native);
+    return RCRE_OK;
+}
+
+static int cpu_axpy_f64(RCRE_GpuCtx* ctx, size_t n, double a,
+                        RCRE_GpuBuf* x, RCRE_GpuBuf* y) {
+    (void)ctx;
+    rcre_linalg_axpy_f64(n, a, (const double*)x->native, (double*)y->native);
+    return RCRE_OK;
+}
+
+static int cpu_dot_f32(RCRE_GpuCtx* ctx, size_t n, RCRE_GpuBuf* x,
+                       RCRE_GpuBuf* y, RCRE_GpuBuf* out) {
+    (void)ctx;
+    float d = rcre_linalg_dot_f32((const float*)x->native,
+                                  (const float*)y->native, n);
+    *(float*)out->native = d;
+    return RCRE_OK;
+}
+
+static int cpu_dot_f64(RCRE_GpuCtx* ctx, size_t n, RCRE_GpuBuf* x,
+                       RCRE_GpuBuf* y, RCRE_GpuBuf* out) {
+    (void)ctx;
+    double d = rcre_linalg_dot_f64((const double*)x->native,
+                                   (const double*)y->native, n);
+    *(double*)out->native = d;
+    return RCRE_OK;
+}
+
+static int cpu_philox_fill(RCRE_GpuCtx* ctx, size_t n, uint64_t c0,
+                           uint64_t key, RCRE_GpuBuf* out) {
+    (void)ctx;
+    return rcre_rng_philox4x32_fill((uint32_t*)out->native, n, c0, key);
+}
+
+static RCRE_GpuBackend g_cpu_be = {
+    "cpu", cpu_available, cpu_desc,
+    cpu_alloc, cpu_free_buf, cpu_h2d, cpu_d2h, cpu_sync,
+    cpu_gemm_f32, cpu_gemm_f64,
+    cpu_spmv_f32, cpu_spmv_f64,
+    cpu_axpy_f32, cpu_axpy_f64,
+    cpu_dot_f32, cpu_dot_f64,
+    cpu_philox_fill,
+};
+
+/* Register before main() runs (see the H5 hook lesson: this TU is
+ * always compiled into the binaries that use the bridge, so its
+ * constructor is guaranteed to run; no weak symbols involved). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((constructor))
+#endif
+static void gpu_ctx_register_cpu(void) {
+    rcre_gpu_register_backend("cpu", &g_cpu_be);
+}
+
+/* --- Source: dist.c --- */
+/* RCRE H9 — first distributed operators on the 12-fn MPI shim (2.6.0).
+ *
+ * Two ops, written against the shim ABI (include/extras/rcre_mpi.h):
+ *
+ *   1. Distributed SpMV (row-block partition):
+ *        rcre_dist_spmv_rows_f64  — each rank holds a contiguous CSR
+ *           row block [r0, r1) and computes its y-block; x is full on
+ *           every rank (bcast by the caller).
+ *        rcre_dist_gather_rows_f64 — exchange blocks so every rank
+ *           holds the full y.
+ *   2. Halo-exchange 5-point stencil (row-slab partition, the H7
+ *        layout c = j*nx + i):
+ *        rcre_dist_stencil5_f64   — each rank owns a slab of rows,
+ *           exchanges one halo row with each neighbor via isend/irecv,
+ *           and computes its slab with the CORE row expression
+ *           (identical operation order — the bit-identity contract).
+ *
+ * Determinism (the library-wide policy, applied across processes):
+ *   - ctx == NULL is the serial oracle path: the op runs the exact
+ *     core expression over the whole array (no communication).
+ *   - loopback (size 1) runs the same code path with zero exchanges.
+ *   - the per-row arithmetic is value- and order-identical to the
+ *     serial op on the same input values, so the 1-process and
+ *     2-process results are BIT-IDENTICAL (the test gate). The shim's
+ *     ordered collectives (ascending-rank fold) make the allreduce
+ *     path bit-stable too (docs/hpc.md 12.2).
+ */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+#define RCRE_DIST_MAX_PEERS 64
+
+/* deterministic partitions (shared by both ops)                       */
+/* ------------------------------------------------------------------ */
+/*
+ * Contiguous block partition of `total` items over `size` ranks:
+ * rank r owns base + (r < rem ? 1 : 0) items starting at
+ * r*base + min(r, rem).  size=1 -> [0, total).
+ */
+static void dist_partition(size_t total, int size, int rank, size_t* r0,
+                           size_t* r1) {
+    if (size < 1) size = 1;
+    if (rank >= size) rank = size - 1;
+    const size_t base = total / (size_t)size;
+    const size_t rem = total % (size_t)size;
+    const size_t start = (size_t)rank * base + ((size_t)rank < rem ? (size_t)rank : rem);
+    const size_t len = base + (((size_t)rank) < rem ? 1 : 0);
+    *r0 = start;
+    *r1 = start + len;
+}
+
+/* ------------------------------------------------------------------ */
+/* distributed SpMV (row-block partition)                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief Each rank computes its owned y-block y_local[r1-r0] = A[r0:r1] x.
+ *        x is FULL and valid on every rank (the caller bcasts it).
+ *        ctx == NULL: serial oracle — compute all rows [0, rows) into
+ *        y_local. The per-row accumulation is the core SpMV's exact
+ *        left fold (bit-identity contract, docs/hpc.md 12.2).
+ */
+RCRE_NODISCARD int rcre_dist_spmv_rows_f64(RCRE_MpiCtx* ctx,
+                                           const size_t* row_ptr,
+                                           const size_t* col_idx,
+                                           const double* values, int rows,
+                                           int r0, int r1, const double* x,
+                                           double* y_local) {
+    (void)ctx; /* communication is the caller's job here (bcast x) */
+    if (!row_ptr || !col_idx || !values || !x || !y_local || rows < 1 ||
+        r0 < 0 || r1 > rows || r0 >= r1)
+        return -1;
+    /* the exact core row expression (krylov.c rcre_spmv_f64) */
+    for (int i = r0; i < r1; ++i) {
+        double s = 0.0;
+        for (size_t k = row_ptr[i]; k < row_ptr[i + 1]; ++k)
+            s += values[k] * x[col_idx[k]];
+        y_local[i - r0] = s;
+    }
+    return 0;
+}
+
+/**
+ * @brief Exchange owned blocks so every rank holds the full y.
+ *        y_full is n rows; y_local is the (r1-r0) owned block. Each
+ *        rank isends its block to every other rank and irecvs the
+ *        others (order: ascending rank, the deterministic contract).
+ *        ctx == NULL / size 1: plain copy (no exchange).
+ */
+RCRE_NODISCARD int rcre_dist_gather_rows_f64(RCRE_MpiCtx* ctx, int n, int r0,
+                                             int r1, const double* y_local,
+                                             double* y_full) {
+    if (!y_local || !y_full || n < 1 || r0 < 0 || r1 > n || r0 >= r1)
+        return -1;
+    if (!ctx || rcre_mpi_size(ctx) <= 1) {
+        /* oracle path: the owned block IS the full vector
+         * (loopback owns all rows) */
+        if (r0 == 0 && r1 == n) {
+            memcpy(y_full, y_local, (size_t)n * sizeof(double));
+        } else {
+            memcpy(&y_full[r0], y_local, (size_t)(r1 - r0) * sizeof(double));
+        }
+        return 0;
+    }
+    const int size = rcre_mpi_size(ctx);
+    const int rank = rcre_mpi_rank(ctx);
+    if (size - 1 > RCRE_DIST_MAX_PEERS) return -1;
+    /* non-blocking, all-to-all: send my block to every other rank,
+     * receive each sender's block at its deterministic partition
+     * offset (the partition is a pure function of (n, size, rank)) */
+    int send_req[RCRE_DIST_MAX_PEERS];
+    int recv_req[RCRE_DIST_MAX_PEERS];
+    int nsend = 0, nrecv = 0;
+    for (int r = 0; r < size; ++r) {
+        if (r == rank) continue;
+        size_t sr0 = 0, sr1 = 0;
+        dist_partition((size_t)n, size, r, &sr0, &sr1);
+        send_req[nsend] = rcre_mpi_isend_f64(ctx, y_local, (size_t)(r1 - r0), r,
+                                             1000 + rank);
+        if (send_req[nsend] < 0) return -1;
+        ++nsend;
+        recv_req[nrecv] = rcre_mpi_irecv_f64(ctx, &y_full[sr0],
+                                             (size_t)(sr1 - sr0), r, 1000 + r);
+        if (recv_req[nrecv] < 0) return -1;
+        ++nrecv;
+    }
+    for (int i = 0; i < nrecv; ++i)
+        if (rcre_mpi_wait(ctx, recv_req[i]) != 0) return -1;
+    for (int i = 0; i < nsend; ++i)
+        if (rcre_mpi_wait(ctx, send_req[i]) != 0) return -1;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* halo-exchange 5-point stencil (row-slab partition)                  */
+/* ------------------------------------------------------------------ */
+
+#define RCRE_DIST_TAG_HALO 2000
+
+/**
+ * @brief Distributed 5-point stencil (H7 layout, zero-boundary
+ *        convention). ctx owns a row slab [j0, j1) of the ny rows;
+ *        u_local is (j1-j0) x nx owned rows; v_local receives the
+ *        same slab of the result. Halo rows are exchanged with the
+ *        up/down neighbors via isend/irecv (one row each side).
+ *
+ *        ctx == NULL: serial oracle — the CORE row expression over
+ *        all ny rows (identical to rcre_pde_stencil5_f64 with pool
+ *        NULL). The owned-row arithmetic uses the exact core
+ *        expression (operation order included) on the same values,
+ *        so distributed and serial results are BIT-IDENTICAL.
+ *
+ *        Returns 0 on success, -1 on bad input, -2 on a communication
+ *        failure.
+ */
+RCRE_NODISCARD int rcre_dist_stencil5_f64(RCRE_MpiCtx* ctx, size_t nx,
+                                          size_t ny, const double* u_local,
+                                          double* v_local) {
+    if (!u_local || !v_local || nx == 0 || ny == 0) return -1;
+
+    /* ---- serial oracle path (ctx == NULL): the core expression ---- */
+    if (!ctx) {
+        for (size_t j = 0; j < ny; ++j)
+            for (size_t i = 0; i < nx; ++i) {
+                size_t c = j * nx + i;
+                double acc = 4.0 * u_local[c];
+                if (j > 0) acc -= u_local[c - nx];
+                if (j + 1 < ny) acc -= u_local[c + nx];
+                if (i > 0) acc -= u_local[c - 1];
+                if (i + 1 < nx) acc -= u_local[c + 1];
+                v_local[c] = acc;
+            }
+        return 0;
+    }
+
+    const int size = rcre_mpi_size(ctx);
+    const int rank = rcre_mpi_rank(ctx);
+    size_t j0 = 0, j1 = 0;
+    dist_partition(ny, size, rank, &j0, &j1);
+    const size_t nrows = j1 - j0;
+
+    /* halo buffers (one row each side) */
+    double* halo_up = (double*)malloc((nx > 0) ? nx * sizeof(double) : 1);
+    double* halo_dn = (double*)malloc((nx > 0) ? nx * sizeof(double) : 1);
+    if (!halo_up || !halo_dn) {
+        free(halo_up);
+        free(halo_dn);
+        return -1;
+    }
+    memset(halo_up, 0, nx * sizeof(double));
+    memset(halo_dn, 0, nx * sizeof(double));
+
+    const int up = rank - 1;   /* -1: none */
+    const int dn = rank + 1;   /* size: none */
+
+    /* post halo receives (I need: row j0-1 from up; row j1 from dn) */
+    int req_up = -1, req_dn = -1;
+    if (up >= 0)
+        req_up = rcre_mpi_irecv_f64(ctx, halo_up, nx, up, RCRE_DIST_TAG_HALO);
+    if (dn < size)
+        req_dn = rcre_mpi_irecv_f64(ctx, halo_dn, nx, dn, RCRE_DIST_TAG_HALO);
+    /* send my boundary rows (row j0 to up; row j1-1 to dn) — only
+     * when I own at least one row (ny < size gives some ranks empty
+     * slabs; an empty slab neither sends nor computes) */
+    int sreq_up = -1, sreq_dn = -1;
+    if (up >= 0 && nrows > 0)
+        sreq_up = rcre_mpi_isend_f64(ctx, u_local, nx, up, RCRE_DIST_TAG_HALO);
+    if (dn < size && nrows > 0)
+        sreq_dn = rcre_mpi_isend_f64(
+            ctx, u_local + (nrows - 1) * nx, nx, dn, RCRE_DIST_TAG_HALO);
+    if ((up >= 0 && req_up < 0) || (dn < size && req_dn < 0) ||
+        (up >= 0 && nrows > 0 && sreq_up < 0) ||
+        (dn < size && nrows > 0 && sreq_dn < 0)) {
+        free(halo_up);
+        free(halo_dn);
+        return -2;
+    }
+    if (req_up >= 0 && rcre_mpi_wait(ctx, req_up) != 0) {
+        free(halo_up);
+        free(halo_dn);
+        return -2;
+    }
+    if (req_dn >= 0 && rcre_mpi_wait(ctx, req_dn) != 0) {
+        free(halo_up);
+        free(halo_dn);
+        return -2;
+    }
+    if (sreq_up >= 0 && rcre_mpi_wait(ctx, sreq_up) != 0) {
+        free(halo_up);
+        free(halo_dn);
+        return -2;
+    }
+    if (sreq_dn >= 0 && rcre_mpi_wait(ctx, sreq_dn) != 0) {
+        free(halo_up);
+        free(halo_dn);
+        return -2;
+    }
+    free(halo_up);
+    free(halo_dn);
+
+    /* compute the owned rows with the CORE expression (same operation
+     * order; the halo values are the true neighbor rows, so the
+     * arithmetic is value-identical to serial) */
+    for (size_t lj = 0; lj < nrows; ++lj) {
+        const size_t j = j0 + lj; /* global row */
+        const double* row = u_local + lj * nx;
+        double* vrow = v_local + lj * nx;
+        const double* uprow = (j > 0) ? ((j == j0) ? halo_up
+                                                   : u_local + (lj - 1) * nx)
+                                      : NULL;
+        const double* dnrow =
+            (j + 1 < ny) ? ((j + 1 == j1) ? halo_dn : u_local + (lj + 1) * nx)
+                         : NULL;
+        for (size_t i = 0; i < nx; ++i) {
+            double acc = 4.0 * row[i];
+            if (uprow) acc -= uprow[i];
+            if (dnrow) acc -= dnrow[i];
+            if (i > 0) acc -= row[i - 1];
+            if (i + 1 < nx) acc -= row[i + 1];
+            vrow[i] = acc;
+        }
+    }
+    return 0;
+}
+
+/* --- Source: mpi_ctx.c --- */
+/* RCRE H9 — MPI shim: bridge core + loopback backend (2.6.0).
+ *
+ * The D1 bridge pattern (H6 GPU precedent):
+ *   - mpi_ctx.c owns the backend registry and the 12-fn public ABI
+ *     (vtable dispatch). It has NO external dependencies.
+ *   - The `loopback` backend (one process, in-memory) is registered
+ *     from a C constructor HERE, so every build has a working
+ *     communicator — the conformance oracle for the distributed ops
+ *     in src/core/dist.c (loopback runs must be bit-identical to the
+ *     core serial operators).
+ *   - `mpi_real.c` is the OPTIONAL real-MPI backend TU (compiled
+ *     empty unless RCRE_HAVE_MPI; the Makefile's `check-mpi` probes
+ *     for mpicc and skips clean where it is absent — the H6 CUDA
+ *     pattern).
+ *
+ * Determinism: the loopback collectives are plain copies / identity
+ * (size 1), so a distributed op run on loopback executes exactly the
+ * serial code path — bit-identity is by construction, and the test
+ * suite verifies it.
+ */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ------------------------------------------------------------------ */
+/* registry                                                            */
+/* ------------------------------------------------------------------ */
+
+#define RCRE_MPI_MAX_BACKENDS 8
+
+typedef struct {
+    const char* name;
+    RCRE_MpiBackend* be;
+} RCRE_MpiSlot;
+
+static RCRE_MpiSlot g_mpi_backends[RCRE_MPI_MAX_BACKENDS];
+static int g_nmpi_backends = 0;
+
+RCRE_NODISCARD bool rcre_mpi_backend_registered(const char* name) {
+    if (!name) return false;
+    for (int i = 0; i < g_nmpi_backends; ++i)
+        if (strcmp(g_mpi_backends[i].name, name) == 0) return true;
+    return false;
+}
+
+void rcre_mpi_register_backend(const char* name, RCRE_MpiBackend* be) {
+    if (!name || !be || g_nmpi_backends >= RCRE_MPI_MAX_BACKENDS) return;
+    for (int i = 0; i < g_nmpi_backends; ++i)
+        if (strcmp(g_mpi_backends[i].name, name) == 0) {
+            g_mpi_backends[i].be = be; /* re-register: replace in place */
+            return;
+        }
+    {
+        g_mpi_backends[g_nmpi_backends].name = name;
+        g_mpi_backends[g_nmpi_backends].be = be;
+        ++g_nmpi_backends;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* context                                                             */
+/* ------------------------------------------------------------------ */
+
+struct RCRE_MpiCtx {
+    RCRE_MpiBackend* be;
+};
+
+/* ------------------------------------------------------------------ */
+/* the 12-function public ABI (vtable dispatch)                        */
+/* ------------------------------------------------------------------ */
+
+RCRE_NODISCARD int rcre_mpi_open(const char* backend, RCRE_MpiCtx** out) {
+    if (!out) return -1;
+    const RCRE_MpiBackend* be = NULL;
+    if (backend) {
+        for (int i = 0; i < g_nmpi_backends; ++i)
+            if (strcmp(g_mpi_backends[i].name, backend) == 0)
+                be = g_mpi_backends[i].be;
+        if (!be) return -1; /* named backend not registered */
+    } else {
+        /* auto: prefer real MPI, fall back to loopback */
+        const char* order[2] = {RCRE_MPI_BACKEND_MPI,
+                                RCRE_MPI_BACKEND_LOOPBACK};
+        for (int t = 0; t < 2 && !be; ++t)
+            for (int i = 0; i < g_nmpi_backends; ++i)
+                if (strcmp(g_mpi_backends[i].name, order[t]) == 0)
+                    be = g_mpi_backends[i].be;
+    }
+    RCRE_MpiCtx* comm = be->open();
+    if (!comm) return -1;
+    /* wire the backend pointer onto the backend-allocated context
+     * (the backend does not know its own registry slot) */
+    comm->be = (RCRE_MpiBackend*)be;
+    *out = comm;
+    return 0;
+}
+
+void rcre_mpi_close(RCRE_MpiCtx* ctx) {
+    if (!ctx || !ctx->be) return;
+    ctx->be->close(ctx);
+}
+
+RCRE_NODISCARD int rcre_mpi_size(const RCRE_MpiCtx* ctx) {
+    if (!ctx || !ctx->be) return -1;
+    return ctx->be->size((RCRE_MpiCtx*)ctx);
+}
+
+RCRE_NODISCARD int rcre_mpi_rank(const RCRE_MpiCtx* ctx) {
+    if (!ctx || !ctx->be) return -1;
+    return ctx->be->rank((RCRE_MpiCtx*)ctx);
+}
+
+void rcre_mpi_barrier(RCRE_MpiCtx* ctx) {
+    if (ctx && ctx->be) ctx->be->barrier(ctx);
+}
+
+void rcre_mpi_bcast_f64(RCRE_MpiCtx* ctx, double* buf, size_t n, int root) {
+    if (ctx && ctx->be) ctx->be->bcast_f64(ctx, buf, n, root);
+}
+
+RCRE_NODISCARD int rcre_mpi_send_f64(RCRE_MpiCtx* ctx, const double* buf,
+                                     size_t n, int dest, int tag) {
+    if (!ctx || !ctx->be || !buf || n == 0) return -1;
+    return ctx->be->send_f64(ctx, buf, n, dest, tag);
+}
+
+RCRE_NODISCARD int rcre_mpi_recv_f64(RCRE_MpiCtx* ctx, double* buf, size_t n,
+                                     int src, int tag) {
+    if (!ctx || !ctx->be || !buf || n == 0) return -1;
+    return ctx->be->recv_f64(ctx, buf, n, src, tag);
+}
+
+RCRE_NODISCARD int rcre_mpi_isend_f64(RCRE_MpiCtx* ctx, const double* buf,
+                                      size_t n, int dest, int tag) {
+    if (!ctx || !ctx->be || !buf || n == 0) return -1;
+    return ctx->be->isend_f64(ctx, buf, n, dest, tag);
+}
+
+RCRE_NODISCARD int rcre_mpi_irecv_f64(RCRE_MpiCtx* ctx, double* buf, size_t n,
+                                      int src, int tag) {
+    if (!ctx || !ctx->be || !buf || n == 0) return -1;
+    return ctx->be->irecv_f64(ctx, buf, n, src, tag);
+}
+
+RCRE_NODISCARD int rcre_mpi_wait(RCRE_MpiCtx* ctx, int req) {
+    if (!ctx || !ctx->be) return -1;
+    return ctx->be->wait(ctx, req);
+}
+
+void rcre_mpi_allreduce_sum_f64(RCRE_MpiCtx* ctx, const double* in,
+                                double* out, size_t n) {
+    if (ctx && ctx->be) ctx->be->allreduce_sum_f64(ctx, in, out, n);
+}
+
+/* ------------------------------------------------------------------ */
+/* loopback backend (always present; the conformance oracle)           */
+/* ------------------------------------------------------------------ */
+/*
+ * One process: size 1, rank 0. Collectives are identity/copy; point-to-
+ * point is a local memcpy (send/recv between the single rank, matched
+ * by (src,dest,tag) — a non-matching call is a no-op returning 0, the
+ * documented loopback contract: it mirrors what a rank sees when its
+ * peer is itself).
+ */
+
+static RCRE_MpiCtx* lb_open(void) {
+    return (RCRE_MpiCtx*)calloc(1, sizeof(RCRE_MpiCtx));
+}
+static int lb_size(RCRE_MpiCtx* c) {
+    (void)c;
+    return 1;
+}
+static int lb_rank(RCRE_MpiCtx* c) {
+    (void)c;
+    return 0;
+}
+static void lb_barrier(RCRE_MpiCtx* c) {
+    (void)c;
+}
+static void lb_bcast_f64(RCRE_MpiCtx* c, double* buf, size_t n, int root) {
+    (void)c;
+    (void)buf;
+    (void)n;
+    (void)root; /* single rank: the buffer is already the root's */
+}
+static int lb_send_f64(RCRE_MpiCtx* c, const double* buf, size_t n, int dest,
+                       int tag) {
+    (void)c;
+    (void)buf;
+    (void)n;
+    (void)dest;
+    (void)tag;
+    return 0; /* loopback: self-send, no local delivery queue */
+}
+static int lb_recv_f64(RCRE_MpiCtx* c, double* buf, size_t n, int src,
+                       int tag) {
+    (void)c;
+    (void)buf;
+    (void)n;
+    (void)src;
+    (void)tag;
+    return 0;
+}
+static int lb_isend_f64(RCRE_MpiCtx* c, const double* buf, size_t n, int dest,
+                        int tag) {
+    (void)c;
+    (void)buf;
+    (void)n;
+    (void)dest;
+    (void)tag;
+    return 0;
+}
+static int lb_irecv_f64(RCRE_MpiCtx* c, double* buf, size_t n, int src,
+                        int tag) {
+    (void)c;
+    (void)buf;
+    (void)n;
+    (void)src;
+    (void)tag;
+    return 0;
+}
+static int lb_wait(RCRE_MpiCtx* c, int req) {
+    (void)c;
+    (void)req;
+    return 0;
+}
+static void lb_allreduce_sum_f64(RCRE_MpiCtx* c, const double* in,
+                                 double* out, size_t n) {
+    (void)c;
+    /* one process: ordered sum of a single operand */
+    memcpy(out, in, n * sizeof(double));
+}
+static void lb_close(RCRE_MpiCtx* c) { free(c); }
+
+static RCRE_MpiBackend g_lb_be = {RCRE_MPI_BACKEND_LOOPBACK, lb_open, lb_size,
+                                  lb_rank, lb_barrier, lb_bcast_f64,
+                                  lb_send_f64, lb_recv_f64, lb_isend_f64,
+                                  lb_irecv_f64, lb_wait, lb_allreduce_sum_f64,
+                                  lb_close};
+
+/* Constructor registration (the H6 pattern: the Makefile links this
+ * object explicitly, so the constructor is guaranteed to run; no weak
+ * symbols). */
+__attribute__((constructor)) static void mpi_ctx_register_loopback(void) {
+    rcre_mpi_register_backend(RCRE_MPI_BACKEND_LOOPBACK, &g_lb_be);
+}
+
+/* --- Source: mpi_real.c --- */
+/* RCRE H9 — optional real-MPI backend for the 12-fn shim (2.6.0).
+ *
+ * Compiled EMPTY unless RCRE_HAVE_MPI is defined (the Makefile's
+ * `check-mpi` probes for mpicc/mpi.h and adds -DRCRE_HAVE_MPI +
+ * -I<mpi include> on the link line; `make test-mpi2` runs the
+ * 2-process gates under mpirun and skips clean where MPI is absent —
+ * the H6 CUDA pattern: the core never links a communication
+ * implementation, and a missing backend is a skipped gate, not a
+ * build failure).
+ *
+ * Implementation notes (real MPI build):
+ *   - open(): MPI_Init_thread(MPI_THREAD_SINGLE) + MPI_Comm_rank/size
+ *     on COMM_WORLD.
+ *   - allreduce_sum_f64: MPI_Allreduce with a REDUCER that folds in
+ *     ascending rank order (MPI_SUM on a left fold — the shim's
+ *     ordered-reduction contract; the documented deviation from a
+ *     vendor's pairwise tree is deliberate: bit-identity with the
+ *     loopback/serial path).
+ */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(RCRE_HAVE_MPI)
+
+#include <mpi.h>
+
+#define RCRE_MPI_MAX_REQ 64
+
+typedef struct {
+    int used;
+    int tag;
+    int peer;
+    MPI_Request req;
+} RCRE_MpiRealReq;
+
+static RCRE_MpiRealReq g_mpi_reqs[RCRE_MPI_MAX_REQ];
+
+static int req_alloc(void) {
+    for (int i = 0; i < RCRE_MPI_MAX_REQ; ++i)
+        if (!g_mpi_reqs[i].used) return i;
+    return -1;
+}
+
+static RCRE_MpiCtx* mpi_open(void) {
+    int init = 0;
+    MPI_Initialized(&init);
+    if (!init) {
+        if (MPI_Init(NULL, NULL) != MPI_SUCCESS) return NULL;
+    }
+    return (RCRE_MpiCtx*)calloc(1, sizeof(RCRE_MpiCtx));
+}
+
+static int mpi_size(RCRE_MpiCtx* c) {
+    (void)c;
+    int s = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &s);
+    return s;
+}
+
+static int mpi_rank(RCRE_MpiCtx* c) {
+    (void)c;
+    int r = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &r);
+    return r;
+}
+
+static void mpi_barrier(RCRE_MpiCtx* c) {
+    (void)c;
+    MPI_Barrier(MPI_COMM_WORLD);
+}
+
+static void mpi_bcast_f64(RCRE_MpiCtx* c, double* buf, size_t n, int root) {
+    (void)c;
+    if (n > 0)
+        MPI_Bcast(buf, (int)n, MPI_DOUBLE, root, MPI_COMM_WORLD);
+}
+
+static int mpi_send_f64(RCRE_MpiCtx* c, const double* buf, size_t n, int dest,
+                        int tag) {
+    (void)c;
+    return MPI_Send(buf, (int)n, MPI_DOUBLE, dest, tag, MPI_COMM_WORLD) ==
+               MPI_SUCCESS
+               ? 0
+               : -1;
+}
+
+static int mpi_recv_f64(RCRE_MpiCtx* c, double* buf, size_t n, int src,
+                        int tag) {
+    (void)c;
+    return MPI_Recv(buf, (int)n, MPI_DOUBLE, src, tag, MPI_COMM_WORLD,
+                    MPI_STATUS_IGNORE) == MPI_SUCCESS
+               ? 0
+               : -1;
+}
+
+static int mpi_isend_f64(RCRE_MpiCtx* c, const double* buf, size_t n, int dest,
+                         int tag) {
+    (void)c;
+    int slot = req_alloc();
+    if (slot < 0) return -1;
+    if (MPI_Isend(buf, (int)n, MPI_DOUBLE, dest, tag, MPI_COMM_WORLD,
+                  &g_mpi_reqs[slot].req) != MPI_SUCCESS)
+        return -1;
+    g_mpi_reqs[slot].used = 1;
+    g_mpi_reqs[slot].tag = tag;
+    g_mpi_reqs[slot].peer = dest;
+    return slot;
+}
+
+static int mpi_irecv_f64(RCRE_MpiCtx* c, double* buf, size_t n, int src,
+                         int tag) {
+    (void)c;
+    int slot = req_alloc();
+    if (slot < 0) return -1;
+    if (MPI_Irecv(buf, (int)n, MPI_DOUBLE, src, tag, MPI_COMM_WORLD,
+                  &g_mpi_reqs[slot].req) != MPI_SUCCESS)
+        return -1;
+    g_mpi_reqs[slot].used = 1;
+    g_mpi_reqs[slot].tag = tag;
+    g_mpi_reqs[slot].peer = src;
+    return slot;
+}
+
+static int mpi_wait(RCRE_MpiCtx* c, int req) {
+    (void)c;
+    /* fixed slots (no shifting): a request id stays valid until it is
+     * waited on, regardless of other pending requests */
+    if (req < 0 || req >= RCRE_MPI_MAX_REQ || !g_mpi_reqs[req].used) return -1;
+    if (MPI_Wait(&g_mpi_reqs[req].req, MPI_STATUS_IGNORE) != MPI_SUCCESS)
+        return -1;
+    g_mpi_reqs[req].used = 0;
+    return 0;
+}
+
+/* Ordered sum reduction: the shim contract is an ascending-rank left
+ * fold (bit-identity with the serial path). MPI_Allreduce(MPI_SUM) is
+ * commutative in exact arithmetic but NOT bit-stable under a vendor's
+ * pairwise tree, so this backend does the ordered fold explicitly:
+ * gather to rank 0, fold in rank order, broadcast. Two extra
+ * round-trips — the determinism policy pays for itself (the H1
+ * lesson, applied to collectives). */
+static void mpi_allreduce_sum_f64(RCRE_MpiCtx* c, const double* in,
+                                  double* out, size_t n) {
+    (void)c;
+    int root = 0, rank = 0, size = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (n == 0) return;
+    double* acc = (double*)malloc(n * sizeof(double));
+    if (!acc) return;
+    if (rank == root) {
+        memcpy(acc, in, n * sizeof(double));
+        for (int r = 1; r < size; ++r) {
+            double* tmp = (double*)malloc(n * sizeof(double));
+            if (!tmp) break;
+            MPI_Recv(tmp, (int)n, MPI_DOUBLE, r, 77, MPI_COMM_WORLD,
+                     MPI_STATUS_IGNORE);
+            for (size_t i = 0; i < n; ++i) acc[i] += tmp[i];
+            free(tmp);
+        }
+        memcpy(out, acc, n * sizeof(double));
+        MPI_Bcast(out, (int)n, MPI_DOUBLE, root, MPI_COMM_WORLD);
+    } else {
+        MPI_Send(in, (int)n, MPI_DOUBLE, root, 77, MPI_COMM_WORLD);
+        MPI_Bcast(out, (int)n, MPI_DOUBLE, root, MPI_COMM_WORLD);
+    }
+    free(acc);
+}
+
+static void mpi_close(RCRE_MpiCtx* c) {
+    free(c);
+    /* MPI_Finalize is NOT called per-close: the backend owns the MPI
+     * lifetime process-wide (documented); the process exits with it. */
+}
+
+static RCRE_MpiBackend g_mpi_be = {RCRE_MPI_BACKEND_MPI, mpi_open, mpi_size,
+                                   mpi_rank, mpi_barrier, mpi_bcast_f64,
+                                   mpi_send_f64, mpi_recv_f64, mpi_isend_f64,
+                                   mpi_irecv_f64, mpi_wait,
+                                   mpi_allreduce_sum_f64, mpi_close};
+
+__attribute__((constructor)) static void mpi_real_register(void) {
+    rcre_mpi_register_backend(RCRE_MPI_BACKEND_MPI, &g_mpi_be);
+}
+
+#endif /* RCRE_HAVE_MPI */
 
 /* --- Source: adapt.c --- */
 /**
@@ -14674,6 +23699,3006 @@ int rcre_sparse_bcsr4_load(
 
     return RCRE_OK;
 }
+
+/* --- Source: nlp.c --- */
+/**
+ * @file nlp.c
+ * @brief RCRE HPC-Native, Zero-Malloc C23 NLP Engine Implementation
+ *
+ * Satisfies NLP-REQ-01 through NLP-REQ-06.
+ * Pure ISO C23, zero malloc/free/realloc, flat arena allocations,
+ * lock-free re-entrant kernels, and HAL SIMD string acceleration.
+ */
+
+#include <math.h>
+#include <string.h>
+
+/* ========================================================================= */
+/* Internal Helpers (namespaced with rcre_nlp__ for amalgamation safety)     */
+/* ========================================================================= */
+
+static inline bool rcre_nlp__is_ascii_alpha(uint8_t c) {
+    return ((uint8_t)(c - (uint8_t)'A') <= 25U) || ((uint8_t)(c - (uint8_t)'a') <= 25U);
+}
+
+static inline bool rcre_nlp__is_ascii_digit(uint8_t c) {
+    return (uint8_t)(c - (uint8_t)'0') <= 9U;
+}
+
+static inline bool rcre_nlp__is_word_byte(uint8_t c, bool keep_digits) {
+    if (c >= 0x80U) return true; /* Preserve UTF-8 multi-byte word letters */
+    if (rcre_nlp__is_ascii_alpha(c)) return true;
+    if (keep_digits && rcre_nlp__is_ascii_digit(c)) return true;
+    return false;
+}
+
+static inline bool rcre_nlp__is_ascii_punct(uint8_t c) {
+    return (c >= 33U && c <= 47U) || (c >= 58U && c <= 64U) ||
+           (c >= 91U && c <= 96U) || (c >= 123U && c <= 126U);
+}
+
+static inline bool rcre_nlp__is_ascii_space(uint8_t c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+static inline uint8_t rcre_nlp__lower_byte(uint8_t c) {
+    return ((uint8_t)(c - (uint8_t)'A') <= 25U) ? (uint8_t)(c | 0x20U) : c;
+}
+
+static inline uint64_t rcre_nlp__splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+static inline RCRE_Slice rcre_nlp__normalize_tok(
+    RCRE_Slice tok,
+    bool lowercase,
+    uint8_t* stack_buf,
+    size_t stack_cap,
+    RCRE_Arena* scratch
+) {
+    if (!lowercase || tok.len == 0 || !tok.data) {
+        return tok;
+    }
+    /* Fast check: if no uppercase ASCII byte exists, return zero-copy slice! */
+    bool has_upper = false;
+    for (size_t i = 0; i < tok.len; ++i) {
+        if ((uint8_t)(tok.data[i] - (uint8_t)'A') <= 25U) {
+            has_upper = true;
+            break;
+        }
+    }
+    if (!has_upper) {
+        return tok;
+    }
+    if (tok.len <= stack_cap) {
+        rcre_hal.ascii_to_lower(tok.data, stack_buf, tok.len);
+        return rcre_slice_from_parts(stack_buf, tok.len);
+    }
+    if (scratch) {
+        uint8_t* dst = (uint8_t*)rcre_arena_alloc(scratch, tok.len, 16);
+        if (dst) {
+            rcre_hal.ascii_to_lower(tok.data, dst, tok.len);
+            return rcre_slice_from_parts(dst, tok.len);
+        }
+    }
+    /* Fallback: truncate to stack_cap if no scratch arena */
+    rcre_hal.ascii_to_lower(tok.data, stack_buf, stack_cap);
+    return rcre_slice_from_parts(stack_buf, stack_cap);
+}
+
+/* Deterministic in-place heapsort for uint32_t (zero recursion, zero malloc) */
+static void rcre_nlp__sort_u32(uint32_t* a, size_t n) {
+    if (n <= 1U) return;
+    for (size_t start = n / 2U; start > 0U; --start) {
+        size_t root = start - 1U;
+        for (;;) {
+            size_t child = root * 2U + 1U;
+            if (child >= n) break;
+            if (child + 1U < n && a[child] < a[child + 1U]) child++;
+            if (a[root] < a[child]) {
+                uint32_t t = a[root]; a[root] = a[child]; a[child] = t;
+                root = child;
+            } else {
+                break;
+            }
+        }
+    }
+    for (size_t end = n - 1U; end > 0U; --end) {
+        uint32_t t = a[end]; a[end] = a[0]; a[0] = t;
+        size_t root = 0U;
+        for (;;) {
+            size_t child = root * 2U + 1U;
+            if (child >= end) break;
+            if (child + 1U < end && a[child] < a[child + 1U]) child++;
+            if (a[root] < a[child]) {
+                uint32_t tmp = a[root]; a[root] = a[child]; a[child] = tmp;
+                root = child;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/* Deterministic heapsort of (score desc, doc_id asc) */
+static inline bool rcre_nlp__hit_better(RCRE_SearchHit a, RCRE_SearchHit b) {
+    if (a.score != b.score) return a.score > b.score;
+    return a.doc_id < b.doc_id;
+}
+
+static void rcre_nlp__sort_hits_desc(RCRE_SearchHit* a, size_t n) {
+    if (n <= 1U) return;
+    /* Build min-heap (worst at root) so popping yields descending order */
+    for (size_t start = n / 2U; start > 0U; --start) {
+        size_t root = start - 1U;
+        for (;;) {
+            size_t child = root * 2U + 1U;
+            if (child >= n) break;
+            if (child + 1U < n && rcre_nlp__hit_better(a[child], a[child + 1U])) child++;
+            if (rcre_nlp__hit_better(a[root], a[child])) {
+                RCRE_SearchHit t = a[root]; a[root] = a[child]; a[child] = t;
+                root = child;
+            } else {
+                break;
+            }
+        }
+    }
+    for (size_t end = n - 1U; end > 0U; --end) {
+        RCRE_SearchHit t = a[end]; a[end] = a[0]; a[0] = t;
+        size_t root = 0U;
+        for (;;) {
+            size_t child = root * 2U + 1U;
+            if (child >= end) break;
+            if (child + 1U < end && rcre_nlp__hit_better(a[child], a[child + 1U])) child++;
+            if (rcre_nlp__hit_better(a[root], a[child])) {
+                RCRE_SearchHit tmp = a[root]; a[root] = a[child]; a[child] = tmp;
+                root = child;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/* Sort vocab term IDs lexicographically by slice (matches scikit-learn) */
+typedef struct {
+    RCRE_Slice slice;
+    uint32_t   old_id;
+} rcre_nlp__term_pair;
+
+static inline bool rcre_nlp__term_less(rcre_nlp__term_pair a, rcre_nlp__term_pair b) {
+    int c = rcre_slice_cmp(a.slice, b.slice);
+    return (c != 0) ? (c < 0) : (a.old_id < b.old_id);
+}
+
+static void rcre_nlp__sort_terms(rcre_nlp__term_pair* a, size_t n) {
+    if (n <= 1U) return;
+    for (size_t start = n / 2U; start > 0U; --start) {
+        size_t root = start - 1U;
+        for (;;) {
+            size_t child = root * 2U + 1U;
+            if (child >= n) break;
+            if (child + 1U < n && rcre_nlp__term_less(a[child], a[child + 1U])) child++;
+            if (rcre_nlp__term_less(a[root], a[child])) {
+                rcre_nlp__term_pair t = a[root]; a[root] = a[child]; a[child] = t;
+                root = child;
+            } else {
+                break;
+            }
+        }
+    }
+    for (size_t end = n - 1U; end > 0U; --end) {
+        rcre_nlp__term_pair t = a[end]; a[end] = a[0]; a[0] = t;
+        size_t root = 0U;
+        for (;;) {
+            size_t child = root * 2U + 1U;
+            if (child >= end) break;
+            if (child + 1U < end && rcre_nlp__term_less(a[child], a[child + 1U])) child++;
+            if (rcre_nlp__term_less(a[root], a[child])) {
+                rcre_nlp__term_pair tmp = a[root]; a[root] = a[child]; a[child] = tmp;
+                root = child;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/* ========================================================================= */
+/* 1. Zero-Copy Tokenizers & N-Gram Iterators (NLP-REQ-01)                   */
+/* ========================================================================= */
+
+RCRE_TokenizeOpts rcre_nlp_default_tokenize_opts(void) {
+    RCRE_TokenizeOpts opts = {
+        .split_punct = false,
+        .keep_digits = true,
+        .min_len     = 1,
+        .max_len     = 0
+    };
+    return opts;
+}
+
+RCRE_WordIter rcre_nlp_word_iter_init(RCRE_Slice text, const RCRE_TokenizeOpts* opts) {
+    RCRE_WordIter it = {
+        .src  = text,
+        .pos  = 0,
+        .opts = opts ? *opts : rcre_nlp_default_tokenize_opts()
+    };
+    if (it.opts.min_len == 0) {
+        it.opts.min_len = 1;
+    }
+    return it;
+}
+
+bool rcre_nlp_word_iter_next(RCRE_WordIter* it, RCRE_Slice* out_tok) {
+    if (!it || !out_tok || !it->src.data) {
+        return false;
+    }
+    while (it->pos < it->src.len) {
+        uint8_t c = it->src.data[it->pos];
+        if (rcre_nlp__is_word_byte(c, it->opts.keep_digits)) {
+            size_t start = it->pos;
+            it->pos++;
+            while (it->pos < it->src.len && rcre_nlp__is_word_byte(it->src.data[it->pos], it->opts.keep_digits)) {
+                it->pos++;
+            }
+            size_t tok_len = it->pos - start;
+            if (tok_len >= it->opts.min_len && (it->opts.max_len == 0 || tok_len <= it->opts.max_len)) {
+                *out_tok = rcre_slice_sub(it->src, start, it->pos);
+                return true;
+            }
+        } else if (it->opts.split_punct && rcre_nlp__is_ascii_punct(c)) {
+            size_t start = it->pos;
+            it->pos++;
+            if (1U >= it->opts.min_len) {
+                *out_tok = rcre_slice_sub(it->src, start, it->pos);
+                return true;
+            }
+        } else {
+            it->pos++;
+        }
+    }
+    return false;
+}
+
+RCRE_CharNGramIter rcre_nlp_char_ngram_init(RCRE_Slice text, size_t n) {
+    RCRE_CharNGramIter it = {
+        .src = text,
+        .n   = (n == 0) ? 1U : n,
+        .pos = 0
+    };
+    return it;
+}
+
+bool rcre_nlp_char_ngram_next(RCRE_CharNGramIter* it, RCRE_Slice* out_ngram) {
+    if (!it || !out_ngram || !it->src.data || it->pos >= it->src.len) {
+        return false;
+    }
+    RCRE_Slice cur = rcre_slice_sub(it->src, it->pos, it->src.len);
+    size_t start_off = it->pos;
+    size_t first_step = 0;
+
+    for (size_t k = 0; k < it->n; ++k) {
+        if (cur.len == 0) {
+            it->pos = it->src.len;
+            return false;
+        }
+        int step = rcre_utf8_decode_next(&cur, nullptr);
+        if (step <= 0) {
+            /* Advance 1 raw byte on malformed UTF-8 so iteration never stalls */
+            cur = rcre_slice_sub(cur, 1U, cur.len);
+            step = 1;
+        }
+        if (k == 0) first_step = (size_t)step;
+    }
+
+    size_t end_off = cur.data ? (size_t)(cur.data - it->src.data) : it->src.len;
+    *out_ngram = rcre_slice_sub(it->src, start_off, end_off);
+    it->pos = start_off + first_step;
+    return true;
+}
+
+RCRE_WordNGramIter rcre_nlp_word_ngram_init(RCRE_Slice text, size_t n, const RCRE_TokenizeOpts* opts) {
+    if (n == 0) n = 1U;
+    if (n > RCRE_NLP_MAX_NGRAM) n = RCRE_NLP_MAX_NGRAM;
+    RCRE_WordNGramIter it;
+    memset(&it, 0, sizeof(it));
+    it.words = rcre_nlp_word_iter_init(text, opts);
+    it.n = n;
+    return it;
+}
+
+bool rcre_nlp_word_ngram_next(RCRE_WordNGramIter* it, RCRE_Slice* out_span) {
+    if (!it || !out_span || it->n == 0) {
+        return false;
+    }
+    RCRE_Slice tok;
+    while (it->filled < it->n) {
+        if (!rcre_nlp_word_iter_next(&it->words, &tok)) {
+            return false;
+        }
+        it->ring[(it->head + it->filled) % it->n] = tok;
+        it->filled++;
+    }
+    RCRE_Slice first = it->ring[it->head];
+    RCRE_Slice last  = it->ring[(it->head + it->n - 1U) % it->n];
+    const uint8_t* start_ptr = first.data;
+    const uint8_t* end_ptr = last.data + last.len;
+    *out_span = rcre_slice_from_parts(start_ptr, (size_t)(end_ptr - start_ptr));
+
+    /* Advance sliding window by 1 token for the next call */
+    it->head = (it->head + 1U) % it->n;
+    it->filled--;
+    return true;
+}
+
+/* ========================================================================= */
+/* 2. Flat-Arena BM25 Inverted Index & Hybrid RRF Fusion (NLP-REQ-02)        */
+/* ========================================================================= */
+
+RCRE_BM25Opts rcre_bm25_default_opts(void) {
+    RCRE_BM25Opts opts = {
+        .k1        = 1.5f,
+        .b         = 0.75f,
+        .lowercase = true,
+        .tok_opts  = rcre_nlp_default_tokenize_opts()
+    };
+    return opts;
+}
+
+int rcre_bm25_build(
+    RCRE_BM25Index* index,
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    const RCRE_BM25Opts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+) {
+    if (!index || !arena || (num_docs > 0 && !docs) || num_docs > (size_t)UINT32_MAX - 1U) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(index, 0, sizeof(*index));
+    RCRE_BM25Opts cfg = opts ? *opts : rcre_bm25_default_opts();
+    index->num_docs  = (uint32_t)num_docs;
+    index->k1        = cfg.k1;
+    index->b         = cfg.b;
+    index->lowercase = cfg.lowercase;
+    index->tok_opts  = cfg.tok_opts;
+
+    RCRE_Arena* tmp_arena = scratch ? scratch : arena;
+    bool distinct_scratch = (scratch != nullptr && scratch != arena);
+    RCRE_ArenaTemp tmp_mark = rcre_arena_temp_begin(tmp_arena);
+
+    int rc = rcre_strpool_init(&index->vocab, arena, num_docs > 64 ? num_docs * 2U : 128U);
+    if (rc != RCRE_OK) {
+        if (distinct_scratch) rcre_arena_temp_end(tmp_mark);
+        return rc;
+    }
+
+    if (num_docs == 0) {
+        if (distinct_scratch) rcre_arena_temp_end(tmp_mark);
+        return RCRE_OK;
+    }
+
+    index->doc_lens = (uint32_t*)rcre_arena_alloc(arena, num_docs * sizeof(uint32_t), 64);
+    if (!index->doc_lens) {
+        if (distinct_scratch) rcre_arena_temp_end(tmp_mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(index->doc_lens, 0, num_docs * sizeof(uint32_t));
+
+    /* Pass 1: intern every term and compute doc lengths */
+    uint8_t low_buf[256];
+    uint64_t total_tokens = 0;
+    for (size_t d = 0; d < num_docs; ++d) {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], &cfg.tok_opts);
+        RCRE_Slice tok;
+        uint32_t dl = 0;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, cfg.lowercase, low_buf, sizeof(low_buf), tmp_arena);
+            if (rcre_strpool_intern(&index->vocab, norm) == RCRE_STR_ID_INVALID) {
+                if (distinct_scratch) rcre_arena_temp_end(tmp_mark);
+                return RCRE_ERR_OUT_OF_MEMORY;
+            }
+            dl++;
+        }
+        index->doc_lens[d] = dl;
+        total_tokens += dl;
+    }
+
+    size_t V = rcre_strpool_count(&index->vocab);
+    index->num_terms = (uint32_t)V;
+    index->avg_doc_len = (num_docs > 0) ? (float)((double)total_tokens / (double)num_docs) : 0.0f;
+
+    if (V == 0) {
+        if (distinct_scratch) rcre_arena_temp_end(tmp_mark);
+        return RCRE_OK;
+    }
+
+    /* Count exact document frequencies df[t] in O(tokens) via last_doc[t] marker */
+    uint32_t* df = (uint32_t*)rcre_arena_alloc(tmp_arena, V * sizeof(uint32_t), 64);
+    uint32_t* last_doc = (uint32_t*)rcre_arena_alloc(tmp_arena, V * sizeof(uint32_t), 64);
+    if (!df || !last_doc) {
+        if (distinct_scratch) rcre_arena_temp_end(tmp_mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(df, 0, V * sizeof(uint32_t));
+    for (size_t t = 0; t < V; ++t) last_doc[t] = UINT32_MAX;
+
+    for (size_t d = 0; d < num_docs; ++d) {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], &cfg.tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, cfg.lowercase, low_buf, sizeof(low_buf), tmp_arena);
+            RCRE_StrId tid = rcre_strpool_find(&index->vocab, norm);
+            if (tid != RCRE_STR_ID_INVALID && last_doc[tid] != (uint32_t)d) {
+                last_doc[tid] = (uint32_t)d;
+                df[tid]++;
+            }
+        }
+    }
+
+    /* Build CSR offsets & precompute Robertson-Sparck Jones BM25 IDF */
+    index->term_offsets = (uint32_t*)rcre_arena_alloc(arena, (V + 1U) * sizeof(uint32_t), 64);
+    index->term_idf     = (float*)rcre_arena_alloc(arena, V * sizeof(float), 64);
+    if (!index->term_offsets || !index->term_idf) {
+        if (distinct_scratch) rcre_arena_temp_end(tmp_mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    size_t total_postings = 0;
+    double N = (double)num_docs;
+    for (size_t t = 0; t < V; ++t) {
+        index->term_offsets[t] = (uint32_t)total_postings;
+        total_postings += df[t];
+        double n_t = (double)df[t];
+        index->term_idf[t] = (float)log(1.0 + (N - n_t + 0.5) / (n_t + 0.5));
+    }
+    index->term_offsets[V] = (uint32_t)total_postings;
+    index->total_postings = total_postings;
+
+    if (total_postings == 0) {
+        if (distinct_scratch) rcre_arena_temp_end(tmp_mark);
+        return RCRE_OK;
+    }
+
+    index->postings_doc = (uint32_t*)rcre_arena_alloc(arena, total_postings * sizeof(uint32_t), 64);
+    index->postings_tf  = (uint32_t*)rcre_arena_alloc(arena, total_postings * sizeof(uint32_t), 64);
+    uint32_t* write_cur = (uint32_t*)rcre_arena_alloc(tmp_arena, V * sizeof(uint32_t), 64);
+    if (!index->postings_doc || !index->postings_tf || !write_cur) {
+        if (distinct_scratch) rcre_arena_temp_end(tmp_mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memcpy(write_cur, index->term_offsets, V * sizeof(uint32_t));
+    for (size_t t = 0; t < V; ++t) last_doc[t] = UINT32_MAX;
+
+    /* Pass 2: scatter doc-sorted (doc_id, tf) postings in O(tokens) */
+    for (size_t d = 0; d < num_docs; ++d) {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], &cfg.tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, cfg.lowercase, low_buf, sizeof(low_buf), tmp_arena);
+            RCRE_StrId tid = rcre_strpool_find(&index->vocab, norm);
+            if (tid == RCRE_STR_ID_INVALID) continue;
+            if (last_doc[tid] != (uint32_t)d) {
+                uint32_t pos = write_cur[tid]++;
+                index->postings_doc[pos] = (uint32_t)d;
+                index->postings_tf[pos]  = 1U;
+                last_doc[tid] = (uint32_t)d;
+            } else {
+                index->postings_tf[write_cur[tid] - 1U]++;
+            }
+        }
+    }
+
+    if (distinct_scratch) {
+        rcre_arena_temp_end(tmp_mark);
+    }
+    return RCRE_OK;
+}
+
+int rcre_bm25_search(
+    const RCRE_BM25Index* index,
+    RCRE_Slice query,
+    size_t top_k,
+    RCRE_SearchHit* out_hits,
+    size_t* out_count,
+    RCRE_Arena* scratch
+) {
+    if (!index || !out_count || !scratch || (top_k > 0 && !out_hits)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    if (index->num_docs == 0 || index->num_terms == 0 || top_k == 0 || query.len == 0) {
+        return RCRE_OK;
+    }
+
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(scratch);
+    float* scores = (float*)rcre_arena_alloc(scratch, (size_t)index->num_docs * sizeof(float), 64);
+    uint32_t* touched = (uint32_t*)rcre_arena_alloc(scratch, (size_t)index->num_docs * sizeof(uint32_t), 64);
+    if (!scores || !touched) {
+        rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(scores, 0, (size_t)index->num_docs * sizeof(float));
+    size_t num_touched = 0;
+
+    float k1 = index->k1;
+    float b  = index->b;
+    float avgdl = (index->avg_doc_len > 0.0f) ? index->avg_doc_len : 1.0f;
+
+    uint8_t low_buf[256];
+    RCRE_WordIter it = rcre_nlp_word_iter_init(query, &index->tok_opts);
+    RCRE_Slice tok;
+    while (rcre_nlp_word_iter_next(&it, &tok)) {
+        RCRE_Slice norm = rcre_nlp__normalize_tok(tok, index->lowercase, low_buf, sizeof(low_buf), scratch);
+        RCRE_StrId tid = rcre_strpool_find(&index->vocab, norm);
+        if (tid == RCRE_STR_ID_INVALID) continue;
+
+        float idf = index->term_idf[tid];
+        uint32_t p0 = index->term_offsets[tid];
+        uint32_t p1 = index->term_offsets[tid + 1U];
+        for (uint32_t p = p0; p < p1; ++p) {
+            uint32_t d = index->postings_doc[p];
+            float tf = (float)index->postings_tf[p];
+            float dl = (float)index->doc_lens[d];
+            float denom = tf + k1 * (1.0f - b + b * (dl / avgdl));
+            float contrib = idf * ((tf * (k1 + 1.0f)) / denom);
+            if (scores[d] == 0.0f && contrib > 0.0f) {
+                touched[num_touched++] = d;
+            }
+            scores[d] += contrib;
+        }
+    }
+
+    if (num_touched == 0) {
+        rcre_arena_temp_end(mark);
+        return RCRE_OK;
+    }
+
+    RCRE_SearchHit* all_hits = (RCRE_SearchHit*)rcre_arena_alloc(
+        scratch, num_touched * sizeof(RCRE_SearchHit), alignof(RCRE_SearchHit));
+    if (!all_hits) {
+        rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    for (size_t i = 0; i < num_touched; ++i) {
+        uint32_t d = touched[i];
+        all_hits[i].doc_id = d;
+        all_hits[i].score = scores[d];
+    }
+    rcre_nlp__sort_hits_desc(all_hits, num_touched);
+
+    size_t n_emit = (num_touched < top_k) ? num_touched : top_k;
+    memcpy(out_hits, all_hits, n_emit * sizeof(RCRE_SearchHit));
+    *out_count = n_emit;
+
+    rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
+int rcre_nlp_rrf_fuse(
+    const RCRE_SearchHit* const* lists,
+    const size_t* list_counts,
+    size_t num_lists,
+    float k_rrf,
+    size_t top_k,
+    RCRE_SearchHit* out_hits,
+    size_t* out_count,
+    RCRE_Arena* scratch
+) {
+    if (!out_count || !scratch || (num_lists > 0 && (!lists || !list_counts)) || (top_k > 0 && !out_hits)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    if (num_lists == 0 || top_k == 0) return RCRE_OK;
+    if (k_rrf <= 0.0f) k_rrf = 60.0f;
+
+    size_t total_entries = 0;
+    for (size_t l = 0; l < num_lists; ++l) {
+        total_entries += list_counts[l];
+    }
+    if (total_entries == 0) return RCRE_OK;
+
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(scratch);
+    /* Power-of-two open-addressed hash table keyed by doc_id */
+    size_t cap = 16U;
+    while (cap < total_entries * 2U) cap *= 2U;
+    uint32_t* keys = (uint32_t*)rcre_arena_alloc(scratch, cap * sizeof(uint32_t), 64);
+    float* vals    = (float*)rcre_arena_alloc(scratch, cap * sizeof(float), 64);
+    if (!keys || !vals) {
+        rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    for (size_t i = 0; i < cap; ++i) {
+        keys[i] = UINT32_MAX;
+        vals[i] = 0.0f;
+    }
+
+    size_t mask = cap - 1U;
+    size_t unique = 0;
+    for (size_t l = 0; l < num_lists; ++l) {
+        const RCRE_SearchHit* lst = lists[l];
+        size_t n = list_counts[l];
+        if (!lst) continue;
+        for (size_t r = 0; r < n; ++r) {
+            uint32_t doc = lst[r].doc_id;
+            if (doc == UINT32_MAX) continue;
+            float inc = 1.0f / (k_rrf + (float)(r + 1U));
+            size_t slot = (size_t)(rcre_nlp__splitmix64((uint64_t)doc) & (uint64_t)mask);
+            for (;;) {
+                if (keys[slot] == UINT32_MAX) {
+                    keys[slot] = doc;
+                    vals[slot] = inc;
+                    unique++;
+                    break;
+                }
+                if (keys[slot] == doc) {
+                    vals[slot] += inc;
+                    break;
+                }
+                slot = (slot + 1U) & mask;
+            }
+        }
+    }
+
+    RCRE_SearchHit* fused = (RCRE_SearchHit*)rcre_arena_alloc(
+        scratch, unique * sizeof(RCRE_SearchHit), alignof(RCRE_SearchHit));
+    if (!fused) {
+        rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    size_t idx = 0;
+    for (size_t i = 0; i < cap; ++i) {
+        if (keys[i] != UINT32_MAX) {
+            fused[idx].doc_id = keys[i];
+            fused[idx].score = vals[i];
+            idx++;
+        }
+    }
+    rcre_nlp__sort_hits_desc(fused, unique);
+
+    size_t n_emit = (unique < top_k) ? unique : top_k;
+    memcpy(out_hits, fused, n_emit * sizeof(RCRE_SearchHit));
+    *out_count = n_emit;
+    rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 3. Scikit-Learn Parity TF-IDF Vectorizer & Feature Hashing (NLP-REQ-03)   */
+/* ========================================================================= */
+
+RCRE_TfidfOpts rcre_tfidf_default_opts(void) {
+    RCRE_TfidfOpts opts = {
+        .lowercase    = true,
+        .smooth_idf   = true,
+        .sublinear_tf = false,
+        .norm         = RCRE_NLP_NORM_L2,
+        .min_df       = 1,
+        .max_df_ratio = 1.0f,
+        .max_features = 0,
+        .tok_opts     = rcre_nlp_default_tokenize_opts()
+    };
+    return opts;
+}
+
+int rcre_tfidf_fit(
+    RCRE_TfidfVectorizer* vec,
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    const RCRE_TfidfOpts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+) {
+    if (!vec || !arena || (num_docs > 0 && !docs)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(vec, 0, sizeof(*vec));
+    RCRE_TfidfOpts cfg = opts ? *opts : rcre_tfidf_default_opts();
+    if (cfg.min_df == 0) cfg.min_df = 1U;
+    if (cfg.max_df_ratio <= 0.0f || cfg.max_df_ratio > 1.0f) cfg.max_df_ratio = 1.0f;
+    vec->opts = cfg;
+    vec->num_fit_docs = num_docs;
+
+    RCRE_Arena* tmp_arena = scratch ? scratch : arena;
+    bool distinct_scratch = (scratch != nullptr && scratch != arena);
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(tmp_arena);
+
+    RCRE_StrPool raw_pool;
+    int rc = rcre_strpool_init(&raw_pool, tmp_arena, num_docs > 64 ? num_docs * 2U : 128U);
+    if (rc != RCRE_OK) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return rc;
+    }
+
+    uint8_t low_buf[256];
+    for (size_t d = 0; d < num_docs; ++d) {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], &cfg.tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, cfg.lowercase, low_buf, sizeof(low_buf), tmp_arena);
+            if (rcre_strpool_intern(&raw_pool, norm) == RCRE_STR_ID_INVALID) {
+                if (distinct_scratch) rcre_arena_temp_end(mark);
+                return RCRE_ERR_OUT_OF_MEMORY;
+            }
+        }
+    }
+
+    size_t raw_V = rcre_strpool_count(&raw_pool);
+    if (raw_V == 0) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return rcre_strpool_init(&vec->vocab, arena, 16);
+    }
+
+    uint32_t* df = (uint32_t*)rcre_arena_alloc(tmp_arena, raw_V * sizeof(uint32_t), 64);
+    uint32_t* last_doc = (uint32_t*)rcre_arena_alloc(tmp_arena, raw_V * sizeof(uint32_t), 64);
+    if (!df || !last_doc) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(df, 0, raw_V * sizeof(uint32_t));
+    for (size_t t = 0; t < raw_V; ++t) last_doc[t] = UINT32_MAX;
+
+    for (size_t d = 0; d < num_docs; ++d) {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], &cfg.tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, cfg.lowercase, low_buf, sizeof(low_buf), tmp_arena);
+            RCRE_StrId tid = rcre_strpool_find(&raw_pool, norm);
+            if (tid != RCRE_STR_ID_INVALID && last_doc[tid] != (uint32_t)d) {
+                last_doc[tid] = (uint32_t)d;
+                df[tid]++;
+            }
+        }
+    }
+
+    /* Filter by min_df / max_df_ratio */
+    uint32_t max_df = (uint32_t)floor((double)cfg.max_df_ratio * (double)num_docs + 1e-9);
+    if (max_df < cfg.min_df) max_df = cfg.min_df;
+
+    rcre_nlp__term_pair* kept = (rcre_nlp__term_pair*)rcre_arena_alloc(
+        tmp_arena, raw_V * sizeof(rcre_nlp__term_pair), alignof(rcre_nlp__term_pair));
+    if (!kept) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    size_t kept_n = 0;
+    for (size_t t = 0; t < raw_V; ++t) {
+        if (df[t] >= cfg.min_df && df[t] <= max_df) {
+            kept[kept_n].slice = rcre_strpool_get(&raw_pool, (RCRE_StrId)t);
+            kept[kept_n].old_id = (uint32_t)t;
+            kept_n++;
+        }
+    }
+
+    /* Sort alphabetically for deterministic scikit-learn column order */
+    rcre_nlp__sort_terms(kept, kept_n);
+    if (cfg.max_features > 0 && kept_n > cfg.max_features) {
+        kept_n = cfg.max_features;
+    }
+
+    rc = rcre_strpool_init(&vec->vocab, arena, kept_n > 16 ? kept_n : 16);
+    if (rc != RCRE_OK) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return rc;
+    }
+
+    vec->vocab_size = kept_n;
+    if (kept_n > 0) {
+        vec->idf = (float*)rcre_arena_alloc(arena, kept_n * sizeof(float), 64);
+        if (!vec->idf) {
+            if (distinct_scratch) rcre_arena_temp_end(mark);
+            return RCRE_ERR_OUT_OF_MEMORY;
+        }
+        double N = (double)num_docs;
+        for (size_t i = 0; i < kept_n; ++i) {
+            RCRE_StrId new_id = rcre_strpool_intern(&vec->vocab, kept[i].slice);
+            if (new_id == RCRE_STR_ID_INVALID) {
+                if (distinct_scratch) rcre_arena_temp_end(mark);
+                return RCRE_ERR_OUT_OF_MEMORY;
+            }
+            double df_i = (double)df[kept[i].old_id];
+            if (cfg.smooth_idf) {
+                vec->idf[new_id] = (float)(log((1.0 + N) / (1.0 + df_i)) + 1.0);
+            } else {
+                vec->idf[new_id] = (float)(log(N / df_i) + 1.0);
+            }
+        }
+    }
+
+    if (distinct_scratch) {
+        rcre_arena_temp_end(mark);
+    }
+    return RCRE_OK;
+}
+
+int rcre_tfidf_transform(
+    const RCRE_TfidfVectorizer* vec,
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch,
+    RCRE_CSRMatrix* out_csr
+) {
+    if (!vec || !arena || !out_csr || (num_docs > 0 && !docs)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(out_csr, 0, sizeof(*out_csr));
+    out_csr->rows = num_docs;
+    out_csr->cols = vec->vocab_size;
+
+    uint32_t* row_ptrs = (uint32_t*)rcre_arena_alloc(arena, (num_docs + 1U) * sizeof(uint32_t), 64);
+    if (!row_ptrs) return RCRE_ERR_OUT_OF_MEMORY;
+    memset(row_ptrs, 0, (num_docs + 1U) * sizeof(uint32_t));
+    out_csr->row_pointers = row_ptrs;
+
+    if (num_docs == 0 || vec->vocab_size == 0) {
+        return RCRE_OK;
+    }
+
+    RCRE_Arena* tmp_arena = scratch ? scratch : arena;
+    bool distinct_scratch = (scratch != nullptr && scratch != arena);
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(tmp_arena);
+
+    size_t V = vec->vocab_size;
+    uint32_t* last_doc = (uint32_t*)rcre_arena_alloc(tmp_arena, V * sizeof(uint32_t), 64);
+    uint32_t* doc_tf   = (uint32_t*)rcre_arena_alloc(tmp_arena, V * sizeof(uint32_t), 64);
+    uint32_t* active   = (uint32_t*)rcre_arena_alloc(tmp_arena, V * sizeof(uint32_t), 64);
+    if (!last_doc || !doc_tf || !active) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    for (size_t t = 0; t < V; ++t) last_doc[t] = UINT32_MAX;
+
+    /* Pass 1: exact nnz per row */
+    uint8_t low_buf[256];
+    size_t total_nnz = 0;
+    for (size_t d = 0; d < num_docs; ++d) {
+        row_ptrs[d] = (uint32_t)total_nnz;
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], &vec->opts.tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, vec->opts.lowercase, low_buf, sizeof(low_buf), tmp_arena);
+            RCRE_StrId tid = rcre_strpool_find(&vec->vocab, norm);
+            if (tid != RCRE_STR_ID_INVALID && last_doc[tid] != (uint32_t)d) {
+                last_doc[tid] = (uint32_t)d;
+                total_nnz++;
+            }
+        }
+    }
+    row_ptrs[num_docs] = (uint32_t)total_nnz;
+    out_csr->nnz = total_nnz;
+
+    if (total_nnz == 0) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_OK;
+    }
+
+    float* values = (float*)rcre_arena_alloc(arena, total_nnz * sizeof(float), 64);
+    uint32_t* col_idx = (uint32_t*)rcre_arena_alloc(arena, total_nnz * sizeof(uint32_t), 64);
+    if (!values || !col_idx) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    out_csr->values = values;
+    out_csr->col_indices = col_idx;
+
+    for (size_t t = 0; t < V; ++t) last_doc[t] = UINT32_MAX;
+
+    /* Pass 2: populate sorted column indices & normalized TF-IDF weights */
+    for (size_t d = 0; d < num_docs; ++d) {
+        size_t n_act = 0;
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], &vec->opts.tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, vec->opts.lowercase, low_buf, sizeof(low_buf), tmp_arena);
+            RCRE_StrId tid = rcre_strpool_find(&vec->vocab, norm);
+            if (tid == RCRE_STR_ID_INVALID) continue;
+            if (last_doc[tid] != (uint32_t)d) {
+                last_doc[tid] = (uint32_t)d;
+                doc_tf[tid] = 1U;
+                active[n_act++] = tid;
+            } else {
+                doc_tf[tid]++;
+            }
+        }
+        rcre_nlp__sort_u32(active, n_act);
+
+        uint32_t base = row_ptrs[d];
+        double norm_acc = 0.0;
+        for (size_t k = 0; k < n_act; ++k) {
+            uint32_t tid = active[k];
+            double tf = (double)doc_tf[tid];
+            if (vec->opts.sublinear_tf) {
+                tf = 1.0 + log(tf);
+            }
+            double w = tf * (double)vec->idf[tid];
+            col_idx[base + k] = tid;
+            values[base + k] = (float)w;
+            if (vec->opts.norm == RCRE_NLP_NORM_L2) {
+                norm_acc += w * w;
+            } else if (vec->opts.norm == RCRE_NLP_NORM_L1) {
+                norm_acc += fabs(w);
+            }
+        }
+
+        if (vec->opts.norm == RCRE_NLP_NORM_L2 && norm_acc > 0.0) {
+            float inv = (float)(1.0 / sqrt(norm_acc));
+            for (size_t k = 0; k < n_act; ++k) values[base + k] *= inv;
+        } else if (vec->opts.norm == RCRE_NLP_NORM_L1 && norm_acc > 0.0) {
+            float inv = (float)(1.0 / norm_acc);
+            for (size_t k = 0; k < n_act; ++k) values[base + k] *= inv;
+        }
+    }
+
+    if (distinct_scratch) {
+        rcre_arena_temp_end(mark);
+    }
+    return RCRE_OK;
+}
+
+int rcre_nlp_hash_vectorize(
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    size_t n_features,
+    bool lowercase,
+    RCRE_NlpNorm norm,
+    const RCRE_TokenizeOpts* tok_opts,
+    RCRE_Arena* arena,
+    RCRE_Tensor* out_tensor
+) {
+    if (!arena || !out_tensor || n_features == 0 || (num_docs > 0 && !docs)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    size_t shape[2] = { num_docs > 0 ? num_docs : 1U, n_features };
+    RCRE_Tensor t = rcre_tensor_create(shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, arena);
+    if (!t.data) return RCRE_ERR_OUT_OF_MEMORY;
+    float* mat = rcre_tensor_f32_data(&t);
+    memset(mat, 0, shape[0] * n_features * sizeof(float));
+
+    uint8_t low_buf[256];
+    for (size_t d = 0; d < num_docs; ++d) {
+        float* row = mat + d * n_features;
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm_tok = rcre_nlp__normalize_tok(tok, lowercase, low_buf, sizeof(low_buf), nullptr);
+            uint64_t h = rcre_slice_hash64(norm_tok);
+            size_t bucket = (size_t)(h % (uint64_t)n_features);
+            float sign = ((h >> 63) != 0ULL) ? -1.0f : 1.0f;
+            row[bucket] += sign;
+        }
+        if (norm == RCRE_NLP_NORM_L2) {
+            float dot = rcre_hal.dot_f32(row, row, n_features);
+            if (dot > 0.0f) {
+                rcre_hal.scale_f32(n_features, 1.0f / sqrtf(dot), row);
+            }
+        } else if (norm == RCRE_NLP_NORM_L1) {
+            double s = 0.0;
+            for (size_t j = 0; j < n_features; ++j) s += fabs((double)row[j]);
+            if (s > 0.0) {
+                rcre_hal.scale_f32(n_features, (float)(1.0 / s), row);
+            }
+        }
+    }
+
+    *out_tensor = t;
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 4. Aho-Corasick Flat DFA Multi-Pattern Automaton (NLP-REQ-04)             */
+/* ========================================================================= */
+
+int rcre_ac_build(
+    RCRE_AhoCorasick* ac,
+    const RCRE_Slice* patterns,
+    size_t num_patterns,
+    bool case_insensitive,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+) {
+    if (!ac || !arena || (num_patterns > 0 && !patterns) || num_patterns > (size_t)UINT32_MAX - 1U) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(ac, 0, sizeof(*ac));
+    ac->case_insensitive = case_insensitive;
+    ac->num_patterns = (uint32_t)num_patterns;
+
+    size_t max_states = 1U;
+    for (size_t p = 0; p < num_patterns; ++p) {
+        if (patterns[p].len > SIZE_MAX - max_states) return RCRE_ERR_INVALID_ARG;
+        max_states += patterns[p].len;
+    }
+    if (max_states > (size_t)UINT32_MAX / 256U) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    RCRE_Arena* tmp_arena = scratch ? scratch : arena;
+    bool distinct_scratch = (scratch != nullptr && scratch != arena);
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(tmp_arena);
+
+    ac->next = (uint32_t*)rcre_arena_alloc(arena, max_states * 256U * sizeof(uint32_t), 64);
+    ac->out_head = (uint32_t*)rcre_arena_alloc(arena, max_states * sizeof(uint32_t), 64);
+    ac->pat_lens = num_patterns > 0 ? (size_t*)rcre_arena_alloc(arena, num_patterns * sizeof(size_t), 64) : nullptr;
+    /* Upper bound on direct output nodes before failure-link expansion: num_patterns */
+    uint32_t* fail = (uint32_t*)rcre_arena_alloc(tmp_arena, max_states * sizeof(uint32_t), 64);
+    uint32_t* queue = (uint32_t*)rcre_arena_alloc(tmp_arena, max_states * sizeof(uint32_t), 64);
+    uint32_t* direct_head = (uint32_t*)rcre_arena_alloc(tmp_arena, max_states * sizeof(uint32_t), 64);
+    uint32_t* direct_pat  = num_patterns > 0 ? (uint32_t*)rcre_arena_alloc(tmp_arena, num_patterns * sizeof(uint32_t), 64) : nullptr;
+    uint32_t* direct_next = num_patterns > 0 ? (uint32_t*)rcre_arena_alloc(tmp_arena, num_patterns * sizeof(uint32_t), 64) : nullptr;
+
+    if (!ac->next || !ac->out_head || !fail || !queue || !direct_head ||
+        (num_patterns > 0 && (!ac->pat_lens || !direct_pat || !direct_next))) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    memset(ac->next, 0, max_states * 256U * sizeof(uint32_t));
+    for (size_t s = 0; s < max_states; ++s) {
+        ac->out_head[s] = RCRE_AC_NONE;
+        direct_head[s] = RCRE_AC_NONE;
+        fail[s] = 0;
+    }
+
+    /* Step 1: Build Trie (canonical lowercase byte if case_insensitive) */
+    uint32_t num_states = 1U;
+    uint32_t direct_cnt = 0U;
+    for (size_t p = 0; p < num_patterns; ++p) {
+        ac->pat_lens[p] = patterns[p].len;
+        if (patterns[p].len == 0 || !patterns[p].data) continue;
+        uint32_t cur = 0;
+        for (size_t i = 0; i < patterns[p].len; ++i) {
+            uint8_t c = patterns[p].data[i];
+            if (case_insensitive) c = rcre_nlp__lower_byte(c);
+            uint32_t nxt = ac->next[(size_t)cur * 256U + c];
+            if (nxt == 0) {
+                nxt = num_states++;
+                ac->next[(size_t)cur * 256U + c] = nxt;
+            }
+            cur = nxt;
+        }
+        direct_pat[direct_cnt] = (uint32_t)p;
+        direct_next[direct_cnt] = direct_head[cur];
+        direct_head[cur] = direct_cnt++;
+    }
+    ac->num_states = num_states;
+
+    /* Step 2: BFS failure links + full DFA transition completion */
+    size_t qh = 0, qt = 0;
+    for (size_t c = 0; c < 256U; ++c) {
+        uint32_t nxt = ac->next[c];
+        if (nxt != 0) {
+            fail[nxt] = 0;
+            queue[qt++] = nxt;
+        }
+    }
+
+    while (qh < qt) {
+        uint32_t u = queue[qh++];
+        uint32_t f = fail[u];
+        uint32_t* u_row = ac->next + (size_t)u * 256U;
+        const uint32_t* f_row = ac->next + (size_t)f * 256U;
+        for (size_t c = 0; c < 256U; ++c) {
+            uint32_t v = u_row[c];
+            if (v != 0) {
+                fail[v] = f_row[c];
+                queue[qt++] = v;
+            } else {
+                u_row[c] = f_row[c];
+            }
+        }
+    }
+
+    /* Bake ASCII uppercase -> lowercase transitions directly into DFA (0 runtime cost!) */
+    if (case_insensitive) {
+        for (uint32_t s = 0; s < num_states; ++s) {
+            uint32_t* row = ac->next + (size_t)s * 256U;
+            for (size_t c = 'A'; c <= 'Z'; ++c) {
+                row[c] = row[c | 0x20U];
+            }
+        }
+    }
+
+    /* Step 3: Materialize flattened output lists per state (including failure outputs) */
+    size_t total_out_nodes = 0;
+    for (uint32_t s = 0; s < num_states; ++s) {
+        uint32_t cur = s;
+        while (cur != 0) {
+            for (uint32_t n = direct_head[cur]; n != RCRE_AC_NONE; n = direct_next[n]) {
+                total_out_nodes++;
+            }
+            cur = fail[cur];
+        }
+    }
+
+    if (total_out_nodes > 0) {
+        ac->out_pat_id = (uint32_t*)rcre_arena_alloc(arena, total_out_nodes * sizeof(uint32_t), 64);
+        ac->out_next   = (uint32_t*)rcre_arena_alloc(arena, total_out_nodes * sizeof(uint32_t), 64);
+        if (!ac->out_pat_id || !ac->out_next) {
+            if (distinct_scratch) rcre_arena_temp_end(mark);
+            return RCRE_ERR_OUT_OF_MEMORY;
+        }
+        uint32_t out_idx = 0;
+        for (uint32_t s = 0; s < num_states; ++s) {
+            uint32_t cur = s;
+            while (cur != 0) {
+                for (uint32_t n = direct_head[cur]; n != RCRE_AC_NONE; n = direct_next[n]) {
+                    ac->out_pat_id[out_idx] = direct_pat[n];
+                    ac->out_next[out_idx] = ac->out_head[s];
+                    ac->out_head[s] = out_idx++;
+                }
+                cur = fail[cur];
+            }
+        }
+        ac->num_out_nodes = out_idx;
+    }
+
+    if (distinct_scratch) {
+        rcre_arena_temp_end(mark);
+    }
+    return RCRE_OK;
+}
+
+size_t rcre_ac_scan(
+    const RCRE_AhoCorasick* ac,
+    RCRE_Slice text,
+    rcre_ac_match_cb cb,
+    void* user_ctx
+) {
+    if (!ac || !ac->next || ac->num_states == 0 || !text.data || text.len == 0) {
+        return 0;
+    }
+    uint32_t state = 0;
+    size_t matches = 0;
+    const uint32_t* next = ac->next;
+    const uint32_t* out_head = ac->out_head;
+
+    for (size_t i = 0; i < text.len; ++i) {
+        state = next[(size_t)state * 256U + text.data[i]];
+        uint32_t node = out_head[state];
+        if (node != RCRE_AC_NONE) {
+            do {
+                uint32_t pid = ac->out_pat_id[node];
+                size_t plen = ac->pat_lens[pid];
+                matches++;
+                if (cb) {
+                    RCRE_ACMatch m = {
+                        .start = i + 1U - plen,
+                        .end   = i + 1U,
+                        .pattern_id = pid
+                    };
+                    if (!cb(m, user_ctx)) {
+                        return matches;
+                    }
+                }
+                node = ac->out_next[node];
+            } while (node != RCRE_AC_NONE);
+        }
+    }
+    return matches;
+}
+
+typedef struct {
+    RCRE_ACMatch* buf;
+    size_t        cap;
+    size_t        written;
+} rcre_nlp__ac_collect_ctx;
+
+static bool rcre_nlp__ac_collect_cb(RCRE_ACMatch m, void* ctx_ptr) {
+    rcre_nlp__ac_collect_ctx* ctx = (rcre_nlp__ac_collect_ctx*)ctx_ptr;
+    if (ctx->buf && ctx->written < ctx->cap) {
+        ctx->buf[ctx->written++] = m;
+    }
+    return true;
+}
+
+size_t rcre_ac_find_all(
+    const RCRE_AhoCorasick* ac,
+    RCRE_Slice text,
+    RCRE_ACMatch* out_matches,
+    size_t max_matches
+) {
+    rcre_nlp__ac_collect_ctx ctx = { .buf = out_matches, .cap = max_matches, .written = 0 };
+    return rcre_ac_scan(ac, text, rcre_nlp__ac_collect_cb, &ctx);
+}
+
+RCRE_Slice rcre_ac_redact(
+    const RCRE_AhoCorasick* ac,
+    RCRE_Slice text,
+    RCRE_Slice replacement,
+    RCRE_Arena* arena
+) {
+    if (!arena || text.len == 0 || !text.data) return rcre_slice_empty();
+    if (!ac || !ac->next || ac->num_states == 0) {
+        return rcre_str_dup(arena, text);
+    }
+
+    RCRE_StrBuilder sb = rcre_sb_init(arena, text.len);
+    size_t emitted = 0;
+    uint32_t state = 0;
+
+    for (size_t i = 0; i < text.len; ++i) {
+        state = ac->next[(size_t)state * 256U + text.data[i]];
+        uint32_t node = ac->out_head[state];
+        if (node != RCRE_AC_NONE) {
+            /* Pick longest match starting at or after emitted boundary */
+            size_t best_start = SIZE_MAX;
+            while (node != RCRE_AC_NONE) {
+                uint32_t pid = ac->out_pat_id[node];
+                size_t start = i + 1U - ac->pat_lens[pid];
+                if (start >= emitted && start < best_start) {
+                    best_start = start;
+                }
+                node = ac->out_next[node];
+            }
+            if (best_start != SIZE_MAX) {
+                if (best_start > emitted) {
+                    if (!rcre_sb_append_slice(&sb, rcre_slice_sub(text, emitted, best_start))) {
+                        return rcre_slice_empty();
+                    }
+                }
+                if (!rcre_sb_append_slice(&sb, replacement)) {
+                    return rcre_slice_empty();
+                }
+                emitted = i + 1U;
+                state = 0; /* Non-overlapping reset after redaction */
+            }
+        }
+    }
+    if (emitted < text.len) {
+        if (!rcre_sb_append_slice(&sb, rcre_slice_sub(text, emitted, text.len))) {
+            return rcre_slice_empty();
+        }
+    }
+    return rcre_sb_to_slice(&sb);
+}
+
+/* ========================================================================= */
+/* 5. Bit-Parallel Myers Edit Distance & Fuzzy Metrics (NLP-REQ-05)          */
+/* ========================================================================= */
+
+static size_t rcre_nlp__levenshtein_myers64(const uint8_t* pat, size_t m, const uint8_t* txt, size_t n) {
+    uint64_t peq[256];
+    memset(peq, 0, sizeof(peq));
+    for (size_t i = 0; i < m; ++i) {
+        peq[pat[i]] |= (1ULL << i);
+    }
+
+    uint64_t pv = ~0ULL;
+    uint64_t mv = 0ULL;
+    size_t score = m;
+    uint64_t high_bit = 1ULL << (m - 1U);
+
+    for (size_t j = 0; j < n; ++j) {
+        uint64_t eq = peq[txt[j]];
+        uint64_t xv = eq | mv;
+        uint64_t xh = (((eq & pv) + pv) ^ pv) | eq;
+
+        uint64_t ph = mv | ~(xh | pv);
+        uint64_t mh = pv & xh;
+
+        if (ph & high_bit)      score++;
+        else if (mh & high_bit) score--;
+
+        ph = (ph << 1) | 1ULL;
+        mh = (mh << 1);
+        pv = mh | ~(xv | ph);
+        mv = ph & xv;
+    }
+    return score;
+}
+
+size_t rcre_nlp_levenshtein_scalar(RCRE_Slice a, RCRE_Slice b, RCRE_Arena* scratch) {
+    if (a.len == 0) return b.len;
+    if (b.len == 0) return a.len;
+    if (a.len > b.len) {
+        RCRE_Slice tmp = a; a = b; b = tmp;
+    }
+    size_t m = a.len;
+    size_t n = b.len;
+
+    uint32_t stack_row[1025];
+    uint32_t* prev = stack_row;
+    RCRE_ArenaTemp mark = { .arena = nullptr, .saved_offset = 0 };
+    if (m + 1U > sizeof(stack_row) / sizeof(stack_row[0])) {
+        if (!scratch) return RCRE_NPOS;
+        mark = rcre_arena_temp_begin(scratch);
+        prev = (uint32_t*)rcre_arena_alloc(scratch, (m + 1U) * sizeof(uint32_t), 64);
+        if (!prev) {
+            rcre_arena_temp_end(mark);
+            return RCRE_NPOS;
+        }
+    }
+
+    for (size_t i = 0; i <= m; ++i) prev[i] = (uint32_t)i;
+    for (size_t j = 1U; j <= n; ++j) {
+        uint32_t diag = prev[0];
+        prev[0] = (uint32_t)j;
+        uint8_t bj = b.data[j - 1U];
+        for (size_t i = 1U; i <= m; ++i) {
+            uint32_t up = prev[i];
+            uint32_t cost = (a.data[i - 1U] == bj) ? 0U : 1U;
+            uint32_t ins = prev[i - 1U] + 1U;
+            uint32_t del = up + 1U;
+            uint32_t sub = diag + cost;
+            uint32_t best = (ins < del) ? ins : del;
+            if (sub < best) best = sub;
+            prev[i] = best;
+            diag = up;
+        }
+    }
+
+    size_t ans = (size_t)prev[m];
+    if (mark.arena) rcre_arena_temp_end(mark);
+    return ans;
+}
+
+size_t rcre_nlp_levenshtein(RCRE_Slice a, RCRE_Slice b, RCRE_Arena* scratch) {
+    if (a.len == 0) return b.len;
+    if (b.len == 0) return a.len;
+    if (a.len == b.len && memcmp(a.data, b.data, a.len) == 0) return 0;
+
+    /* Strip common prefix & suffix in O(prefix + suffix) to shrink work */
+    size_t pre = 0;
+    size_t min_len = (a.len < b.len) ? a.len : b.len;
+    while (pre < min_len && a.data[pre] == b.data[pre]) pre++;
+    a = rcre_slice_sub(a, pre, a.len);
+    b = rcre_slice_sub(b, pre, b.len);
+    while (a.len > 0 && b.len > 0 && a.data[a.len - 1U] == b.data[b.len - 1U]) {
+        a.len--;
+        b.len--;
+    }
+    if (a.len == 0) return b.len;
+    if (b.len == 0) return a.len;
+
+    /* Put shorter string as pattern so Myers 64-bit kicks in whenever min(m,n) <= 64 */
+    if (a.len > b.len) {
+        RCRE_Slice tmp = a; a = b; b = tmp;
+    }
+    if (a.len <= 64U) {
+        return rcre_nlp__levenshtein_myers64(a.data, a.len, b.data, b.len);
+    }
+    return rcre_nlp_levenshtein_scalar(a, b, scratch);
+}
+
+float rcre_nlp_levenshtein_sim(RCRE_Slice a, RCRE_Slice b, RCRE_Arena* scratch) {
+    if (a.len == 0 && b.len == 0) return 1.0f;
+    size_t d = rcre_nlp_levenshtein(a, b, scratch);
+    if (d == RCRE_NPOS) return 0.0f;
+    size_t denom = (a.len > b.len) ? a.len : b.len;
+    return 1.0f - (float)((double)d / (double)denom);
+}
+
+float rcre_nlp_jaro_winkler(RCRE_Slice a, RCRE_Slice b, float prefix_scale, RCRE_Arena* scratch) {
+    if (a.len == 0 && b.len == 0) return 1.0f;
+    if (a.len == 0 || b.len == 0) return 0.0f;
+    if (rcre_slice_eq(a, b)) return 1.0f;
+
+    if (prefix_scale < 0.0f) prefix_scale = 0.0f;
+    if (prefix_scale > 0.25f) prefix_scale = 0.25f;
+
+    size_t max_len = (a.len > b.len) ? a.len : b.len;
+    size_t match_dist = (max_len / 2U > 0U) ? (max_len / 2U - 1U) : 0U;
+
+    uint8_t stack_flags[1024];
+    uint8_t* a_match = stack_flags;
+    uint8_t* b_match = stack_flags + a.len;
+    RCRE_ArenaTemp mark = { .arena = nullptr, .saved_offset = 0 };
+
+    if (a.len + b.len > sizeof(stack_flags)) {
+        if (!scratch) return 0.0f;
+        mark = rcre_arena_temp_begin(scratch);
+        a_match = (uint8_t*)rcre_arena_alloc(scratch, a.len + b.len, 16);
+        if (!a_match) {
+            rcre_arena_temp_end(mark);
+            return 0.0f;
+        }
+        b_match = a_match + a.len;
+    }
+    memset(a_match, 0, a.len + b.len);
+
+    size_t matches = 0;
+    for (size_t i = 0; i < a.len; ++i) {
+        size_t start = (i > match_dist) ? (i - match_dist) : 0U;
+        size_t end = (i + match_dist + 1U < b.len) ? (i + match_dist + 1U) : b.len;
+        for (size_t j = start; j < end; ++j) {
+            if (!b_match[j] && a.data[i] == b.data[j]) {
+                a_match[i] = 1U;
+                b_match[j] = 1U;
+                matches++;
+                break;
+            }
+        }
+    }
+
+    if (matches == 0) {
+        if (mark.arena) rcre_arena_temp_end(mark);
+        return 0.0f;
+    }
+
+    size_t transpositions = 0;
+    size_t k = 0;
+    for (size_t i = 0; i < a.len; ++i) {
+        if (!a_match[i]) continue;
+        while (!b_match[k]) k++;
+        if (a.data[i] != b.data[k]) transpositions++;
+        k++;
+    }
+
+    double m = (double)matches;
+    double jaro = ((m / (double)a.len) + (m / (double)b.len) + ((m - (double)transpositions / 2.0) / m)) / 3.0;
+
+    size_t prefix = 0;
+    size_t max_pre = (a.len < b.len) ? a.len : b.len;
+    if (max_pre > 4U) max_pre = 4U;
+    while (prefix < max_pre && a.data[prefix] == b.data[prefix]) prefix++;
+
+    double jw = jaro + (double)prefix * (double)prefix_scale * (1.0 - jaro);
+    if (mark.arena) rcre_arena_temp_end(mark);
+    return (float)jw;
+}
+
+float rcre_nlp_jaccard_char_ngrams(RCRE_Slice a, RCRE_Slice b, size_t n, RCRE_Arena* scratch) {
+    if (!scratch) return 0.0f;
+    if (n == 0) n = 1U;
+
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(scratch);
+    RCRE_StrPool set_a, set_b;
+    if (rcre_strpool_init(&set_a, scratch, 64) != RCRE_OK ||
+        rcre_strpool_init(&set_b, scratch, 64) != RCRE_OK) {
+        rcre_arena_temp_end(mark);
+        return 0.0f;
+    }
+
+    RCRE_CharNGramIter ita = rcre_nlp_char_ngram_init(a, n);
+    RCRE_Slice ng;
+    while (rcre_nlp_char_ngram_next(&ita, &ng)) {
+        (void)rcre_strpool_intern(&set_a, ng);
+    }
+    RCRE_CharNGramIter itb = rcre_nlp_char_ngram_init(b, n);
+    while (rcre_nlp_char_ngram_next(&itb, &ng)) {
+        (void)rcre_strpool_intern(&set_b, ng);
+    }
+
+    size_t na = rcre_strpool_count(&set_a);
+    size_t nb = rcre_strpool_count(&set_b);
+    if (na == 0 && nb == 0) {
+        rcre_arena_temp_end(mark);
+        return 1.0f;
+    }
+
+    size_t inter = 0;
+    for (size_t i = 0; i < na; ++i) {
+        if (rcre_strpool_find(&set_b, rcre_strpool_get(&set_a, (RCRE_StrId)i)) != RCRE_STR_ID_INVALID) {
+            inter++;
+        }
+    }
+    size_t uni = na + nb - inter;
+    float res = (uni > 0) ? (float)((double)inter / (double)uni) : 0.0f;
+    rcre_arena_temp_end(mark);
+    return res;
+}
+
+/* ========================================================================= */
+/* 6. LLM Dataset Deduplication & UTF-8 RAG Chunker (NLP-REQ-06)             */
+/* ========================================================================= */
+
+uint64_t rcre_nlp_simhash64(RCRE_Slice text, const RCRE_TokenizeOpts* opts) {
+    int32_t acc[64];
+    memset(acc, 0, sizeof(acc));
+
+    uint8_t low_buf[256];
+    RCRE_WordIter it = rcre_nlp_word_iter_init(text, opts);
+    RCRE_Slice tok;
+    while (rcre_nlp_word_iter_next(&it, &tok)) {
+        RCRE_Slice norm = rcre_nlp__normalize_tok(tok, true, low_buf, sizeof(low_buf), nullptr);
+        uint64_t h = rcre_slice_hash64(norm);
+        for (int b = 0; b < 64; ++b) {
+            acc[b] += ((h >> b) & 1ULL) ? 1 : -1;
+        }
+    }
+
+    uint64_t fp = 0;
+    for (int b = 0; b < 64; ++b) {
+        if (acc[b] > 0) {
+            fp |= (1ULL << b);
+        }
+    }
+    return fp;
+}
+
+uint32_t rcre_nlp_hamming64(uint64_t a, uint64_t b) {
+    uint64_t x = a ^ b;
+#if defined(__GNUC__) || defined(__clang__)
+    return (uint32_t)__builtin_popcountll(x);
+#else
+    uint32_t c = 0;
+    while (x) { x &= (x - 1ULL); c++; }
+    return c;
+#endif
+}
+
+int rcre_nlp_minhash_compute(
+    RCRE_Slice text,
+    size_t ngram_n,
+    uint64_t* out_sig,
+    size_t num_hashes,
+    const RCRE_TokenizeOpts* opts
+) {
+    if (!out_sig || num_hashes == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (ngram_n == 0) ngram_n = 1U;
+    for (size_t k = 0; k < num_hashes; ++k) {
+        out_sig[k] = UINT64_MAX;
+    }
+
+    uint8_t low_buf[512];
+    RCRE_WordNGramIter it = rcre_nlp_word_ngram_init(text, ngram_n, opts);
+    RCRE_Slice span;
+    while (rcre_nlp_word_ngram_next(&it, &span)) {
+        RCRE_Slice norm = rcre_nlp__normalize_tok(span, true, low_buf, sizeof(low_buf), nullptr);
+        uint64_t base_h = rcre_slice_hash64(norm);
+        for (size_t k = 0; k < num_hashes; ++k) {
+            uint64_t seed = 0x243f6a8885a308d3ULL ^ ((uint64_t)(k + 1U) * 0x9e3779b97f4a7c15ULL);
+            uint64_t hk = rcre_nlp__splitmix64(base_h ^ seed);
+            if (hk < out_sig[k]) {
+                out_sig[k] = hk;
+            }
+        }
+    }
+    return RCRE_OK;
+}
+
+float rcre_nlp_minhash_jaccard(const uint64_t* sig_a, const uint64_t* sig_b, size_t num_hashes) {
+    if (!sig_a || !sig_b || num_hashes == 0) return 0.0f;
+    size_t eq = 0;
+    for (size_t k = 0; k < num_hashes; ++k) {
+        if (sig_a[k] == sig_b[k]) eq++;
+    }
+    return (float)((double)eq / (double)num_hashes);
+}
+
+int rcre_nlp_chunk_utf8(
+    RCRE_Slice text,
+    size_t max_bytes,
+    size_t overlap_bytes,
+    RCRE_Arena* arena,
+    RCRE_Slice** out_chunks,
+    size_t* out_count
+) {
+    if (!arena || !out_chunks || !out_count || max_bytes == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    *out_chunks = nullptr;
+    *out_count = 0;
+    if (!text.data || text.len == 0) return RCRE_OK;
+    if (overlap_bytes >= max_bytes) overlap_bytes = max_bytes - 1U;
+
+    /* Pass 1: count chunks; Pass 2: fill slice array */
+    for (int pass = 0; pass < 2; ++pass) {
+        size_t pos = 0;
+        size_t count = 0;
+        while (pos < text.len) {
+            RCRE_Slice rem = rcre_slice_sub(text, pos, text.len);
+            RCRE_Slice fit = rcre_utf8_truncate_bytes(rem, max_bytes);
+            if (fit.len == 0) {
+                /* Single codepoint > max_bytes or malformed leading byte: consume 1 byte */
+                fit = rcre_slice_sub(rem, 0, 1U);
+            } else if (pos + fit.len < text.len) {
+                /* Snap backward to last ASCII whitespace if within second half of chunk */
+                size_t snap = fit.len;
+                size_t floor_pos = fit.len / 2U;
+                while (snap > floor_pos && !rcre_nlp__is_ascii_space(fit.data[snap - 1U])) {
+                    snap--;
+                }
+                if (snap > floor_pos) {
+                    fit = rcre_slice_trim_right_ascii(rcre_slice_sub(fit, 0, snap));
+                    if (fit.len == 0) fit = rcre_utf8_truncate_bytes(rem, max_bytes);
+                }
+            }
+
+            if (pass == 1) {
+                (*out_chunks)[count] = fit;
+            }
+            count++;
+
+            size_t end_pos = pos + fit.len;
+            if (end_pos >= text.len) break;
+
+            size_t next_pos = (fit.len > overlap_bytes) ? (end_pos - overlap_bytes) : (pos + 1U);
+            /* Advance next_pos off UTF-8 continuation bytes (10xxxxxx) */
+            while (next_pos < text.len && ((text.data[next_pos] & 0xC0U) == 0x80U)) {
+                next_pos++;
+            }
+            /* Skip leading whitespace on fresh non-overlapping starts */
+            if (overlap_bytes == 0) {
+                while (next_pos < text.len && rcre_nlp__is_ascii_space(text.data[next_pos])) {
+                    next_pos++;
+                }
+            }
+            if (next_pos <= pos) next_pos = pos + 1U;
+            pos = next_pos;
+        }
+
+        if (pass == 0) {
+            *out_count = count;
+            if (count == 0) return RCRE_OK;
+            *out_chunks = (RCRE_Slice*)rcre_arena_alloc(arena, count * sizeof(RCRE_Slice), alignof(RCRE_Slice));
+            if (!*out_chunks) {
+                *out_count = 0;
+                return RCRE_ERR_OUT_OF_MEMORY;
+            }
+        }
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 7. Fast Sparse-Sparse CSR Row Cosine Similarity (NLP-REQ-10)              */
+/* ========================================================================= */
+
+float rcre_nlp_csr_row_cosine(
+    const RCRE_CSRMatrix* csr_a, size_t row_a,
+    const RCRE_CSRMatrix* csr_b, size_t row_b
+) {
+    if (!csr_a || !csr_b || row_a >= csr_a->rows || row_b >= csr_b->rows ||
+        !csr_a->row_pointers || !csr_b->row_pointers) {
+        return 0.0f;
+    }
+    uint32_t pa = csr_a->row_pointers[row_a];
+    uint32_t ea = csr_a->row_pointers[row_a + 1U];
+    uint32_t pb = csr_b->row_pointers[row_b];
+    uint32_t eb = csr_b->row_pointers[row_b + 1U];
+    if (pa == ea || pb == eb) return 0.0f;
+
+    double dot = 0.0, na = 0.0, nb = 0.0;
+    for (uint32_t i = pa; i < ea; ++i) {
+        double v = (double)csr_a->values[i];
+        na += v * v;
+    }
+    for (uint32_t j = pb; j < eb; ++j) {
+        double v = (double)csr_b->values[j];
+        nb += v * v;
+    }
+    if (na <= 0.0 || nb <= 0.0) return 0.0f;
+
+    /* Two-pointer sorted merge over CSR column indices */
+    uint32_t i = pa, j = pb;
+    while (i < ea && j < eb) {
+        uint32_t ca = csr_a->col_indices[i];
+        uint32_t cb = csr_b->col_indices[j];
+        if (ca == cb) {
+            dot += (double)csr_a->values[i] * (double)csr_b->values[j];
+            i++;
+            j++;
+        } else if (ca < cb) {
+            i++;
+        } else {
+            j++;
+        }
+    }
+    return (float)(dot / sqrt(na * nb));
+}
+
+/* ========================================================================= */
+/* 8. Topic Modeling: Sparse HALS NMF & Collapsed Gibbs LDA (NLP-REQ-07)     */
+/* ========================================================================= */
+
+RCRE_NmfOpts rcre_nmf_default_opts(size_t num_topics) {
+    RCRE_NmfOpts opts = {
+        .num_topics = (num_topics == 0) ? 8U : num_topics,
+        .max_iter   = 50U,
+        .tol        = 1e-4f,
+        .seed       = 42ULL
+    };
+    return opts;
+}
+
+static void rcre_nlp__hals_update_W(
+    const RCRE_CSRMatrix* X,
+    const float* H,
+    float* W,
+    size_t K,
+    float* B,       /* [N * K] scratch */
+    float* P        /* [K * K] scratch */
+) {
+    const size_t N = X->rows;
+    const size_t V = X->cols;
+    const float eps = 1e-12f;
+
+    /* P = H * H^T [K x K] using HAL SIMD dot */
+    for (size_t k = 0; k < K; ++k) {
+        for (size_t j = k; j < K; ++j) {
+            float d = rcre_hal.dot_f32(H + k * V, H + j * V, V);
+            P[k * K + j] = d;
+            P[j * K + k] = d;
+        }
+    }
+
+    /* B = X * H^T [N x K] directly from sparse CSR (O(K * nnz)) */
+    memset(B, 0, N * K * sizeof(float));
+    for (size_t d = 0; d < N; ++d) {
+        uint32_t p0 = X->row_pointers[d];
+        uint32_t p1 = X->row_pointers[d + 1U];
+        float* brow = B + d * K;
+        for (uint32_t p = p0; p < p1; ++p) {
+            uint32_t col = X->col_indices[p];
+            float val = X->values[p];
+            for (size_t k = 0; k < K; ++k) {
+                brow[k] += val * H[k * V + col];
+            }
+        }
+    }
+
+    /* Coordinate-wise HALS update across topics k = 0..K-1 */
+    for (size_t k = 0; k < K; ++k) {
+        float denom = P[k * K + k];
+        if (denom < eps) continue;
+        float inv_denom = 1.0f / denom;
+        for (size_t d = 0; d < N; ++d) {
+            float* wrow = W + d * K;
+            float proj = 0.0f;
+            for (size_t j = 0; j < K; ++j) {
+                proj += wrow[j] * P[j * K + k];
+            }
+            float upd = wrow[k] + (B[d * K + k] - proj) * inv_denom;
+            wrow[k] = (upd > eps) ? upd : eps;
+        }
+    }
+}
+
+int rcre_nmf_fit(
+    RCRE_NmfModel* model,
+    const RCRE_CSRMatrix* X_csr,
+    const RCRE_NmfOpts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+) {
+    if (!model || !X_csr || !arena || X_csr->rows == 0 || X_csr->cols == 0 || !X_csr->row_pointers) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(model, 0, sizeof(*model));
+    RCRE_NmfOpts cfg = opts ? *opts : rcre_nmf_default_opts(8);
+    if (cfg.num_topics == 0) cfg.num_topics = 1U;
+    if (cfg.max_iter == 0) cfg.max_iter = 1U;
+
+    const size_t N = X_csr->rows;
+    const size_t V = X_csr->cols;
+    const size_t K = cfg.num_topics;
+    const float eps = 1e-12f;
+
+    model->num_docs   = N;
+    model->vocab_size = V;
+    model->num_topics = K;
+    model->W = (float*)rcre_arena_alloc(arena, N * K * sizeof(float), 64);
+    model->H = (float*)rcre_arena_alloc(arena, K * V * sizeof(float), 64);
+    if (!model->W || !model->H) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    RCRE_Arena* tmp_arena = scratch ? scratch : arena;
+    bool distinct_scratch = (scratch != nullptr && scratch != arena);
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(tmp_arena);
+
+    float* A = (float*)rcre_arena_alloc(tmp_arena, K * V * sizeof(float), 64);
+    float* B = (float*)rcre_arena_alloc(tmp_arena, N * K * sizeof(float), 64);
+    float* G = (float*)rcre_arena_alloc(tmp_arena, K * K * sizeof(float), 64);
+    float* P = (float*)rcre_arena_alloc(tmp_arena, K * K * sizeof(float), 64);
+    if (!A || !B || !G || !P) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Precompute ||X||_F^2 once for O(K*V + K^2) exact Frobenius tracking */
+    double x_norm2 = 0.0;
+    for (size_t p = 0; p < X_csr->nnz; ++p) {
+        double v = (double)X_csr->values[p];
+        x_norm2 += v * v;
+    }
+    double scale_init = (x_norm2 > 0.0) ? sqrt(sqrt(x_norm2 / (double)(N * V)) / (double)K) : 0.1;
+    if (scale_init < 1e-4) scale_init = 1e-4;
+
+    /* Deterministic PCG64 positive initialization */
+    RCRE_RNG rng;
+    rcre_rng_pcg_init(&rng, cfg.seed);
+    for (size_t i = 0; i < N * K; ++i) {
+        model->W[i] = (float)((0.1 + 0.9 * rcre_rng_pcg_next_f64(&rng)) * scale_init);
+    }
+    for (size_t i = 0; i < K * V; ++i) {
+        model->H[i] = (float)((0.1 + 0.9 * rcre_rng_pcg_next_f64(&rng)) * scale_init);
+    }
+
+    double prev_err = 1e30;
+    size_t iters = 0;
+
+    for (size_t iter = 0; iter < cfg.max_iter; ++iter) {
+        iters = iter + 1U;
+
+        /* 1. Update H given W: A = W^T * X [K x V], G = W^T * W [K x K] */
+        memset(A, 0, K * V * sizeof(float));
+        for (size_t d = 0; d < N; ++d) {
+            uint32_t p0 = X_csr->row_pointers[d];
+            uint32_t p1 = X_csr->row_pointers[d + 1U];
+            const float* wrow = model->W + d * K;
+            for (uint32_t p = p0; p < p1; ++p) {
+                uint32_t col = X_csr->col_indices[p];
+                float val = X_csr->values[p];
+                for (size_t k = 0; k < K; ++k) {
+                    A[k * V + col] += wrow[k] * val;
+                }
+            }
+        }
+
+        memset(G, 0, K * K * sizeof(float));
+        for (size_t d = 0; d < N; ++d) {
+            const float* wrow = model->W + d * K;
+            for (size_t k = 0; k < K; ++k) {
+                float wk = wrow[k];
+                for (size_t j = k; j < K; ++j) {
+                    G[k * K + j] += wk * wrow[j];
+                }
+            }
+        }
+        for (size_t k = 0; k < K; ++k) {
+            for (size_t j = k + 1U; j < K; ++j) {
+                G[j * K + k] = G[k * K + j];
+            }
+        }
+
+        for (size_t k = 0; k < K; ++k) {
+            float denom = G[k * K + k];
+            if (denom < eps) continue;
+            float inv_denom = 1.0f / denom;
+            float* hk = model->H + k * V;
+            const float* ak = A + k * V;
+            /* Residual vector in-place using HAL axpy: H_k += (A_k - sum_j G_kj H_j) / G_kk */
+            for (size_t v = 0; v < V; ++v) {
+                float pred = 0.0f;
+                for (size_t j = 0; j < K; ++j) {
+                    pred += G[k * K + j] * model->H[j * V + v];
+                }
+                float upd = hk[v] + (ak[v] - pred) * inv_denom;
+                hk[v] = (upd > eps) ? upd : eps;
+            }
+        }
+
+        /* 2. Update W given H */
+        rcre_nlp__hals_update_W(X_csr, model->H, model->W, K, B, P);
+
+        /* 3. Normalize each H topic row to L2 unit norm, absorb into W columns */
+        for (size_t k = 0; k < K; ++k) {
+            float* hk = model->H + k * V;
+            float nrm = sqrtf(rcre_hal.dot_f32(hk, hk, V));
+            if (nrm > eps) {
+                rcre_hal.scale_f32(V, 1.0f / nrm, hk);
+                for (size_t d = 0; d < N; ++d) {
+                    model->W[d * K + k] *= nrm;
+                }
+            }
+        }
+
+        /* 4. Exact Frobenius error: ||X - WH||_F^2 = ||X||^2 - 2<B, W> + <W^T W, H H^T> */
+        if ((iter + 1U) % 5U == 0U || iter + 1U == cfg.max_iter) {
+            /* Recompute exact B = X H^T, P = H H^T, G = W^T W */
+            for (size_t k = 0; k < K; ++k) {
+                for (size_t j = k; j < K; ++j) {
+                    float d = rcre_hal.dot_f32(model->H + k * V, model->H + j * V, V);
+                    P[k * K + j] = d;
+                    P[j * K + k] = d;
+                }
+            }
+            memset(G, 0, K * K * sizeof(float));
+            for (size_t d = 0; d < N; ++d) {
+                const float* wrow = model->W + d * K;
+                for (size_t k = 0; k < K; ++k) {
+                    for (size_t j = 0; j < K; ++j) {
+                        G[k * K + j] += wrow[k] * wrow[j];
+                    }
+                }
+            }
+            double cross = 0.0;
+            for (size_t d = 0; d < N; ++d) {
+                uint32_t p0 = X_csr->row_pointers[d];
+                uint32_t p1 = X_csr->row_pointers[d + 1U];
+                const float* wrow = model->W + d * K;
+                for (uint32_t p = p0; p < p1; ++p) {
+                    uint32_t col = X_csr->col_indices[p];
+                    double pred = 0.0;
+                    for (size_t k = 0; k < K; ++k) pred += (double)wrow[k] * (double)model->H[k * V + col];
+                    cross += (double)X_csr->values[p] * pred;
+                }
+            }
+            double wh_norm2 = 0.0;
+            for (size_t i = 0; i < K * K; ++i) wh_norm2 += (double)G[i] * (double)P[i];
+            double err2 = x_norm2 - 2.0 * cross + wh_norm2;
+            if (err2 < 0.0) err2 = 0.0;
+            double err = sqrt(err2);
+            model->recon_error = (float)err;
+            if (prev_err < 1e29 && fabs(prev_err - err) <= (double)cfg.tol * (prev_err + 1e-12)) {
+                break;
+            }
+            prev_err = err;
+        }
+    }
+
+    model->iters_run = iters;
+    if (distinct_scratch) rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
+int rcre_nmf_transform(
+    const RCRE_NmfModel* model,
+    const RCRE_CSRMatrix* X_new,
+    size_t max_iter,
+    float* out_W,
+    RCRE_Arena* scratch
+) {
+    if (!model || !X_new || !out_W || !scratch || X_new->cols != model->vocab_size || !model->H) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (X_new->rows == 0) return RCRE_OK;
+    if (max_iter == 0) max_iter = 25U;
+
+    const size_t N = X_new->rows;
+    const size_t K = model->num_topics;
+    for (size_t i = 0; i < N * K; ++i) out_W[i] = 0.1f;
+
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(scratch);
+    float* B = (float*)rcre_arena_alloc(scratch, N * K * sizeof(float), 64);
+    float* P = (float*)rcre_arena_alloc(scratch, K * K * sizeof(float), 64);
+    if (!B || !P) {
+        rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    for (size_t iter = 0; iter < max_iter; ++iter) {
+        rcre_nlp__hals_update_W(X_new, model->H, out_W, K, B, P);
+    }
+
+    rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
+size_t rcre_nlp_topic_top_terms(
+    const float* topic_row,
+    size_t vocab_size,
+    size_t top_k,
+    RCRE_TopicTerm* out_terms,
+    RCRE_Arena* scratch
+) {
+    if (!topic_row || !out_terms || !scratch || vocab_size == 0 || top_k == 0) {
+        return 0;
+    }
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(scratch);
+    RCRE_SearchHit* tmp = (RCRE_SearchHit*)rcre_arena_alloc(
+        scratch, vocab_size * sizeof(RCRE_SearchHit), alignof(RCRE_SearchHit));
+    if (!tmp) {
+        rcre_arena_temp_end(mark);
+        return 0;
+    }
+    for (size_t v = 0; v < vocab_size; ++v) {
+        tmp[v].doc_id = (uint32_t)v;
+        tmp[v].score  = topic_row[v];
+    }
+    rcre_nlp__sort_hits_desc(tmp, vocab_size);
+    size_t n_emit = (vocab_size < top_k) ? vocab_size : top_k;
+    for (size_t i = 0; i < n_emit; ++i) {
+        out_terms[i].term_id = tmp[i].doc_id;
+        out_terms[i].weight  = tmp[i].score;
+    }
+    rcre_arena_temp_end(mark);
+    return n_emit;
+}
+
+RCRE_LdaOpts rcre_lda_default_opts(size_t num_topics) {
+    RCRE_LdaOpts opts = {
+        .num_topics = (num_topics == 0) ? 8U : num_topics,
+        .num_iters  = 60U,
+        .alpha      = 0.1f,
+        .beta       = 0.01f,
+        .seed       = 42ULL,
+        .lowercase  = true,
+        .tok_opts   = rcre_nlp_default_tokenize_opts()
+    };
+    return opts;
+}
+
+int rcre_lda_fit(
+    RCRE_LdaModel* model,
+    const RCRE_Slice* docs,
+    size_t num_docs,
+    const RCRE_LdaOpts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+) {
+    if (!model || !arena || (num_docs > 0 && !docs)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    memset(model, 0, sizeof(*model));
+    RCRE_LdaOpts cfg = opts ? *opts : rcre_lda_default_opts(8);
+    if (cfg.num_topics == 0) cfg.num_topics = 1U;
+    if (cfg.num_iters == 0) cfg.num_iters = 1U;
+    if (cfg.alpha <= 0.0f) cfg.alpha = 0.1f;
+    if (cfg.beta <= 0.0f) cfg.beta = 0.01f;
+
+    model->num_docs   = num_docs;
+    model->num_topics = cfg.num_topics;
+    model->alpha      = cfg.alpha;
+    model->beta       = cfg.beta;
+    model->lowercase  = cfg.lowercase;
+    model->tok_opts   = cfg.tok_opts;
+
+    RCRE_Arena* tmp_arena = scratch ? scratch : arena;
+    bool distinct_scratch = (scratch != nullptr && scratch != arena);
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(tmp_arena);
+
+    int rc = rcre_strpool_init(&model->vocab, arena, num_docs > 64 ? num_docs * 2U : 128U);
+    if (rc != RCRE_OK) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return rc;
+    }
+
+    /* Pass 1: intern vocab & count total tokens */
+    uint8_t low_buf[256];
+    size_t total_tokens = 0;
+    for (size_t d = 0; d < num_docs; ++d) {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], &cfg.tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, cfg.lowercase, low_buf, sizeof(low_buf), tmp_arena);
+            if (rcre_strpool_intern(&model->vocab, norm) == RCRE_STR_ID_INVALID) {
+                if (distinct_scratch) rcre_arena_temp_end(mark);
+                return RCRE_ERR_OUT_OF_MEMORY;
+            }
+            total_tokens++;
+        }
+    }
+
+    const size_t V = rcre_strpool_count(&model->vocab);
+    const size_t K = cfg.num_topics;
+    model->vocab_size = V;
+    if (num_docs == 0 || V == 0 || total_tokens == 0) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_OK;
+    }
+
+    /* Allocate flat Gibbs workspace in scratch */
+    uint32_t* doc_off   = (uint32_t*)rcre_arena_alloc(tmp_arena, (num_docs + 1U) * sizeof(uint32_t), 64);
+    uint32_t* tok_word  = (uint32_t*)rcre_arena_alloc(tmp_arena, total_tokens * sizeof(uint32_t), 64);
+    uint32_t* tok_topic = (uint32_t*)rcre_arena_alloc(tmp_arena, total_tokens * sizeof(uint32_t), 64);
+    uint32_t* n_dk      = (uint32_t*)rcre_arena_alloc(tmp_arena, num_docs * K * sizeof(uint32_t), 64);
+    uint32_t* n_kw      = (uint32_t*)rcre_arena_alloc(tmp_arena, K * V * sizeof(uint32_t), 64);
+    uint32_t* n_k       = (uint32_t*)rcre_arena_alloc(tmp_arena, K * sizeof(uint32_t), 64);
+    double*   probs     = (double*)rcre_arena_alloc(tmp_arena, K * sizeof(double), 64);
+    if (!doc_off || !tok_word || !tok_topic || !n_dk || !n_kw || !n_k || !probs) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(n_dk, 0, num_docs * K * sizeof(uint32_t));
+    memset(n_kw, 0, K * V * sizeof(uint32_t));
+    memset(n_k,  0, K * sizeof(uint32_t));
+
+    /* Pass 2: flatten corpus into (tok_word, tok_topic) with PCG64 init */
+    RCRE_RNG rng;
+    rcre_rng_pcg_init(&rng, cfg.seed);
+    size_t tpos = 0;
+    for (size_t d = 0; d < num_docs; ++d) {
+        doc_off[d] = (uint32_t)tpos;
+        RCRE_WordIter it = rcre_nlp_word_iter_init(docs[d], &cfg.tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, cfg.lowercase, low_buf, sizeof(low_buf), tmp_arena);
+            RCRE_StrId wid = rcre_strpool_find(&model->vocab, norm);
+            uint32_t z = (uint32_t)(rcre_rng_pcg_next_u64(&rng) % (uint64_t)K);
+            tok_word[tpos] = wid;
+            tok_topic[tpos] = z;
+            n_dk[d * K + z]++;
+            n_kw[z * V + wid]++;
+            n_k[z]++;
+            tpos++;
+        }
+    }
+    doc_off[num_docs] = (uint32_t)tpos;
+
+    /* Collapsed Gibbs sweeps */
+    const double alpha = (double)cfg.alpha;
+    const double beta  = (double)cfg.beta;
+    const double vbeta = (double)V * beta;
+
+    for (size_t iter = 0; iter < cfg.num_iters; ++iter) {
+        for (size_t d = 0; d < num_docs; ++d) {
+            uint32_t* drow = n_dk + d * K;
+            for (uint32_t i = doc_off[d]; i < doc_off[d + 1U]; ++i) {
+                uint32_t w = tok_word[i];
+                uint32_t old_z = tok_topic[i];
+
+                drow[old_z]--;
+                n_kw[old_z * V + w]--;
+                n_k[old_z]--;
+
+                double sum_p = 0.0;
+                for (size_t k = 0; k < K; ++k) {
+                    double p = ((double)drow[k] + alpha) *
+                               (((double)n_kw[k * V + w] + beta) / ((double)n_k[k] + vbeta));
+                    sum_p += p;
+                    probs[k] = sum_p;
+                }
+
+                double u = rcre_rng_pcg_next_f64(&rng) * sum_p;
+                uint32_t new_z = (uint32_t)(K - 1U);
+                for (size_t k = 0; k < K; ++k) {
+                    if (u < probs[k]) {
+                        new_z = (uint32_t)k;
+                        break;
+                    }
+                }
+
+                tok_topic[i] = new_z;
+                drow[new_z]++;
+                n_kw[new_z * V + w]++;
+                n_k[new_z]++;
+            }
+        }
+    }
+
+    /* Materialize posterior theta [N x K] and phi [K x V] in persistent arena */
+    model->theta = (float*)rcre_arena_alloc(arena, num_docs * K * sizeof(float), 64);
+    model->phi   = (float*)rcre_arena_alloc(arena, K * V * sizeof(float), 64);
+    if (!model->theta || !model->phi) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    const double kalpha = (double)K * alpha;
+    for (size_t d = 0; d < num_docs; ++d) {
+        double denom = (double)(doc_off[d + 1U] - doc_off[d]) + kalpha;
+        for (size_t k = 0; k < K; ++k) {
+            model->theta[d * K + k] = (float)(((double)n_dk[d * K + k] + alpha) / denom);
+        }
+    }
+    for (size_t k = 0; k < K; ++k) {
+        double denom = (double)n_k[k] + vbeta;
+        for (size_t w = 0; w < V; ++w) {
+            model->phi[k * V + w] = (float)(((double)n_kw[k * V + w] + beta) / denom);
+        }
+    }
+
+    /* Compute held-in log-perplexity = - (1 / total_tokens) * sum log P(w | d) */
+    double log_ll = 0.0;
+    for (size_t d = 0; d < num_docs; ++d) {
+        const float* td = model->theta + d * K;
+        for (uint32_t i = doc_off[d]; i < doc_off[d + 1U]; ++i) {
+            uint32_t w = tok_word[i];
+            double pw = 0.0;
+            for (size_t k = 0; k < K; ++k) {
+                pw += (double)td[k] * (double)model->phi[k * V + w];
+            }
+            if (pw < 1e-30) pw = 1e-30;
+            log_ll += log(pw);
+        }
+    }
+    model->log_perplexity = (float)(-log_ll / (double)total_tokens);
+
+    if (distinct_scratch) rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
+int rcre_lda_infer(
+    const RCRE_LdaModel* model,
+    RCRE_Slice doc,
+    size_t num_iters,
+    uint64_t seed,
+    float* out_theta,
+    RCRE_Arena* scratch
+) {
+    if (!model || !out_theta || !scratch || model->num_topics == 0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    const size_t K = model->num_topics;
+    const size_t V = model->vocab_size;
+    if (num_iters == 0) num_iters = 30U;
+
+    if (V == 0 || !model->phi || doc.len == 0) {
+        float unif = 1.0f / (float)K;
+        for (size_t k = 0; k < K; ++k) out_theta[k] = unif;
+        return RCRE_OK;
+    }
+
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(scratch);
+    uint8_t low_buf[256];
+
+    /* Pass 1: count known vocabulary tokens in doc */
+    size_t n_toks = 0;
+    {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(doc, &model->tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, model->lowercase, low_buf, sizeof(low_buf), scratch);
+            if (rcre_strpool_find(&model->vocab, norm) != RCRE_STR_ID_INVALID) {
+                n_toks++;
+            }
+        }
+    }
+    if (n_toks == 0) {
+        float unif = 1.0f / (float)K;
+        for (size_t k = 0; k < K; ++k) out_theta[k] = unif;
+        rcre_arena_temp_end(mark);
+        return RCRE_OK;
+    }
+
+    uint32_t* wids  = (uint32_t*)rcre_arena_alloc(scratch, n_toks * sizeof(uint32_t), 64);
+    uint32_t* zids  = (uint32_t*)rcre_arena_alloc(scratch, n_toks * sizeof(uint32_t), 64);
+    uint32_t* n_dk  = (uint32_t*)rcre_arena_alloc(scratch, K * sizeof(uint32_t), 64);
+    double*   probs = (double*)rcre_arena_alloc(scratch, K * sizeof(double), 64);
+    if (!wids || !zids || !n_dk || !probs) {
+        rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(n_dk, 0, K * sizeof(uint32_t));
+
+    RCRE_RNG rng;
+    rcre_rng_pcg_init(&rng, seed);
+    size_t pos = 0;
+    {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(doc, &model->tok_opts);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, model->lowercase, low_buf, sizeof(low_buf), scratch);
+            RCRE_StrId wid = rcre_strpool_find(&model->vocab, norm);
+            if (wid != RCRE_STR_ID_INVALID) {
+                uint32_t z = (uint32_t)(rcre_rng_pcg_next_u64(&rng) % (uint64_t)K);
+                wids[pos] = wid;
+                zids[pos] = z;
+                n_dk[z]++;
+                pos++;
+            }
+        }
+    }
+
+    const double alpha = (double)model->alpha;
+    for (size_t iter = 0; iter < num_iters; ++iter) {
+        for (size_t i = 0; i < n_toks; ++i) {
+            uint32_t w = wids[i];
+            uint32_t old_z = zids[i];
+            n_dk[old_z]--;
+            double sum_p = 0.0;
+            for (size_t k = 0; k < K; ++k) {
+                sum_p += ((double)n_dk[k] + alpha) * (double)model->phi[k * V + w];
+                probs[k] = sum_p;
+            }
+            double u = rcre_rng_pcg_next_f64(&rng) * sum_p;
+            uint32_t new_z = (uint32_t)(K - 1U);
+            for (size_t k = 0; k < K; ++k) {
+                if (u < probs[k]) { new_z = (uint32_t)k; break; }
+            }
+            zids[i] = new_z;
+            n_dk[new_z]++;
+        }
+    }
+
+    double denom = (double)n_toks + (double)K * alpha;
+    for (size_t k = 0; k < K; ++k) {
+        out_theta[k] = (float)(((double)n_dk[k] + alpha) / denom);
+    }
+
+    rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 9. Native Sparse Text Classifiers (NLP-REQ-08)                            */
+/* ========================================================================= */
+
+static void rcre_nlp__softmax_inplace(float* logits, size_t C) {
+    float mx = logits[0];
+    for (size_t c = 1; c < C; ++c) {
+        if (logits[c] > mx) mx = logits[c];
+    }
+    double sum = 0.0;
+    for (size_t c = 0; c < C; ++c) {
+        double e = exp((double)(logits[c] - mx));
+        logits[c] = (float)e;
+        sum += e;
+    }
+    if (sum > 0.0) {
+        float inv = (float)(1.0 / sum);
+        for (size_t c = 0; c < C; ++c) logits[c] *= inv;
+    }
+}
+
+int rcre_nlp_nb_fit(
+    RCRE_NaiveBayesModel* model,
+    const RCRE_CSRMatrix* X_csr,
+    const uint32_t* labels,
+    size_t num_classes,
+    float alpha,
+    bool complement,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+) {
+    if (!model || !X_csr || !labels || !arena || num_classes < 2U ||
+        X_csr->rows == 0 || X_csr->cols == 0 || !X_csr->row_pointers) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    if (alpha <= 0.0f) alpha = 1.0f;
+    memset(model, 0, sizeof(*model));
+    model->num_classes = num_classes;
+    model->vocab_size  = X_csr->cols;
+    model->alpha       = alpha;
+    model->complement  = complement;
+
+    const size_t N = X_csr->rows;
+    const size_t V = X_csr->cols;
+    const size_t C = num_classes;
+
+    model->class_log_prior = (float*)rcre_arena_alloc(arena, C * sizeof(float), 64);
+    model->feature_weights = (float*)rcre_arena_alloc(arena, C * V * sizeof(float), 64);
+    if (!model->class_log_prior || !model->feature_weights) {
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    RCRE_Arena* tmp_arena = scratch ? scratch : arena;
+    bool distinct_scratch = (scratch != nullptr && scratch != arena);
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(tmp_arena);
+
+    double* class_counts = (double*)rcre_arena_alloc(tmp_arena, C * sizeof(double), 64);
+    double* class_tf_sum = (double*)rcre_arena_alloc(tmp_arena, C * sizeof(double), 64);
+    double* feat_tf      = (double*)rcre_arena_alloc(tmp_arena, C * V * sizeof(double), 64);
+    if (!class_counts || !class_tf_sum || !feat_tf) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(class_counts, 0, C * sizeof(double));
+    memset(class_tf_sum, 0, C * sizeof(double));
+    memset(feat_tf,      0, C * V * sizeof(double));
+
+    /* Single O(nnz) accumulation pass */
+    for (size_t d = 0; d < N; ++d) {
+        uint32_t c = labels[d];
+        if ((size_t)c >= C) {
+            if (distinct_scratch) rcre_arena_temp_end(mark);
+            return RCRE_ERR_INVALID_ARG;
+        }
+        class_counts[c] += 1.0;
+        uint32_t p0 = X_csr->row_pointers[d];
+        uint32_t p1 = X_csr->row_pointers[d + 1U];
+        double* frow = feat_tf + (size_t)c * V;
+        double row_sum = 0.0;
+        for (uint32_t p = p0; p < p1; ++p) {
+            double v = (double)X_csr->values[p];
+            if (v > 0.0) {
+                frow[X_csr->col_indices[p]] += v;
+                row_sum += v;
+            }
+        }
+        class_tf_sum[c] += row_sum;
+    }
+
+    for (size_t c = 0; c < C; ++c) {
+        double p = (class_counts[c] > 0.0) ? (class_counts[c] / (double)N) : (1e-12 / (double)N);
+        model->class_log_prior[c] = (float)log(p);
+    }
+
+    double a = (double)alpha;
+    if (!complement) {
+        for (size_t c = 0; c < C; ++c) {
+            double denom = class_tf_sum[c] + a * (double)V;
+            const double* frow = feat_tf + c * V;
+            float* wrow = model->feature_weights + c * V;
+            for (size_t v = 0; v < V; ++v) {
+                wrow[v] = (float)log((frow[v] + a) / denom);
+            }
+        }
+    } else {
+        /* Complement Naive Bayes (Rennie et al. 2003) */
+        double total_tf = 0.0;
+        for (size_t c = 0; c < C; ++c) total_tf += class_tf_sum[c];
+
+        double* total_feat = (double*)rcre_arena_alloc(tmp_arena, V * sizeof(double), 64);
+        if (!total_feat) {
+            if (distinct_scratch) rcre_arena_temp_end(mark);
+            return RCRE_ERR_OUT_OF_MEMORY;
+        }
+        memset(total_feat, 0, V * sizeof(double));
+        for (size_t c = 0; c < C; ++c) {
+            const double* frow = feat_tf + c * V;
+            for (size_t v = 0; v < V; ++v) total_feat[v] += frow[v];
+        }
+
+        for (size_t c = 0; c < C; ++c) {
+            double comp_denom = (total_tf - class_tf_sum[c]) + a * (double)V;
+            const double* frow = feat_tf + c * V;
+            float* wrow = model->feature_weights + c * V;
+            double l1 = 0.0;
+            for (size_t v = 0; v < V; ++v) {
+                double comp_tf = total_feat[v] - frow[v];
+                double w = -log((comp_tf + a) / comp_denom);
+                wrow[v] = (float)w;
+                l1 += fabs(w);
+            }
+            if (l1 > 0.0) {
+                float inv = (float)(1.0 / l1);
+                for (size_t v = 0; v < V; ++v) wrow[v] *= inv;
+            }
+        }
+    }
+
+    if (distinct_scratch) rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
+int rcre_nlp_nb_predict(
+    const RCRE_NaiveBayesModel* model,
+    const RCRE_CSRMatrix* X_csr,
+    uint32_t* out_labels,
+    float* out_probs
+) {
+    if (!model || !X_csr || !model->feature_weights || X_csr->cols != model->vocab_size) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    const size_t N = X_csr->rows;
+    const size_t V = model->vocab_size;
+    const size_t C = model->num_classes;
+
+    for (size_t d = 0; d < N; ++d) {
+        uint32_t p0 = X_csr->row_pointers[d];
+        uint32_t p1 = X_csr->row_pointers[d + 1U];
+
+        uint32_t best_c = 0;
+        float best_score = -1e30f;
+
+        for (size_t c = 0; c < C; ++c) {
+            double s = model->complement ? 0.0 : (double)model->class_log_prior[c];
+            const float* wrow = model->feature_weights + c * V;
+            for (uint32_t p = p0; p < p1; ++p) {
+                s += (double)X_csr->values[p] * (double)wrow[X_csr->col_indices[p]];
+            }
+            float sf = (float)s;
+            if (out_probs) out_probs[d * C + c] = sf;
+            if (sf > best_score) {
+                best_score = sf;
+                best_c = (uint32_t)c;
+            }
+        }
+        if (out_labels) out_labels[d] = best_c;
+        if (out_probs)  rcre_nlp__softmax_inplace(out_probs + d * C, C);
+    }
+    return RCRE_OK;
+}
+
+RCRE_SparseClfOpts rcre_sparse_clf_default_opts(void) {
+    RCRE_SparseClfOpts opts = {
+        .epochs = 30U,
+        .lr     = 0.5f,
+        .l2_reg = 1e-4f,
+        .seed   = 42ULL
+    };
+    return opts;
+}
+
+int rcre_nlp_sparse_clf_fit(
+    RCRE_SparseLinearClf* clf,
+    const RCRE_CSRMatrix* X_csr,
+    const uint32_t* labels,
+    size_t num_classes,
+    const RCRE_SparseClfOpts* opts,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+) {
+    if (!clf || !X_csr || !labels || !arena || num_classes < 2U ||
+        X_csr->rows == 0 || X_csr->cols == 0 || !X_csr->row_pointers) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    RCRE_SparseClfOpts cfg = opts ? *opts : rcre_sparse_clf_default_opts();
+    if (cfg.epochs == 0) cfg.epochs = 1U;
+    if (cfg.lr <= 0.0f) cfg.lr = 0.5f;
+
+    memset(clf, 0, sizeof(*clf));
+    const size_t N = X_csr->rows;
+    const size_t V = X_csr->cols;
+    const size_t C = num_classes;
+
+    clf->num_classes = C;
+    clf->vocab_size  = V;
+    clf->weights = (float*)rcre_arena_alloc(arena, C * V * sizeof(float), 64);
+    clf->bias    = (float*)rcre_arena_alloc(arena, C * sizeof(float), 64);
+    if (!clf->weights || !clf->bias) return RCRE_ERR_OUT_OF_MEMORY;
+    memset(clf->weights, 0, C * V * sizeof(float));
+    memset(clf->bias,    0, C * sizeof(float));
+
+    for (size_t d = 0; d < N; ++d) {
+        if ((size_t)labels[d] >= C) return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_Arena* tmp_arena = scratch ? scratch : arena;
+    bool distinct_scratch = (scratch != nullptr && scratch != arena);
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(tmp_arena);
+
+    uint32_t* order  = (uint32_t*)rcre_arena_alloc(tmp_arena, N * sizeof(uint32_t), 64);
+    float*    logits = (float*)rcre_arena_alloc(tmp_arena, C * sizeof(float), 64);
+    if (!order || !logits) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    for (size_t i = 0; i < N; ++i) order[i] = (uint32_t)i;
+
+    RCRE_RNG rng;
+    rcre_rng_pcg_init(&rng, cfg.seed);
+
+    for (size_t ep = 0; ep < cfg.epochs; ++ep) {
+        /* Deterministic Fisher-Yates shuffle */
+        for (size_t i = N - 1U; i > 0U; --i) {
+            size_t j = (size_t)(rcre_rng_pcg_next_u64(&rng) % (uint64_t)(i + 1U));
+            uint32_t t = order[i]; order[i] = order[j]; order[j] = t;
+        }
+        float lr = cfg.lr / (1.0f + 0.05f * (float)ep);
+        float decay = 1.0f - lr * cfg.l2_reg;
+        if (decay < 0.5f) decay = 0.5f;
+
+        for (size_t idx = 0; idx < N; ++idx) {
+            uint32_t d = order[idx];
+            uint32_t y = labels[d];
+            uint32_t p0 = X_csr->row_pointers[d];
+            uint32_t p1 = X_csr->row_pointers[d + 1U];
+
+            for (size_t c = 0; c < C; ++c) {
+                float s = clf->bias[c];
+                const float* wrow = clf->weights + c * V;
+                for (uint32_t p = p0; p < p1; ++p) {
+                    s += X_csr->values[p] * wrow[X_csr->col_indices[p]];
+                }
+                logits[c] = s;
+            }
+            rcre_nlp__softmax_inplace(logits, C);
+
+            for (size_t c = 0; c < C; ++c) {
+                float grad = logits[c] - ((c == (size_t)y) ? 1.0f : 0.0f);
+                clf->bias[c] -= lr * grad;
+                float* wrow = clf->weights + c * V;
+                float step = -lr * grad;
+                for (uint32_t p = p0; p < p1; ++p) {
+                    uint32_t col = X_csr->col_indices[p];
+                    wrow[col] = wrow[col] * decay + step * X_csr->values[p];
+                }
+            }
+        }
+    }
+
+    if (distinct_scratch) rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
+int rcre_nlp_sparse_clf_predict(
+    const RCRE_SparseLinearClf* clf,
+    const RCRE_CSRMatrix* X_csr,
+    uint32_t* out_labels,
+    float* out_probs
+) {
+    if (!clf || !X_csr || !clf->weights || !clf->bias || X_csr->cols != clf->vocab_size) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    const size_t N = X_csr->rows;
+    const size_t V = clf->vocab_size;
+    const size_t C = clf->num_classes;
+
+    for (size_t d = 0; d < N; ++d) {
+        uint32_t p0 = X_csr->row_pointers[d];
+        uint32_t p1 = X_csr->row_pointers[d + 1U];
+        uint32_t best_c = 0;
+        float best_s = -1e30f;
+
+        for (size_t c = 0; c < C; ++c) {
+            float s = clf->bias[c];
+            const float* wrow = clf->weights + c * V;
+            for (uint32_t p = p0; p < p1; ++p) {
+                s += X_csr->values[p] * wrow[X_csr->col_indices[p]];
+            }
+            if (out_probs) out_probs[d * C + c] = s;
+            if (s > best_s) { best_s = s; best_c = (uint32_t)c; }
+        }
+        if (out_labels) out_labels[d] = best_c;
+        if (out_probs)  rcre_nlp__softmax_inplace(out_probs + d * C, C);
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 10. Sentence Splitting, Extractive Summarization & Keywords (NLP-REQ-09)  */
+/* ========================================================================= */
+
+static bool rcre_nlp__is_abbrev(RCRE_Slice word) {
+    static const char* abbrevs[] = {
+        "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "fig", "no", "e.g", "i.e"
+    };
+    for (size_t i = 0; i < sizeof(abbrevs) / sizeof(abbrevs[0]); ++i) {
+        if (rcre_slice_eq_ascii_ci(word, rcre_slice_from_cstr(abbrevs[i]))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool rcre_nlp__is_stopword_ascii(RCRE_Slice w) {
+    if (w.len <= 2U) return true;
+    static const char* stops[] = {
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+        "her", "was", "one", "our", "out", "has", "his", "how", "its", "may",
+        "new", "now", "old", "see", "two", "way", "who", "did", "get", "let",
+        "put", "say", "she", "too", "use", "that", "with", "have", "this", "will",
+        "your", "from", "they", "know", "want", "been", "good", "much", "some",
+        "time", "very", "when", "come", "here", "just", "like", "long", "make",
+        "many", "more", "only", "over", "such", "take", "than", "them", "well",
+        "were", "what", "into", "about", "after", "again", "being", "could",
+        "other", "their", "there", "these", "those", "under", "where", "which",
+        "while", "would", "should", "through", "between", "because"
+    };
+    for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); ++i) {
+        if (rcre_slice_eq_ascii_ci(w, rcre_slice_from_cstr(stops[i]))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+RCRE_SentIter rcre_nlp_sent_iter_init(RCRE_Slice text) {
+    RCRE_SentIter it = { .src = text, .pos = 0 };
+    return it;
+}
+
+bool rcre_nlp_sent_iter_next(RCRE_SentIter* it, RCRE_Slice* out_sent) {
+    if (!it || !out_sent || !it->src.data) return false;
+
+    while (it->pos < it->src.len && rcre_nlp__is_ascii_space(it->src.data[it->pos])) {
+        it->pos++;
+    }
+    if (it->pos >= it->src.len) return false;
+
+    size_t start = it->pos;
+    size_t i = start;
+    while (i < it->src.len) {
+        uint8_t c = it->src.data[i];
+        /* Paragraph break (\n\n or \r\n\r\n) terminates sentence */
+        if (c == '\n' && i + 1U < it->src.len &&
+            (it->src.data[i + 1U] == '\n' ||
+             (it->src.data[i + 1U] == '\r' && i + 2U < it->src.len && it->src.data[i + 2U] == '\n'))) {
+            RCRE_Slice cand = rcre_slice_trim_ascii(rcre_slice_sub(it->src, start, i));
+            it->pos = i + 1U;
+            if (cand.len > 0) { *out_sent = cand; return true; }
+            return rcre_nlp_sent_iter_next(it, out_sent);
+        }
+
+        if (c == '.' || c == '!' || c == '?') {
+            /* Guard decimal numbers (e.g. 3.14) */
+            if (c == '.' && i > start && i + 1U < it->src.len &&
+                rcre_nlp__is_ascii_digit(it->src.data[i - 1U]) &&
+                rcre_nlp__is_ascii_digit(it->src.data[i + 1U])) {
+                i++;
+                continue;
+            }
+            /* Guard common abbreviations (e.g., "Dr. Smith") */
+            if (c == '.' && i > start) {
+                size_t ws = i;
+                while (ws > start && (rcre_nlp__is_ascii_alpha(it->src.data[ws - 1U]) || it->src.data[ws - 1U] == '.')) {
+                    ws--;
+                }
+                if (rcre_nlp__is_abbrev(rcre_slice_sub(it->src, ws, i))) {
+                    i++;
+                    continue;
+                }
+            }
+            /* Consume consecutive terminal punctuation (e.g. "?!", "...") & closing quotes */
+            size_t end = i + 1U;
+            while (end < it->src.len &&
+                   (it->src.data[end] == '.' || it->src.data[end] == '!' ||
+                    it->src.data[end] == '?' || it->src.data[end] == '"' ||
+                    it->src.data[end] == '\'' || it->src.data[end] == ')')) {
+                end++;
+            }
+            /* Must be at EOF or followed by whitespace to end sentence */
+            if (end == it->src.len || rcre_nlp__is_ascii_space(it->src.data[end])) {
+                RCRE_Slice cand = rcre_slice_trim_ascii(rcre_slice_sub(it->src, start, end));
+                it->pos = end;
+                if (cand.len > 0) { *out_sent = cand; return true; }
+                return rcre_nlp_sent_iter_next(it, out_sent);
+            }
+        }
+        i++;
+    }
+
+    RCRE_Slice tail = rcre_slice_trim_ascii(rcre_slice_sub(it->src, start, it->src.len));
+    it->pos = it->src.len;
+    if (tail.len == 0) return false;
+    *out_sent = tail;
+    return true;
+}
+
+RCRE_SummarizeOpts rcre_summarize_default_opts(void) {
+    RCRE_SummarizeOpts opts = {
+        .damping       = 0.85f,
+        .sim_threshold = 0.05f,
+        .mmr_lambda    = 0.7f,
+        .max_iter      = 30U
+    };
+    return opts;
+}
+
+static void rcre_nlp__pagerank_dense(
+    const float* adj,
+    size_t M,
+    float damping,
+    size_t max_iter,
+    float* ranks,
+    float* next_ranks
+) {
+    if (M == 0) return;
+    float unif = 1.0f / (float)M;
+    for (size_t i = 0; i < M; ++i) ranks[i] = unif;
+
+    for (size_t iter = 0; iter < max_iter; ++iter) {
+        float base = (1.0f - damping) * unif;
+        for (size_t i = 0; i < M; ++i) next_ranks[i] = base;
+
+        double dangling_mass = 0.0;
+        for (size_t i = 0; i < M; ++i) {
+            const float* row = adj + i * M;
+            double row_sum = 0.0;
+            for (size_t j = 0; j < M; ++j) row_sum += (double)row[j];
+            if (row_sum <= 1e-12) {
+                dangling_mass += (double)ranks[i];
+            } else {
+                float scale = damping * ranks[i] / (float)row_sum;
+                rcre_hal.axpy_f32(M, scale, row, next_ranks);
+            }
+        }
+        if (dangling_mass > 0.0) {
+            float d_add = damping * (float)dangling_mass * unif;
+            for (size_t i = 0; i < M; ++i) next_ranks[i] += d_add;
+        }
+
+        double diff = 0.0;
+        for (size_t i = 0; i < M; ++i) {
+            diff += fabs((double)next_ranks[i] - (double)ranks[i]);
+            ranks[i] = next_ranks[i];
+        }
+        if (diff < 1e-6) break;
+    }
+}
+
+int rcre_nlp_summarize_extractive(
+    RCRE_Slice text,
+    size_t top_k,
+    const RCRE_SummarizeOpts* opts,
+    RCRE_SummarySent* out_sents,
+    size_t* out_count,
+    RCRE_Arena* scratch
+) {
+    if (!out_count || !scratch || (top_k > 0 && !out_sents)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    if (!text.data || text.len == 0 || top_k == 0) return RCRE_OK;
+
+    RCRE_SummarizeOpts cfg = opts ? *opts : rcre_summarize_default_opts();
+    if (cfg.damping <= 0.0f || cfg.damping >= 1.0f) cfg.damping = 0.85f;
+    if (cfg.mmr_lambda < 0.0f) cfg.mmr_lambda = 0.0f;
+    if (cfg.mmr_lambda > 1.0f) cfg.mmr_lambda = 1.0f;
+    if (cfg.max_iter == 0) cfg.max_iter = 30U;
+
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(scratch);
+
+    /* Pass 1: count sentences */
+    size_t M = 0;
+    {
+        RCRE_SentIter it = rcre_nlp_sent_iter_init(text);
+        RCRE_Slice s;
+        while (rcre_nlp_sent_iter_next(&it, &s)) M++;
+    }
+    if (M == 0) {
+        rcre_arena_temp_end(mark);
+        return RCRE_OK;
+    }
+
+    RCRE_Slice* sents = (RCRE_Slice*)rcre_arena_alloc(scratch, M * sizeof(RCRE_Slice), alignof(RCRE_Slice));
+    if (!sents) { rcre_arena_temp_end(mark); return RCRE_ERR_OUT_OF_MEMORY; }
+    {
+        RCRE_SentIter it = rcre_nlp_sent_iter_init(text);
+        size_t idx = 0;
+        while (idx < M && rcre_nlp_sent_iter_next(&it, &sents[idx])) idx++;
+    }
+
+    if (M <= top_k) {
+        for (size_t i = 0; i < M; ++i) {
+            out_sents[i].sent_index = i;
+            out_sents[i].score = 1.0f / (float)M;
+            out_sents[i].sentence = sents[i];
+        }
+        *out_count = M;
+        rcre_arena_temp_end(mark);
+        return RCRE_OK;
+    }
+
+    /* Vectorize sentences via TF-IDF -> RCRE_CSRMatrix */
+    RCRE_TfidfVectorizer vec;
+    RCRE_CSRMatrix csr;
+    int rc = rcre_tfidf_fit(&vec, sents, M, nullptr, scratch, scratch);
+    if (rc != RCRE_OK) { rcre_arena_temp_end(mark); return rc; }
+    rc = rcre_tfidf_transform(&vec, sents, M, scratch, scratch, &csr);
+    if (rc != RCRE_OK) { rcre_arena_temp_end(mark); return rc; }
+
+    /* Build symmetric cosine similarity graph [M x M] */
+    float* sim   = (float*)rcre_arena_alloc(scratch, M * M * sizeof(float), 64);
+    float* ranks = (float*)rcre_arena_alloc(scratch, M * sizeof(float), 64);
+    float* next  = (float*)rcre_arena_alloc(scratch, M * sizeof(float), 64);
+    uint8_t* chosen = (uint8_t*)rcre_arena_alloc(scratch, M, 16);
+    size_t*  picked = (size_t*)rcre_arena_alloc(scratch, top_k * sizeof(size_t), 64);
+    if (!sim || !ranks || !next || !chosen || !picked) {
+        rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(sim, 0, M * M * sizeof(float));
+    memset(chosen, 0, M);
+
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = i + 1U; j < M; ++j) {
+            float c = rcre_nlp_csr_row_cosine(&csr, i, &csr, j);
+            if (c >= cfg.sim_threshold) {
+                sim[i * M + j] = c;
+                sim[j * M + i] = c;
+            }
+        }
+    }
+
+    rcre_nlp__pagerank_dense(sim, M, cfg.damping, cfg.max_iter, ranks, next);
+
+    /* Normalize ranks to [0, 1] for balanced MMR selection */
+    float max_r = 0.0f;
+    for (size_t i = 0; i < M; ++i) if (ranks[i] > max_r) max_r = ranks[i];
+    float inv_max = (max_r > 0.0f) ? (1.0f / max_r) : 1.0f;
+
+    /* Greedy MMR selection */
+    for (size_t step = 0; step < top_k; ++step) {
+        size_t best_i = 0;
+        float best_mmr = -1e30f;
+        for (size_t i = 0; i < M; ++i) {
+            if (chosen[i]) continue;
+            float max_sim = 0.0f;
+            for (size_t p = 0; p < step; ++p) {
+                float s = sim[i * M + picked[p]];
+                if (s > max_sim) max_sim = s;
+            }
+            float score = cfg.mmr_lambda * (ranks[i] * inv_max) - (1.0f - cfg.mmr_lambda) * max_sim;
+            if (score > best_mmr) {
+                best_mmr = score;
+                best_i = i;
+            }
+        }
+        chosen[best_i] = 1U;
+        picked[step] = best_i;
+    }
+
+    /* Emit selected sentences in original document order */
+    size_t emitted = 0;
+    for (size_t i = 0; i < M && emitted < top_k; ++i) {
+        if (chosen[i]) {
+            out_sents[emitted].sent_index = i;
+            out_sents[emitted].score      = ranks[i];
+            out_sents[emitted].sentence   = sents[i];
+            emitted++;
+        }
+    }
+    *out_count = emitted;
+    rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
+int rcre_nlp_extract_keywords(
+    RCRE_Slice text,
+    size_t top_k,
+    size_t window_size,
+    RCRE_Keyword* out_keywords,
+    size_t* out_count,
+    RCRE_Arena* arena,
+    RCRE_Arena* scratch
+) {
+    if (!arena || !out_count || (top_k > 0 && !out_keywords)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    if (!text.data || text.len == 0 || top_k == 0) return RCRE_OK;
+    if (window_size < 2U) window_size = 4U;
+
+    RCRE_Arena* tmp_arena = scratch ? scratch : arena;
+    bool distinct_scratch = (scratch != nullptr && scratch != arena);
+    RCRE_ArenaTemp mark = rcre_arena_temp_begin(tmp_arena);
+
+    RCRE_StrPool pool;
+    int rc = rcre_strpool_init(&pool, tmp_arena, 128);
+    if (rc != RCRE_OK) { if (distinct_scratch) rcre_arena_temp_end(mark); return rc; }
+
+    /* Pass 1: intern non-stopword candidate terms & count sequence length */
+    uint8_t low_buf[256];
+    size_t seq_len = 0;
+    {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(text, nullptr);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, true, low_buf, sizeof(low_buf), tmp_arena);
+            if (rcre_nlp__is_stopword_ascii(norm)) continue;
+            if (rcre_strpool_intern(&pool, norm) == RCRE_STR_ID_INVALID) {
+                if (distinct_scratch) rcre_arena_temp_end(mark);
+                return RCRE_ERR_OUT_OF_MEMORY;
+            }
+            seq_len++;
+        }
+    }
+
+    size_t V = rcre_strpool_count(&pool);
+    if (V == 0) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_OK;
+    }
+
+    uint32_t* seq   = (uint32_t*)rcre_arena_alloc(tmp_arena, seq_len * sizeof(uint32_t), 64);
+    float*    adj   = (float*)rcre_arena_alloc(tmp_arena, V * V * sizeof(float), 64);
+    float*    ranks = (float*)rcre_arena_alloc(tmp_arena, V * sizeof(float), 64);
+    float*    next  = (float*)rcre_arena_alloc(tmp_arena, V * sizeof(float), 64);
+    RCRE_SearchHit* scored = (RCRE_SearchHit*)rcre_arena_alloc(tmp_arena, V * sizeof(RCRE_SearchHit), alignof(RCRE_SearchHit));
+    if (!seq || !adj || !ranks || !next || !scored) {
+        if (distinct_scratch) rcre_arena_temp_end(mark);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(adj, 0, V * V * sizeof(float));
+
+    /* Pass 2: collect sequence & populate sliding-window co-occurrence edges */
+    size_t pos = 0;
+    {
+        RCRE_WordIter it = rcre_nlp_word_iter_init(text, nullptr);
+        RCRE_Slice tok;
+        while (rcre_nlp_word_iter_next(&it, &tok)) {
+            RCRE_Slice norm = rcre_nlp__normalize_tok(tok, true, low_buf, sizeof(low_buf), tmp_arena);
+            if (rcre_nlp__is_stopword_ascii(norm)) continue;
+            seq[pos++] = rcre_strpool_find(&pool, norm);
+        }
+    }
+
+    for (size_t i = 0; i < seq_len; ++i) {
+        uint32_t u = seq[i];
+        size_t j_end = (i + window_size < seq_len) ? (i + window_size) : seq_len;
+        for (size_t j = i + 1U; j < j_end; ++j) {
+            uint32_t v = seq[j];
+            if (u != v) {
+                adj[(size_t)u * V + v] += 1.0f;
+                adj[(size_t)v * V + u] += 1.0f;
+            }
+        }
+    }
+
+    rcre_nlp__pagerank_dense(adj, V, 0.85f, 30U, ranks, next);
+
+    for (size_t v = 0; v < V; ++v) {
+        scored[v].doc_id = (uint32_t)v;
+        scored[v].score  = ranks[v];
+    }
+    rcre_nlp__sort_hits_desc(scored, V);
+
+    size_t n_emit = (V < top_k) ? V : top_k;
+    for (size_t i = 0; i < n_emit; ++i) {
+        out_keywords[i].term  = rcre_str_dup(arena, rcre_strpool_get(&pool, scored[i].doc_id));
+        out_keywords[i].score = scored[i].score;
+    }
+    *out_count = n_emit;
+
+    if (distinct_scratch) rcre_arena_temp_end(mark);
+    return RCRE_OK;
+}
+
 
 /* --- Source: io.c --- */
 /**

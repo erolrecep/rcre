@@ -27,7 +27,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 2
-#define RCRE_VERSION_MINOR 2
+#define RCRE_VERSION_MINOR 6
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -1439,11 +1439,27 @@ int rcre_linalg_trsv_f64(int uplo, int trans, int diag, double alpha,
  * factor (2,3,5,7), Bluestein chirp-z otherwise (primes, products of
  * large primes). Convention: forward X_k = sum_j x_j exp(-2*pi*i*j*k/n);
  * invert uses + and divides by n (numpy convention).
- * in/out may alias (copies are made). 0 on success, -1 on n == 0.
+ * in/out may alias (copies are made). in_re/in_im may be NULL (= zero
+ * half — the real-input case). 0 on success, -1 on n == 0.
  */
 RCRE_NODISCARD int rcre_fft_1d_f64(const double* in_re, const double* in_im,
                                    double* out_re, double* out_im,
                                    size_t n, int invert);
+
+/**
+ * @brief Power-of-two 1-D FFT, F64, IN-PLACE (H9, 2.6.0).
+ *
+ * Iterative radix-2 DIT with a per-call twiddle table (n-1 cos/sin
+ * pairs instead of the generic path's ~n log n). Same convention as
+ * rcre_fft_1d_f64 (forward exp(-2*pi*i*...), inverse + and 1/n scale,
+ * numpy). The summation order differs from the generic path, so the
+ * gate is a precision bar (relative <= 1e-13, tests/test_fft_f64.c),
+ * not bit-identity; results ARE bit-identical across repeated calls
+ * and pool sizes. 0 on success, -1 if n is not a power of two >= 2
+ * or inputs are NULL.
+ */
+RCRE_NODISCARD int rcre_fft_pow2_f64(double* re, double* im, size_t n,
+                                     int invert);
 
 /* ------------------- direct factorizations (H3, 2.2.0) ------------------ */
 
@@ -1778,6 +1794,635 @@ RCRE_NODISCARD int rcre_mg_solve_poisson2d_f32(size_t nx, size_t ny,
                                                RCRE_KrylovCallback cb,
                                                void* user);
 
+/* ------------------- Zarr v3 chunked arrays (H5, 2.2.0) ------------------- */
+
+/**
+ * @file section Out-of-Core Chunked Arrays (H5, 2.2.0)
+ * @brief Zarr v3 chunked ND arrays on the POSIX file store, zero-dependency
+ *        core (identity "bytes" codec always available; the "zstd" codec is
+ *        an opt-in translation unit, src/core/zarr_zstd.c, built when
+ *        RCRE_WITH_ZSTD is defined and libzstd is present — the D1 bridge /
+ *        extras pattern, infrastructure-immune).
+ *
+ * Format conformance: layout-identical to zarr-python 3.x (verified by
+ * `make conformance-zarr`, which round-trips 12 fixed arrays bit-identically
+ * in both directions and skips cleanly without a zarr venv). Store layout:
+ *   <root>/<name>/zarr.json          (array metadata, v3)
+ *   <root>/<name>/c/<i>/<j>/...      (chunk files, no extension, keys joined
+ *                                     with "/" per the v3 default encoding)
+ *   <root>/zarr.json                 (optional group root)
+ * A missing chunk file reads as the fill value (v3 semantics).
+ *
+ * Threading: array-level and chunk-iteration operations take an optional
+ * RCRE_ThreadPool (NULL = serial). The slab partition over the chunk grid
+ * depends only on the chunk count and the pool size; per-chunk work writes
+ * to disjoint buffer regions, so pooled runs are bit-identical to serial
+ * and to each other (the library-wide slab determinism contract).
+ */
+
+typedef enum {
+    RCRE_ZARR_F64  = 0,  /* float64  */
+    RCRE_ZARR_F32  = 1,  /* float32  */
+    RCRE_ZARR_F16  = 2,  /* float16  */
+    RCRE_ZARR_I64  = 3,  /* int64    */
+    RCRE_ZARR_I32  = 4,  /* int32    */
+    RCRE_ZARR_I16  = 5,  /* int16    */
+    RCRE_ZARR_I8   = 6,  /* int8     */
+    RCRE_ZARR_U64  = 7,  /* uint64   */
+    RCRE_ZARR_U32  = 8,  /* uint32   */
+    RCRE_ZARR_U16  = 9,  /* uint16   */
+    RCRE_ZARR_U8   = 10, /* uint8    */
+    RCRE_ZARR_BOOL = 11  /* bool (1 byte, 0/1) */
+} RCRE_ZarrDType;
+
+/** Creation options for rcre_zarr_create. */
+typedef struct {
+    size_t         ndim;
+    const size_t*  shape;        /* logical shape (required, ndim values)   */
+    const size_t*  chunk_shape;  /* chunk grid (required, ndim values)      */
+    RCRE_ZarrDType dtype;
+    double         fill_f64;     /* fill value for float dtypes (NaN/inf ok)*/
+    int64_t        fill_int;     /* fill value for integer dtypes           */
+    uint8_t        fill_bool;    /* fill value for bool                     */
+    int            zstd_level;   /* 0 = identity codec; 1..22 = zstd (needs
+                                     the zstd codec TU, see above)          */
+} RCRE_ZarrCreate;
+
+/** Opaque handle: a Zarr v3 array on a POSIX file store. */
+typedef struct RCRE_ZarrArray RCRE_ZarrArray;
+
+/** @brief Creates the group-root zarr.json ("node_type": "group") so the
+ *  root directory is a valid v3 store for zarr.open(). Returns RCRE_OK. */
+RCRE_NODISCARD int rcre_zarr_create_group_root(const char* root_dir);
+
+/**
+ * @brief Creates a new Zarr v3 array under <root_dir>/<name> (writes
+ *        zarr.json; no chunk files until the first write_chunk).
+ * @return handle on success, NULL on error.
+ */
+RCRE_NODISCARD RCRE_ZarrArray* rcre_zarr_create(const char* root_dir,
+                                                const char* name,
+                                                const RCRE_ZarrCreate* opt);
+
+/** @brief Opens an existing array read/write (metadata must parse; codecs
+ *  must be available in this build). Returns NULL on error. */
+RCRE_NODISCARD RCRE_ZarrArray* rcre_zarr_open(const char* root_dir,
+                                              const char* name);
+void rcre_zarr_close(RCRE_ZarrArray* arr);
+
+/* ---- metadata accessors -------------------------------------------------- */
+int            rcre_zarr_ndim(const RCRE_ZarrArray* arr);
+RCRE_NODISCARD int rcre_zarr_shape(const RCRE_ZarrArray* arr, size_t* out);
+RCRE_NODISCARD int rcre_zarr_chunk_shape(const RCRE_ZarrArray* arr, size_t* out);
+RCRE_ZarrDType rcre_zarr_dtype(const RCRE_ZarrArray* arr);
+size_t         rcre_zarr_itemsize(const RCRE_ZarrArray* arr);
+/** Per-dimension chunk counts (ceil(shape_d / chunk_d)). */
+RCRE_NODISCARD int rcre_zarr_nchunks(const RCRE_ZarrArray* arr, size_t* out);
+/** Full fill value, interpreted per dtype (out pointer may be any of the
+ *  1/2/4/8-byte scalar types matching the dtype). */
+RCRE_NODISCARD int rcre_zarr_fill_value(const RCRE_ZarrArray* arr, void* out);
+/** 1 if the named codec ("bytes"/"zstd") is available in this build. */
+RCRE_NODISCARD int rcre_zarr_codec_available(const char* name);
+
+/**
+ * @brief Registers (or re-registers) a codec in the pipeline table.
+ *  encode receives the recorded level for level-aware codecs (zstd) and 0
+ *  otherwise. Used by the opt-in zstd TU; user codecs may use it too.
+ */
+RCRE_NODISCARD int rcre_zarr_register_codec(
+    const char* name,
+    int (*decode)(const uint8_t*, size_t, uint8_t*, size_t),
+    int (*encode)(const uint8_t*, size_t, int, uint8_t**, size_t*));
+
+/**
+ * @brief Ensures the opt-in zstd codec (src/core/zarr_zstd.c) is
+ *  registered. No-op in builds without the zstd TU (the codec is then
+ *  reported unavailable by rcre_zarr_codec_available). Called
+ *  automatically by rcre_zarr_open/rcre_zarr_create.
+ */
+void rcre_zarr_zstd_ensure_registered(void);
+/**
+ * @brief Internal: installs the zstd ensure implementation (the opt-in
+ *  TU calls this from a C constructor). User code should not call it;
+ *  it exists so the public ensure function stays a single definition in
+ *  chunked.c regardless of link order (link-order-immune registration).
+ */
+void rcre_zarr_zstd_set_ensure_hook(void (*fn)(void));
+
+/* ---- chunk I/O (raw chunk buffers, native-endian dtype bytes) ------------ */
+/** Reads chunk cidx into out (full chunk, edge included). A missing chunk
+ *  file returns the fill value for the whole chunk (v3 semantics). */
+RCRE_NODISCARD int rcre_zarr_read_chunk(const RCRE_ZarrArray* arr,
+                                        const size_t* cidx, void* out);
+/** Writes the full chunk (edge included) to cidx. The file is written
+ *  atomically (temp + rename). */
+RCRE_NODISCARD int rcre_zarr_write_chunk(const RCRE_ZarrArray* arr,
+                                         const size_t* cidx, const void* in);
+/** 1 if the chunk file exists, 0 if not, -1 on error. */
+RCRE_NODISCARD int rcre_zarr_chunk_exists(const RCRE_ZarrArray* arr,
+                                          const size_t* cidx);
+
+/* ---- array I/O (row-major whole array; slab-parallel) --------------------- */
+/** Reads the full logical array (fill semantics for missing chunks). */
+RCRE_NODISCARD int rcre_zarr_read_array(const RCRE_ZarrArray* arr, void* out,
+                                        RCRE_ThreadPool* pool);
+/** Writes the full logical array (read-modify-write on edge chunks). */
+RCRE_NODISCARD int rcre_zarr_write_array(const RCRE_ZarrArray* arr,
+                                         const void* in, RCRE_ThreadPool* pool);
+
+/**
+ * @brief Writes a dense sub-block: logical indices lo..hi (per dim, hi
+ *        exclusive).
+ * @param in        Points at the START of the source array (element 0,0,...),
+ *                  not at the block: the block is located inside it via
+ *                  lo/hi. `in` + lo must be valid, i.e. the caller passes a
+ *                  full-array-shaped buffer (or at least one covering lo..hi).
+ * @param in_stride0 First-dimension stride of `in` in ELEMENTS; 0 = tight
+ *                  (the block's last-dim extent). Higher dims are always
+ *                  tight over the block extents.
+ * @note Read-modify-write semantics on touched edge chunks. Out-of-core
+ *        users typically load one tile of `in`, write_block it, free it.
+ */
+RCRE_NODISCARD int rcre_zarr_write_block(const RCRE_ZarrArray* arr,
+                                         const size_t* lo, const size_t* hi,
+                                         const void* in, size_t in_stride0,
+                                         RCRE_ThreadPool* pool);
+
+/**
+ * @brief Invokes fn(cidx, chunk_buf, user) once per chunk with the decoded
+ *  chunk (fill semantics for missing chunks). With a pool, chunks are
+ *  processed in slab order but callback invocations may interleave — fn must
+ *  be idempotent and must not accumulate a cross-chunk order-dependent
+ *  reduction (use rcre_zarr_reduce_sum for that). Returns the first
+ *  non-zero fn result (stops the dispatch) or RCRE_OK. */
+typedef int (*RCRE_ZarrChunkFn)(const size_t* cidx, void* chunk_buf, void* user);
+RCRE_NODISCARD int rcre_zarr_for_each_chunk(const RCRE_ZarrArray* arr,
+                                            RCRE_ZarrChunkFn fn, void* user,
+                                            RCRE_ThreadPool* pool);
+
+/**
+ * @brief Slab-parallel total sum of all logical values.
+ *  Each slab sums Neumaier-compensatedly (F64/F32) or exactly (integer /
+ *  bool), partials combine in fixed slab order — bit-identical across pool
+ *  sizes and machines (the H0 slab-reduction contract). out is 1, 2, 4, or
+ *  8 bytes per dtype class (float dtypes -> double, int -> int64, bool ->
+ *  int64 count). */
+RCRE_NODISCARD int rcre_zarr_reduce_sum(const RCRE_ZarrArray* arr, void* out,
+                                        RCRE_ThreadPool* pool);
+
+/* ---- IEEE 754 binary16 (shared with the Zarr float16 path) --------------- */
+
+/**
+ * @brief Decode a binary16 bit pattern to double (exact).
+ */
+RCRE_NODISCARD double rcre_f16_to_f64(uint16_t bits);
+/**
+ * @brief Encode a double to binary16 bits (correctly rounded, RN;
+ *        overflow -> inf, matching numpy astype(np.float16)).
+ */
+RCRE_NODISCARD uint16_t rcre_f16_from_f64(double v);
+
+/* ------------------- N-body Barnes-Hut (H7, 2.4.0) ------------------------ */
+/*
+ * 2D Newtonian gravity, Barnes-Hut quadtree (deterministic construction;
+ * forces slab-parallel over bodies with a shared read-only tree —
+ * bit-identical across pool sizes). theta in (0, 1): smaller = more
+ * accurate. soft: Plummer softening length (0 = unsoftened).
+ */
+
+/**
+ * @brief Barnes-Hut gravitational force on every body (F64, 2D).
+ *        theta in (0,1), G > 0. 0 on success, -1 on bad input/OOM.
+ *        fx/fy: caller-allocated n doubles.
+ */
+RCRE_NODISCARD int rcre_nb_bh_force_f64(const double* x, const double* y,
+                                        const double* m, int n, double G,
+                                        double theta, double soft,
+                                        RCRE_ThreadPool* pool, double* fx,
+                                        double* fy);
+
+/**
+ * @brief One velocity-Verlet step (symplectic): v += h/2 a^k,
+ *        x += h v, a^{k+1} = BH(x^{k+1}), v += h/2 a^{k+1}.
+ *        The energy-drift gate primitive (docs/hpc.md 10.4).
+ */
+RCRE_NODISCARD int rcre_nb_verlet_step_f64(double* x, double* y,
+                                           double* vx, double* vy,
+                                           const double* m, int n, double G,
+                                           double theta, double soft,
+                                           double h, RCRE_ThreadPool* pool);
+
+/**
+ * @brief EXACT O(n^2) total energy (1/2 sum m v^2 - sum_{i<j} G m_i m_j /
+ *        sqrt(r^2 + soft^2)) — the deterministic drift diagnostic
+ *        (not the tree approximation).
+ */
+RCRE_NODISCARD double rcre_nb_energy_f64(const double* x, const double* y,
+                                         const double* vx, const double* vy,
+                                         const double* m, int n, double G,
+                                         double soft);
+
+/* ------------------- MCMC (H7, 2.4.0) ------------------------------------ */
+/*
+ * Metropolis-Hastings, HMC, NUTS (Hoffman & Gelman 2014; dual-averaging
+ * adaptation, log-uniform slice, divergence counter), the ESS estimator
+ * (Geyer initial monotone sequence), and box integrators (plain /
+ * antithetic / stratified / Sobol' / Halton — H1 quasi-rng).
+ *
+ * Determinism: all randomness flows through ONE PCG64 stream (H1) in a
+ * fixed consumption order — a chain with a fixed seed is bit-identical
+ * across runs and machines. Chains are sequential (no pool argument);
+ * independent chains = different seeds, parallelizable by the caller.
+ *
+ * out: caller-allocated n_samples x d, row-major.
+ * out_accept: optional single double — mean acceptance (0..1) after the run.
+ */
+typedef struct RCRE_NUTSReport {
+    int accept;     /* iterations whose best node beat the root */
+    int divergent;  /* iterations with a |H - H0| > 1000 transition */
+    double final_eps; /* adapted step size after the adaptation phase */
+} RCRE_NUTSReport;
+
+/**
+ * @brief Random-walk Metropolis-Hastings (Gaussian proposal, symmetric).
+ *        Works with the log-pdf alone (no gradient needed).
+ */
+RCRE_NODISCARD int rcre_mcmc_mh_sample_f64(int d, const double* x0,
+                                           double (*logpdf)(const double* x,
+                                                            int d, void* user),
+                                           void* user, uint64_t seed,
+                                           double proposal_sd, int n_samples,
+                                           double* out, double* out_accept);
+
+/**
+ * @brief Fixed-trajectory HMC: fresh momentum each iteration, L
+ *        leapfrog steps of size eps, exact slice-HMC acceptance.
+ */
+RCRE_NODISCARD int rcre_mcmc_hmc_sample_f64(int d, const double* x0,
+                                            double (*logpdf)(const double* x,
+                                                             int d, void* user),
+                                            void (*grad)(const double* x, int d,
+                                                         double* g, void* user),
+                                            void* user, uint64_t seed,
+                                            double eps, int L, int n_samples,
+                                            double* out, double* out_accept);
+
+/**
+ * @brief NUTS (H-G 2014): dual-averaging adaptation (target 0.65),
+ *        slice sampling, max_tree-bounded binary tree, divergence
+ *        counter (|H - H0| > 1000). eps0 <= 0 starts from 0.1.
+ */
+RCRE_NODISCARD int rcre_mcmc_nuts_sample_f64(int d, const double* x0,
+                                             double (*logpdf)(const double* x,
+                                                              int d, void* user),
+                                             void (*grad)(const double* x, int d,
+                                                          double* g, void* user),
+                                             void* user, uint64_t seed,
+                                             int n_adapt, int n_samples,
+                                             double eps0, int max_tree,
+                                             double* out, double* out_accept,
+                                             RCRE_NUTSReport* report);
+
+/**
+ * @brief Effective sample size (Geyer 1992 initial monotone sequence)
+ *        of a (correlated) sample series y[0..n).
+ */
+RCRE_NODISCARD double rcre_mcmc_ess_f64(const double* y, int n, int lag_max);
+
+/**
+ * @brief Integrate f over the box [lo,hi]^d. Methods: 0 = plain MC
+ *        (PCG64), 1 = antithetic (n must be even), 2 = stratified
+ *        (uses the nearest perfect d-th power n = s^d, reported in
+ *        out_n_used), 3 = Sobol' (d <= 20), 4 = Halton (d <= 3).
+ *        QMC methods ignore `seed` (low-discrepancy sequences are
+ *        deterministic by index). out_stderr: MC standard error.
+ */
+RCRE_NODISCARD int rcre_mcmc_integrate_f64(int d,
+                                           double (*f)(const double* x,
+                                                       void* user),
+                                           void* user, const double* lo,
+                                           const double* hi, int method,
+                                           int n, uint64_t seed,
+                                           double* out_value,
+                                           double* out_stderr,
+                                           int* out_n_used);
+
+/* ------------------- Streaming statistics (H7, 2.4.0) ------------------- */
+/*
+ * Welford moments (Chan et al. parallel merge — the slab pattern:
+ * per-worker states merged in fixed order), Greenwald-Khanna
+ * epsilon-quantile stream (plan named t-digest/KLL; GK ships because
+ * its rank guarantee is the classically verifiable one — docs/hpc.md),
+ * and ordinary / moving-block bootstrap on PCG64 substreams.
+ */
+typedef struct RCRE_StreamStats {
+    int64_t n;
+    double mean;
+    double m2; /* sum of squared deviations (pop. var = m2/n) */
+    double m3;
+    double m4;
+} RCRE_StreamStats;
+
+void rcre_stream_stats_init(RCRE_StreamStats* s);
+void rcre_stream_stats_push(RCRE_StreamStats* s, double x);
+RCRE_NODISCARD double rcre_stream_stats_mean(const RCRE_StreamStats* s);
+/** @brief Sample variance (n-1). */
+RCRE_NODISCARD double rcre_stream_stats_var(const RCRE_StreamStats* s);
+RCRE_NODISCARD double rcre_stream_stats_std(const RCRE_StreamStats* s);
+/** @brief Bias-corrected (Fisher) sample skewness. */
+RCRE_NODISCARD double rcre_stream_stats_skew(const RCRE_StreamStats* s);
+/** @brief Bias-corrected sample excess kurtosis. */
+RCRE_NODISCARD double rcre_stream_stats_kurtosis(const RCRE_StreamStats* s);
+/** @brief Merge b into a (parallel/ slab pattern). */
+void rcre_stream_stats_merge(RCRE_StreamStats* a, const RCRE_StreamStats* b);
+
+typedef struct RCRE_P2Quantile {
+    double p;    /* target quantile in (0,1) */
+    int64_t n;   /* count */
+    int init_count;
+    double v[5];  /* marker heights */
+    double npos[5]; /* marker positions (1-based, fractional) */
+    double np[5]; /* expected marker positions */
+    double dnp[5];/* expected-position increments */
+} RCRE_P2Quantile;
+
+/**
+ * @brief Create a P^2 (Jain & Chlamtac 1985) online quantile for
+ *        quantile p in (0,1). 5 markers; O(1) per item, O(1) memory.
+ *        The plan named t-digest/KLL; P^2 ships after a measured
+ *        retirement of the Greenwald-Khanna draft (docs/hpc.md 10.5).
+ */
+RCRE_NODISCARD RCRE_P2Quantile* rcre_p2_create(double p);
+void rcre_p2_destroy(RCRE_P2Quantile* q);
+RCRE_NODISCARD int64_t rcre_p2_count(const RCRE_P2Quantile* q);
+void rcre_p2_add(RCRE_P2Quantile* q, double x);
+/** @brief Current estimate of the p-quantile. */
+RCRE_NODISCARD double rcre_p2_value(const RCRE_P2Quantile* q);
+
+/**
+ * @brief Bootstrap a statistic of x[0..n): n_boot resamples via
+ *        (seed, resample_id) PCG64 substreams. block = 1: ordinary;
+ *        block > 1: moving block (with wraparound).
+ */
+RCRE_NODISCARD int rcre_bootstrap_f64(const double* x, int n, uint64_t seed,
+                                      int resample_id, int n_boot, int block,
+                                      double (*stat)(const double* y, int n,
+                                                    void* user),
+                                      void* user, double* out_stats);
+
+/* ------------------- PDE domain layer (H7, 2.4.0) ------------------------ */
+/*
+ * Structured-grid solvers on the F64 substrate (docs/hpc.md 10).
+ * LAYOUT (shared with H4 multigrid): interior point (i, j) has 0 <= i < nx
+ * (x / column), 0 <= j < ny (y / row), flat index c = j*nx + i.
+ * Determinism: every parallel stage is an independent row/point or a
+ * fixed-order combine — results are bit-identical across pool sizes
+ * (pool == NULL means serial). State is caller-owned (arena-friendly).
+ * h = 1 grids unless documented otherwise.
+ */
+
+/**
+ * @brief 5-point Dirichlet stencil (h=1), F64: v = A u with zero
+ *        boundary (caller folds boundary data into the RHS).
+ *        Row-slab parallel. 0 on success, -1 on bad input.
+ */
+RCRE_NODISCARD int rcre_pde_stencil5_f64(size_t nx, size_t ny,
+                                         const double* u, double* v,
+                                         RCRE_ThreadPool* pool);
+/** F32 twin of rcre_pde_stencil5_f64. */
+RCRE_NODISCARD int rcre_pde_stencil5_f32(size_t nx, size_t ny,
+                                         const float* u, float* v,
+                                         RCRE_ThreadPool* pool);
+
+/**
+ * @brief 2D Poisson (Dirichlet, 5-point, h=1) via the 2D DST (H2 FFT).
+ *        Spectral: |rel err| is at the roundoff floor of the FFT.
+ *        MG layout: b/u are 0-indexed, c = j*nx + i.
+ */
+RCRE_NODISCARD int rcre_pde_poisson2d_fft_f64(size_t nx, size_t ny,
+                                              const double* b, double* u,
+                                              RCRE_ThreadPool* pool);
+
+/**
+ * @brief Poisson AUTO driver: spectral when nx*ny <= 4M cells, else the
+ *        H4 multigrid V-cycle (tol 1e-12, 400 cycles). auto_mode = 0
+ *        forces spectral. The choice is a pure function of the shape.
+ */
+RCRE_NODISCARD int rcre_pde_poisson2d_solve_f64(size_t nx, size_t ny,
+                                                const double* b, double* u,
+                                                RCRE_ThreadPool* pool,
+                                                int auto_mode);
+
+/**
+ * @brief Heat 2D explicit FTCS step (zero Dirichlet boundary):
+ *        u1 = u + (dt/h^2)(lap4 u). Stability gate: returns -1 (no
+ *        partial step) when dt/h^2 > 1/2.
+ */
+RCRE_NODISCARD int rcre_pde_heat2d_step_f64(size_t nx, size_t ny,
+                                            const double* u, double* u1,
+                                            double dt, double h,
+                                            RCRE_ThreadPool* pool);
+
+/**
+ * @brief Scalar Burgers 1D (u_t + (1/2 u^2)_x = 0, periodic): one
+ *        conservative MUSCL-upwind (minmod reconstruction + Roe-split
+ *        upwind face flux) step — 2nd order, TVD, stable for CFL <= 1.
+ *        Mass conserved to roundoff.
+ */
+RCRE_NODISCARD int rcre_pde_burgers1d_step_f64(const double* u, double* u1,
+                                               int n, double dt, double dx);
+/**
+ * @brief Shu-Osher piston + oscillation initial data on [0, L).
+ *        The classic benchmark profile (the scalar-Burgers
+ *        simplification of the gas-dynamics benchmark — see
+ *        docs/hpc.md 10.5).
+ */
+RCRE_NODISCARD int rcre_pde_burgers_shu_oshers_init(double* u, int n,
+                                                    double L);
+/**
+ * @brief Hopf-Lax exact solution of u_t + (1/2 u^2)_x = 0 with periodic
+ *        data (verification tool, O(n^2)): u(x,T) = (x - xi*)/T where
+ *        xi* (over periodic replicas) minimizes v0(xi) + (x-xi)^2/(2T),
+ *        v0(xi) = integral of u0 (trapezoidal). The maximum principle
+ *        (min u0 <= u <= max u0) holds for the result.
+ */
+RCRE_NODISCARD int rcre_pde_burgers_hopf_lax_f64(const double* u0, int n,
+                                                 double L, double T,
+                                                 double* out);
+
+/**
+ * @brief Wave 1D (u_tt = c^2 u_xx, periodic): one leapfrog step, DDK
+ *        (drift, then kick at the NEW position; v is the half-step
+ *        velocity). 2nd order in time, symplectic. CFL gate c dt/dx <= 1.
+ */
+RCRE_NODISCARD int rcre_pde_wave1d_step_f64(const double* u, const double* v,
+                                            double* u1, double* v1, int n,
+                                            double c, double dt, double dx);
+/** Consistent start for u_t^0 = 0: v^{1/2} = (c^2 dt/2) lap(u). */
+RCRE_NODISCARD int rcre_pde_wave1d_start_f64(const double* u, double* v, int n,
+                                             double c, double dt, double dx);
+/** Discrete energy 1/2 sum v^2 + (c^2/2 dx^2) sum (u_{i+1}-u_i)^2. */
+RCRE_NODISCARD double rcre_pde_wave1d_energy_f64(const double* u,
+                                                 const double* v, int n,
+                                                 double c, double dx);
+
+/* ------------------- Optimization (H8, 2.5.0) --------------------------- */
+/*
+ * L-BFGS / FISTA / coordinate-descent LASSO / SPSA (docs/hpc.md 11).
+ * All F64, all sequential and deterministic (SPSA under a fixed seed).
+ * Stopping tests are the scipy L-BFGS-B definitions where applicable,
+ * so the measured iteration bars against scipy are interpretable.
+ * Telemetry is via report structs — no callbacks in the numerics path
+ * (the H4 lesson). 0 on success, -1 on bad input.
+ */
+
+typedef struct RCRE_LbfgsOptions {
+    int max_iter; /* 0 -> 1000*n */
+    double ftol;  /* 0 -> 1e-7 (scipy default) */
+    double gtol;  /* 0 -> 1e-5 (scipy default), infinity-norm gradient */
+    double xtol;  /* 0 = disabled (scipy L-BFGS-B has no xtol; default 1e-9) */
+    int history;  /* m; 0 -> 10 */
+    int bounded;  /* 0/1 */
+    const double* lo; /* bounded: lower bounds (n) */
+    const double* hi; /* bounded: upper bounds (n) */
+} RCRE_LbfgsOptions;
+
+void rcre_lbfgs_options_default(RCRE_LbfgsOptions* o);
+
+typedef struct RCRE_OptReport {
+    int iter;    /* outer iterations (accepted L-BFGS steps / FISTA k) */
+    int f_evals; /* objective evaluations */
+    int g_evals; /* gradient evaluations (0 where N/A) */
+    int status;  /* 0 = converged, 1 = stopped by max_iter/stall */
+} RCRE_OptReport;
+
+/**
+ * @brief Two-loop L-BFGS (Nocedal-Wright) with Armijo backtracking.
+ *        x_out receives the minimizer; out_f its value. Box-bounded
+ *        variant = projected trials (documented heuristic, not BLP).
+ */
+RCRE_NODISCARD int rcre_lbfgs_f64(int n,
+                                  double (*fun)(const double* x, void* user),
+                                  void (*grad)(const double* x, double* g,
+                                               void* user),
+                                  void* user, const double* x0, double* x_out,
+                                  const RCRE_LbfgsOptions* opt,
+                                  double* out_f, RCRE_OptReport* report);
+
+/**
+ * @brief FISTA (Beck-Teboulle) for min f(x) + g(x): user supplies the
+ *        smooth f (value + gradient) and the prox of g
+ *        prox(z, step, out). L <= 0 enables backtracking L estimation.
+ *        out_f is the smooth value f(x) at the result (not f+g).
+ */
+RCRE_NODISCARD int rcre_fista_f64(int n,
+                                  double (*fun)(const double* x, void* user),
+                                  void (*fgrad)(const double* x, double* g,
+                                                void* user),
+                                  void (*prox)(const double* z, double step,
+                                              double* out, void* user),
+                                  void* user, const double* x0, double* x_out,
+                                  double L, int max_iter, double rtol,
+                                  double* out_f, RCRE_OptReport* report);
+
+/**
+ * @brief Cyclic coordinate descent for LASSO:
+ *        min 1/2||Ax-b||^2 + lambda||x||_1 (A: n x d row-major).
+ *        Exact soft-threshold coordinate updates; tol on the relative
+ *        coordinate change per full pass; out_obj = full objective.
+ */
+RCRE_NODISCARD int rcre_cd_lasso_f64(const double* A, int n, int d,
+                                     const double* b, double lambda,
+                                     const double* x0, double* x_out,
+                                     int max_iter, double tol,
+                                     double* out_obj, RCRE_OptReport* report);
+
+/**
+ * @brief SPSA (Spall) zeroth-order. four_point: 0 = 2-point estimate
+ *        (f(x+cD)-f(x))/(cD), 1 = 4-point sign estimate
+ *        (f(x+cD)-f(x-cD))/(2cD). Steps a_k = a0/(k+1)^gamma,
+ *        perturbations from PCG64 (fixed seed -> bit-identical run).
+ */
+RCRE_NODISCARD int rcre_spsa_f64(int n,
+                                 double (*fun)(const double* x, void* user),
+                                 void* user, const double* x0, double* x_out,
+                                 uint64_t seed, double c0, double a0,
+                                 double gamma, int max_iter, int four_point,
+                                 double* out_f, RCRE_OptReport* report);
+
+/* ------------------- 3-D PDE domain layer (H9, 2.6.0) -------------------- */
+/*
+ * Structured-grid 3-D solvers on the F64 substrate (docs/hpc.md 12).
+ * LAYOUT (the H4/H7 2-D layout extended): point (i, j, k) with
+ * 0 <= i < nx (x), 0 <= j < ny (y), 0 <= k < nz (z), flat index
+ * c = j*nz*nx + k*nx + i. Zero-boundary convention (the caller folds
+ * boundary data into b). Determinism: bit-identical across pool sizes
+ * (pool == NULL means serial).
+ */
+
+/* ------------------- H9 distributed operators (2.6.0) ------------------- */
+/*
+ * First distributed ops on the 12-fn MPI shim (include/extras/
+ * rcre_mpi.h). Determinism: ctx == NULL is the serial oracle path;
+ * the owned-row arithmetic is value- and order-identical to the core
+ * ops, so distributed and serial results are BIT-IDENTICAL
+ * (docs/hpc.md 12.2). ctx is opaque here (the shim header defines
+ * RCRE_MpiCtx).
+ */
+
+/**
+ * @brief Distributed SpMV: each rank computes its owned y-block
+ *        [r0, r1) from the owned CSR rows (row_ptr/col_idx/values for
+ *        the full matrix; rows r0..r1-1). x is FULL on every rank
+ *        (caller bcasts it). ctx == NULL: compute all rows. 0 on
+ *        success, -1 on bad input.
+ */
+typedef struct RCRE_MpiCtx RCRE_MpiCtx; /* forward (full type: extras/rcre_mpi.h) */
+
+RCRE_NODISCARD int rcre_dist_spmv_rows_f64(RCRE_MpiCtx* ctx,
+                                           const size_t* row_ptr,
+                                           const size_t* col_idx,
+                                           const double* values, int rows,
+                                           int r0, int r1, const double* x,
+                                           double* y_local);
+
+/**
+ * @brief Exchange owned y-blocks so every rank holds the full y
+ *        (all-to-all via isend/irecv, ascending-rank order). ctx ==
+ *        NULL: plain copy of the owned block into y_full.
+ */
+RCRE_NODISCARD int rcre_dist_gather_rows_f64(RCRE_MpiCtx* ctx, int n, int r0,
+                                             int r1, const double* y_local,
+                                             double* y_full);
+
+/**
+ * @brief Distributed 5-point stencil with halo exchange (H7 2-D
+ *        layout). ctx owns a row slab (deterministic partition of ny
+ *        over the ranks); u_local/v_local are (j1-j0) x nx. ctx ==
+ *        NULL: serial oracle — the core expression over all rows.
+ *        0 on success, -1 bad input, -2 communication failure.
+ */
+RCRE_NODISCARD int rcre_dist_stencil5_f64(RCRE_MpiCtx* ctx, size_t nx,
+                                          size_t ny, const double* u_local,
+                                          double* v_local);
+
+/**
+ * @brief 7-point Dirichlet stencil (h=1), F64: v = A u with zero
+ *        boundary. Line-slab parallel. 0 on success, -1 on bad input.
+ */
+RCRE_NODISCARD int rcre_pde_stencil7_f64(size_t nx, size_t ny, size_t nz,
+                                         const double* u, double* v,
+                                         RCRE_ThreadPool* pool);
+
+/**
+ * @brief 3-D Poisson (Dirichlet, 7-point, h=1): u = A^{-1} b via the
+ *        separable 1-D DST-I spectral solver (3 forward + 3 inverse
+ *        strided-line DST stages, eigenvalue divide). O(n^3 log n).
+ */
+RCRE_NODISCARD int rcre_pde_poisson3d_fft_f64(size_t nx, size_t ny, size_t nz,
+                                              const double* b, double* u,
+                                              RCRE_ThreadPool* pool);
+
 /* --------------------------- compensated reductions ---------------------- */
 
 /**
@@ -1933,6 +2578,34 @@ void rcre_qrng_sobol_point(RCRE_QRNG* q, double* out);
 void rcre_qrng_halton_at(uint64_t n, int k, double* out);
 void rcre_qrng_halton_init(RCRE_QRNG* q, int k);
 void rcre_qrng_halton_point(RCRE_QRNG* q, double* out);
+
+/* ---- Philox-4x32-10 (H6, 2.3.0) — the GPU-portable counter RNG ----------- */
+
+/**
+ * @brief One-shot Philox-4x32-10: four 32-bit words, a PURE function of
+ *        (counter, key). Bit-compatible with NVIDIA curand
+ *        curand_Philox4x32_10(c, k) (CUDA 13.3 reference, verified on
+ *        dlbox: RTX 5060 Ti, sm_120).
+ *
+ * Mapping used by RCRE: the 64-bit counter is (c.x = low32, c.y = high32,
+ * c.z = c.w = 0); the 64-bit key is (k.x = low32, k.y = high32).
+ *
+ * Why this exists: counter-based generation with a per-element counter
+ * (word j comes from counter j/4, word j%4) is reproducible BY
+ * CONSTRUCTION on any parallel machine — a GPU fill kernel and the CPU
+ * reference produce bit-identical streams at the same counters, with no
+ * shared state, no RNG carry between blocks, and zero synchronization.
+ * This is the documented H6 determinism bar for GPU RNG.
+ */
+void rcre_rng_philox4x32(uint64_t counter, uint64_t key,
+                         uint32_t out[4]);
+
+/**
+ * @brief Fill n uint32 words: word j = philox4x32(counter0 + j/4, key)[j%4].
+ *        Stateless and deterministic; `out` must hold n words.
+ */
+RCRE_NODISCARD int rcre_rng_philox4x32_fill(uint32_t* out, size_t n,
+                                            uint64_t counter0, uint64_t key);
 
 /* ========================================================================= */
 /* Safe, Zero-Malloc, SIMD-Accelerated C23 String Library (rcre_str)         */

@@ -180,6 +180,56 @@ void rcre_rng_pcg_skip(RCRE_RNG* r, uint64_t n) {
 }
 
 /* ========================================================================= */
+/* Philox-4x32-10 (H6, 2.3.0) — counter RNG, GPU-portable by construction    */
+/* ========================================================================= */
+
+/* Reference: NVIDIA curand curand_Philox4x32_10 / _philox4x32round
+ * (curand_philox4x32_x.h, CUDA 13.3). Round: a 4x32 bit-matrix multiply
+ * over GF(2) expressed as mulhilo32 + XOR (the M4x32 constants are the
+ * packed high/low multipliers); W32 advances the round key. */
+#define RCRE_PHILOX_W32_0 0x9E3779B9u
+#define RCRE_PHILOX_W32_1 0xBB67AE85u
+#define RCRE_PHILOX_M4X32_0 0xD2511F53u
+#define RCRE_PHILOX_M4X32_1 0xCD9E8D57u
+
+/* One round of the 4x32 counter mixer (matches _philox4x32round). */
+static void philox_round(uint32_t* c, uint32_t* k) {
+    uint64_t p0 = (uint64_t)RCRE_PHILOX_M4X32_0 * (uint64_t)c[0];
+    uint64_t p1 = (uint64_t)RCRE_PHILOX_M4X32_1 * (uint64_t)c[2];
+    uint32_t lo0 = (uint32_t)p0, hi0 = (uint32_t)(p0 >> 32);
+    uint32_t lo1 = (uint32_t)p1, hi1 = (uint32_t)(p1 >> 32);
+    uint32_t n0 = hi1 ^ c[1] ^ k[0];
+    uint32_t n1 = lo1;
+    uint32_t n2 = hi0 ^ c[3] ^ k[1];
+    uint32_t n3 = lo0;
+    c[0] = n0; c[1] = n1; c[2] = n2; c[3] = n3;
+    k[0] += RCRE_PHILOX_W32_0;
+    k[1] += RCRE_PHILOX_W32_1;
+}
+
+void rcre_rng_philox4x32(uint64_t counter, uint64_t key, uint32_t out[4]) {
+    uint32_t c[4] = { (uint32_t)(counter & 0xFFFFFFFFu),
+                      (uint32_t)(counter >> 32),
+                      0u, 0u };
+    uint32_t k[2] = { (uint32_t)(key & 0xFFFFFFFFu),
+                      (uint32_t)(key >> 32) };
+    for (int r = 0; r < 10; ++r) philox_round(c, k);
+    out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; out[3] = c[3];
+}
+
+int rcre_rng_philox4x32_fill(uint32_t* out, size_t n, uint64_t counter0,
+                             uint64_t key) {
+    if (!out && n) return RCRE_ERR_INVALID_ARG;
+    for (size_t j = 0; j < n; j += 4) {
+        uint32_t w[4];
+        rcre_rng_philox4x32(counter0 + (j >> 2), key, w);
+        size_t m = (n - j < 4) ? n - j : 4;
+        for (size_t i = 0; i < m; ++i) out[j + i] = w[i];
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
 /* Sobol' (d = 1..20)                                                        */
 /* ========================================================================= */
 

@@ -168,18 +168,20 @@ than everything" is not a sentence this repository writes.
 | **H0** | F64 HAL substrate, dispatched linalg, Neumaier/pairwise reductions, SF library, determinism policy, benchmark infra | **done (2.1.0)** |
 | **H1** | Counter-based RNG (PCG64, numpy-bit-exact) + Sobol'/Halton quasi-MC with checked-in oracle streams | **done (2.2.0)** |
 | **H2** | General-size F64 FFT (mixed-radix + Bluestein), BLIS-style blocked GEMM, triangular solve; **GEMM alpha/beta semantics fixed to BLAS standard** | **done (2.2.0)** |
-| H2 | BLIS-style blocked GEMM (f64 first), general-size FFT (pocketfft-class), triangular solve | |
-| H3 | Direct factorizations: Cholesky/LU/QR/SVD + eigen for symmetric | |
-| H4 | Krylov solvers (CG/GMRES/BiCGStab) + preconditioners + multigrid — the HPC credibility core; residual gates on the Neumaier floor | |
-| H5 | Out-of-core chunked ND arrays (Zarr v3) on the io v1.3 substrate | |
-| H6 | GPU backend (Metal → CUDA/HIP via the bridge pattern), CPU references first | |
-| H7 | MPI/distributed layer behind the C ABI | |
-| H8 | Statistics layer: MCMC, streaming sketches, robust stats — built on H0 SF + H1 RNG | |
+| **H3** | Direct factorizations: Cholesky/LU/Householder QR + symmetric eigensystem (exact-similarity QL) | **done (2.2.0)** |
+| **H4** | Krylov solvers (PCG/FCG, BiCGStab, GMRES) + Jacobi/weighted-Jacobi/ILU(0) + 2D-Poisson multigrid (V-cycle/FAS) | **done (2.2.0)** |
+| **H5** | Out-of-core chunked ND arrays — Zarr v3 on the POSIX store (identity + opt-in zstd, slab-parallel, zarr-python conformance) | **done (2.2.0)** |
+| H6 | GPU bridge: context ABI + CPU reference backend (always linked) + **CUDA backend** (opt-in TU, nvcc); Philox-4x32-10 bit-identical across backends; SpMV/GEMM/AXPY/DOT device ops; honest end-to-end solver bars | **done (2.3.0)** |
+| H7 | MPI/distributed layer behind the C ABI | queued |
+| H8 | Statistics layer: MCMC, streaming sketches, robust stats — built on H0 SF + H1 RNG | queued |
 | H9 | Continuous silicon validation wave (Apple Silicon, x86 AVX-512/AMX, ARM SBC NEON/SVE2) | ongoing |
 
 Sequencing: H0 → H1 → H2 before any solver work (H3/H4 depend on the
 F64 GEMM and RNG foundations); H5 is decoupled (io substrate already
-exists); H6 only after CPU references are the named conformance targets.
+exists); H6 only after CPU references are the named conformance
+**targets** (the always-linked `cpu` backend *is* that oracle — device
+backends are gated against it). Metal/HIP backends follow the same
+bridge pattern once CUDA is the shipped device reference.
 
 ---
 
@@ -600,18 +602,946 @@ PCG+Jacobi (diagonal O(N)) or a direct/FAS path. A blocked /
 weighted-Jacobi-MG-preconditioned variant is the natural H4+
 candidate.
 
-## 8. Validation gates (per release)
+## 8. Phase H5 — Out-of-core Zarr v3 Chunked Arrays (2.2.0)
+
+The scientific substrate gets an **out-of-core memory model**: chunked
+N-dimensional arrays on the POSIX file store, in the canonical
+[Zarr v3](https://zarr.readthedocs.io/) on-disk format, zero new
+dependencies (opt-in libzstd for the zstd codec only).
+
+### 8.1 On-disk contract (v3, pinned against zarr-python)
+
+- `<root>/<name>/zarr.json` — array metadata (shape, data_type,
+  chunk_grid, chunk_key_encoding, fill_value, codecs, attributes,
+  zarr_format=3, node_type="array").
+- `<root>/<name>/c/<i>/<j>/...` — one file per chunk, chunk indices
+  joined by `/`, no extension, little-endian sample bytes by default.
+- **Missing chunk = fill value** (the array is defined even if only a
+  subset of chunks exists — the core out-of-core property).
+- NaN/±Infinity fills are JSON strings (`"NaN"`, `"Infinity"`,
+  `"-Infinity"`) per the v3 spec.
+- Codec pipeline: identity = `[bytes(little)]`; zstd =
+  `[bytes(little), zstd(level, checksum=false)]`. Encode in list
+  order, decode in reverse. The pipeline length is part of the
+  metadata — a reader must apply exactly the recorded codecs.
+
+### 8.2 API surface (all in `include/rcre.h`)
+
+```c
+rcre_zarr_create_group_root(root)              /* root = valid v3 group */
+rcre_zarr_create(root, name, RCRE_ZarrCreate*) /* 1..8 dims, 12 dtypes,
+                                                   fill, zstd level 0..22 */
+rcre_zarr_open / rcre_zarr_close
+rcre_zarr_{ndim,shape,chunk_shape,dtype,itemsize,nchunks,fill_value}
+rcre_zarr_codec_available(name) / rcre_zarr_register_codec(...)
+rcre_zarr_zstd_ensure_registered()             /* idempotent; hook-dispatched —
+                                                   no-op without the bridge TU */
+rcre_zarr_zstd_set_ensure_hook(fn)               /* internal: the bridge TU installs
+                                                   its implementation (constructor) */
+rcre_zarr_read_chunk / rcre_zarr_write_chunk / rcre_zarr_chunk_exists
+rcre_zarr_read_array / rcre_zarr_write_array   /* whole array, slab-parallel */
+rcre_zarr_write_block(arr, lo, hi, in, stride0, pool)
+        /* `in` = FULL-array buffer start; lo/hi select the sub-block */
+rcre_zarr_for_each_chunk(arr, fn, user, pool)
+rcre_zarr_reduce_sum(arr, out, pool)           /* see 8.3 */
+rcre_f16_to_f64 / rcre_f16_from_f64            /* canonical binary16 codec,
+                                                   shared with the Zarr f16 path */
+```
+
+Dtypes: f64, f32, f16, i64..i8, u64..u8, bool (12, numpy-compatible
+names in the metadata).
+
+### 8.3 Determinism (slab policy, same contract as e-means/H0)
+
+Whole-array I/O and `rcre_zarr_for_each_chunk` dispatch **one task per
+chunk** through the thread pool; `rcre_zarr_reduce_sum` keeps one
+Neumaier (f64) or exact (int/bool) partial per chunk and combines
+partials in **fixed chunk order**. Pooled results are therefore
+**bit-identical** across pool sizes and machines (gated in
+`test_zarr::test_threading_determinism`: serial vs 4 vs 8 threads,
+memcmp on the resulting double/int64). There is no shared accumulator,
+no mutex in the data path, and atomic first-error only for
+propagation.
+
+### 8.4 Conformance gate (`make conformance-zarr`)
+
+zarr-python (3.4.2, venv) is the ground truth for the v3 format. The
+gate round-trips **13 fixed arrays** (1D–4D, all dtypes, identity and
+zstd L3, non-divisible chunks, NaN fill) in **both directions**:
+
+- `ref_zarr_conformance.py write` → zarr-python writes `<name>_py`
+  arrays from a pure-Python 53-bit LCG stream + manifest.
+- `bin/test_zarr_conformance` → C reads every `_py` array (FNV-1a 64
+  of the raw LE bytes → `c_hashes.json`) and writes every `_c` array
+  from the identical C LCG stream (→ `c_expected.json`).
+- `ref_zarr_conformance.py verify` → zarr-python reads the `_c`
+  arrays and requires: (1) C→py data bit identity, (2) py→C data bit
+  identity, (3) semantic metadata equality (shape, dtype, chunks,
+  codec list, fill), (4) byte-exact golden `zarr.json` for the two
+  canonical arrays (identity + zstd; writer stability pin, checked in
+  at `tests/h5_fixtures/`), (5) NaN-fill survival.
+
+Measured: **13/13 arrays bit-identical in both directions**, C ↔
+zarr-python, including the zstd frames (our encoder's output is read
+back by zarr-python's decoder and vice versa). The target skips
+cleanly (exit 0) when no zarr venv exists (infra-immune), overridable
+via `ZARR_VENV=`.
+
+### 8.5 Benchmark bars (`make bench_h5`, Apple M5 Max, -O3)
+
+f64, identity codec unless noted; `_p` = 8-thread pool:
+
+```
+case                  write (ms)        read (ms)       MB/s W (S/P)   MB/s R (S/P)
+256x256/32            9.4 / 2.7         0.88 / 0.63     56 / 195      596 / 838
+1024x1024/64          46 / 18           4.3 / 1.9       181 / 454     1965 / 4481
+2048x2048/64          128 / 61          17.2 / 7.3      261 / 550     1949 / 4603
+1024x1024/64 zstd L3  39 / 12           11.1 / 2.5      216 / 723     754 / 3361
+```
+
+- Serial write throughput sits near ~200–260 MB/s (page-cache write
+  + per-chunk open/write/rename); the 8-thread pool reaches ~550 MB/s
+  (2.1–2.7x) at 16 MB — the one-task-per-chunk parallelism is exactly
+  the out-of-core scaling story.
+- Reads are I/O-metadata bound on this machine (page cache warm):
+  ~2 GB/s serial, ~4.6 GB/s pooled at 16 MB.
+- zstd L3 adds ~30–80% write cost and ~3x read cost, for
+  **292x compression** on structured (byte-repeated) f64 data;
+  random data is incompressible (honest bar: measure per workload).
+
+### 8.6 Lessons (measured, not inferred)
+
+- **BSD make + `#` in `$(shell ...)`**: the zstd header probe
+  `echo '#include <zstd.h>' | cc -E` breaks BSD make (`#` starts a
+  make comment inside the function argument → "unterminated call to
+  function shell"). The probe uses the `-include zstd.h` driver flag
+  instead — no `#` at all.
+- **Number-parsing terminator restore**: the JSON parser's
+  `*p = '\0'; strtod; *p = *start;` restored the *first* character,
+  not the terminator — it silently overwrote the following `,` and
+  every multi-number metadata file failed to parse. Save/restore the
+  actual terminator.
+- **Innermost-chunk origin**: the chunk↔array walkers copy the
+  innermost dim as a run; the run's *start* includes the innermost
+  chunk index (`cidx[last]*chunk[last]*stride`) — easy to forget, and
+  it silently writes every chunk column at offset 0 (first 8 columns
+  correct, rest repeated).
+- **Codec pipeline length is metadata**: `ncodecs` must count the
+  zstd stage when present; otherwise the encoder "works" but never
+  compresses (raw-sized files, no error).
+- **`write_block` origin**: `in_base` is relative to the user buffer
+  START, not the block origin — the `lo*d` term is mandatory once a
+  block spans chunks that begin before the block.
+- **Optional TUs and registration (two failure modes, measured)**:
+  (1) a weak-symbol fallback for `rcre_zarr_zstd_ensure_registered`
+  bound to the NO-OP after a clean rebuild — the driver's call resolved
+  against `chunked.o`'s weak definition before the linker ever
+  extracted the strong definition from the archive. (2) even with a
+  strong definition, a TU whose only outward effect is a C constructor
+  is **never extracted from a static archive** (no referenced symbol)
+  — the constructor never ran. Final design: `chunked.c` owns the
+  public ensure function and dispatches through a function-pointer
+  hook; the bridge TU installs the real implementation from a
+  constructor via `rcre_zarr_zstd_set_ensure_hook()`, and the Makefile
+  links `src/core/zarr_zstd.o` **explicitly** (not via archive
+  extraction). Link-order immune, amalgamation-safe (the single header
+  excludes the dependency-bearing TU and runs identity-only), ASan-
+  covered (the zstd path runs under ASan with `-DRCRE_WITH_ZSTD`).
+- **Test data compressibility**: a zstd size gate must use structured
+  data (uniform-random doubles are incompressible and the "smaller
+  than raw" assertion fails for the right reason).
+
+## 9. Phase H6 — GPU Bridge: Context ABI + CUDA Backend (2.3.0)
+
+The substrate gets its first **device backend** — not a fork of the
+library, but a zero-intrusion bridge in the established extras pattern
+(`rcre_io_from_arrow` / zstd hook): one C ABI, self-registering
+backend TUs, CPU references first.
+
+**Measured on the dlbox: NVIDIA GeForce RTX 5060 Ti (sm_120, 16 GB),
+CUDA 13.3, driver 595.91.07.**
+
+### 9.1 The bridge contract
+
+- `include/extras/rcre_gpu.h` — the public ABI: opaque
+  `RCRE_GpuCtx`/`RCRE_GpuBuf`, backend registry
+  (`rcre_gpu_open`/`rcre_gpu_open_named`/`rcre_gpu_close`), buffer
+  round-trip (`alloc`/`h2d`/`d2h`/`synchronize`), and device ops with
+  the library's own conventions: `gemm_f32/f64` (row-major,
+  `C = alpha·A·B + beta·C`), `spmv_f32/f64` (CSR, `size_t` indices),
+  `axpy`, `dot` (result buffer), `philox4x32_fill`, plus
+  host-pointer convenience `gemm_f32/f64_host`.
+- `src/extras/gpu_ctx.c` — **always compiled** (zero-dependency):
+  owns the registry, the op dispatch, and the **`cpu` backend** —
+  the conformance oracle. Its ops delegate to the same core/HAL
+  functions the CPU solver paths use
+  (`rcre_linalg_gemm_*`, `rcre_spmv_*`, `rcre_linalg_axpy_*`,
+  `rcre_linalg_dot_*`, `rcre_rng_philox4x32_fill`), so
+  CPU-backend results are **bit-identical to the CPU reference by
+  construction**.
+- `src/extras/gpu_cuda.c` + `gpu_kernels.cu` — **opt-in** (nvcc +
+  toolkit detected by the Makefile, infra-immune like zstd).
+  Backends self-register from a C constructor; the Makefile links the
+  backend objects explicitly so the constructor runs (the H5
+  archive-extraction lesson, applied before it could bite).
+- The legacy single-kernel extras API is retired in favor of the
+  context ABI (`tests/test_sota.c` migrated to
+  `rcre_gpu_gemm_f32_host` on the best available backend).
+
+### 9.2 Determinism policy (the H6 bar)
+
+- **Fixed launch configurations everywhere** (no device-query
+  auto-tuning): gemm 32×32 blocks (f32) / 16×16 (f64), TK=8 tiles;
+  one-thread-per-row SpMV; one-element-per-thread AXPY; one-block
+  (256-thread) dot with a **fixed shared-memory tree** (no atomics —
+  atomics are non-deterministic).
+- **Philox-4x32-10 is bit-identical across every backend by
+  construction** (pure function of the 64-bit counter; the kernel
+  round function is the exact curand `_philox4x32round`). This is
+  the H6 RNG bar: same counter+key ⇒ same 32-bit words on CPU,
+  CUDA, and any future backend. Gated at 65,536 words in
+  `test_gpu`.
+- Float ops (gemm/spmv/axpy/dot) are gated on **precision bars vs the
+  core** (documented ordering differences) plus **double-launch
+  determinism** on the same device. No cross-device bit-identity is
+  claimed for them.
+
+### 9.3 CPU Philox-4x32-10 (core, H6)
+
+`rcre_rng_philox4x32(out, n, counter0, key)` /
+`rcre_rng_philox4x32_fill` in `src/core/rng.c`: 64-bit counter →
+`(c.x, c.y)` low/high, `c.z=c.w=0`; 64-bit key → `(k.x, k.y)`;
+stream word `j` = `philox(counter0 + j/4, key)[j % 4]`. 10 rounds,
+the standard constants (`0x9E3779B9`, `0xBB67AE85`, `0xD2511F53`,
+`0xCD9E8D57`). Reference streams are **independent pure-Python
+fixtures** (the H1 lesson) checked in under `tests/rng_fixtures/`
+(stream a/b + corner counter/key table) and verified bit-exact.
+
+### 9.4 Measured bars (RTX 5060 Ti, `-O3`, 30 reps, wall clock incl.
+sync — the honest end-to-end cost a solver pays)
+
+```text
+SpMV f64 (2D Poisson CSR)
+  64x64    cpu 0.023 ms   dev 0.008 ms   2.9x
+  128x128  cpu 0.047 ms   dev 0.009 ms   5.5x
+  256x256  cpu 0.240 ms   dev 0.013 ms  19.0x
+
+GEMM
+  f32 512     cpu  4.94 ms  dev 0.553 ms  485 GF/s  8.9x
+  f32 1024    cpu 48.32 ms  dev 3.961 ms  542 GF/s 12.2x
+  f32 2048    cpu 584.60 ms dev 31.41 ms  547 GF/s 18.6x
+  f64 256     cpu  2.17 ms  dev 0.117 ms  288 GF/s 18.6x
+  f64 512     cpu 19.67 ms  dev 0.748 ms  359 GF/s 26.3x
+
+Philox fill (64M words, bit-identical by design)
+  cpu 314.0 ms (0.21 Gwords/s)   dev 0.63 ms (106 Gwords/s, 495x)
+
+CG + ILU(0), 2D Poisson 64x64, tol 1e-10 (H4 recurrence, CPU factor)
+  all-CPU H4:            76 iters,  4.92 ms (0.06 ms/iter)
+  device SpMV+AXPY:      85 iters,  7.53 ms (0.09 ms/iter, 0.65x)
+```
+
+**Honest reading.** The kernels win where they are kernel-shaped:
+SpMV (up to 19×), GEMM (9–26×), and Philox (495× — a GPU RNG is what
+a GPU RNG is for). The **end-to-end CG at n=4096 loses (0.65×)**:
+per-iteration h2d/d2h of the 32 KB p/r vectors plus the CPU ILU(0)
+apply dominate a 13 µs SpMV. The bar is published as measured — the
+bridge's first wave pays for the transfer floor, and the design
+consequence (move the preconditioner apply to the device, async
+pipelining, larger n) is the H7 entry ticket.
+
+### 9.5 Lessons (all measured, all fixed in-tree)
+
+- **GNU ld vs ld64 archive re-scan**: an explicit bridge object placed
+  *after* the archive resolves on macOS (ld64 re-scans) but not on
+  GNU ld. The link rules now repeat `$(LIB)` after the explicit
+  objects — portable, and the macOS "duplicate libraries" warning is
+  the documented price.
+- **`cudaDeviceProp` → `struct cudaDeviceProp`** in CUDA 12.4+; the
+  host side must keep C linkage into nvcc objects via `extern "C"`
+  prototypes (nvcc compiles C++ and mangles by default).
+- **nvcc not on PATH in non-interactive shells** (ssh): the probe
+  falls back to `$(CUDA_HOME)/bin/nvcc`. (The `(a || b)` grouping
+  matters — `a || b && c` would print the wrong path.)
+- **The test harness keeps lying the same way twice**: comparing
+  against an allocated-but-unwritten reference buffer (CPU and CUDA
+  paths, same bug). The reference must be the buffer the reference
+  call actually writes.
+- **A wrong CG recurrence is silent**: `(r·r)/(p·M⁻¹p)` instead of
+  `(r·M⁻¹r)/(p·Ap)` neither crashes nor diverges — it just creeps
+  (~1/√iter). The fix was to mirror the committed H4 recurrence
+  exactly; the iteration count (75 vs 76) is now the parity evidence.
+- **CSR column order is a precondition, not a style choice**: the H4
+  ILU(0) requires ascending `col_idx` per row; a non-ascending
+  stencil build makes the preconditioner non-SPD and CG flaps
+  (pzt sign flips) before decaying like 1/√iter.
+
+## 10. Phase H7 — Domain Layer: PDE, N-body, MCMC, Streaming (2.4.0)
+
+The game plan's H7 scope: structured-grid PDE solvers, Barnes-Hut
+N-body, MCMC/HMC/NUTS, and streaming statistics / quasi-MC
+integrators. All F64. All in `src/core/` as plain TUs behind
+`include/rcre.h`. MPI stays in H9 by plan; nothing in H7 touches
+distributed work.
+
+### 10.1 PDE (`src/core/pde.c`)
+
+Layout is the H4 multigrid layout (`c = j*nx + i`, `0 <= i < nx`),
+5-point stencil, zero Dirichlet (the caller folds boundary data into
+the RHS) — the AUTO driver hands FFT and MG the *same* problem by
+construction.
+
+- **1-D DST-I via the H2 complex FFT** (odd extension, length
+  `2(n+1)`; `S[k] = -0.5 * Im(Y[k])`) — the workhorse for the
+  spectral Poisson path.
+- **2-D Poisson spectral solver** (separable DST-I + scaling, 1/nx/ny
+  per row/column — slab-parallel) and the **AUTO driver**:
+  spectral when `nx*ny <= 4e6` cells, H4 V-cycle MG (target 1e-12,
+  measured smoothest-mode floor honored: MG results are accepted on
+  true relative residual <= 1e-8) otherwise.
+- **2-D heat FTCS** with the `dt/h^2 <= 1/2` stability gate (reject +
+  no partial write).
+- **1-D Burgers, MUSCL-upwind** (minmod reconstruction, Roe-split
+  face flux), CFL gate `dt*max|u|/dx <= 1`.
+- **Shu-Osher initial data + Hopf-Lax (Lax-Oleinik) exact solution**
+  (periodic replicas offset by the period integral; fine internal
+  minimization grid, `m = 16`).
+- **1-D wave, DDK leapfrog** (drift-kick, half-step velocity) with
+  the CFL gate `c*dt/dx <= 1`.
+
+Measured gates (`tests/test_pde.c`, 13 tests): DST-I vs naive sine
+sum `<= 1e-12` (incl. Bluestein sizes); spectral Poisson eigenvector
+exactness `<= 1e-12` on rectangles; FFT-vs-MG consistency `<= 1e-9`;
+pool(8) bit-identical to serial; heat mode decay within 5% of
+analytic; stability gate rejects with output untouched; Burgers
+pre-shock halving ratio in [1.5, 3.0]; Shu-Osher one transit L1
+`<= 2e-2` (measured 1.2e-2), mass drift `<= 1e-12` (measured 1e-15);
+wave convergence ratios in [2.5, 5.5]; 10k-step energy drift
+`< 2e-2`.
+
+### 10.2 N-body Barnes-Hut (`src/core/nbody.c`)
+
+2-D, theta-criterion, point-mass approximation `G m1 m2 / (r2
+sqrt(r2))` (PLAW or standard — the `r^-3` law), optional
+Plummer softening. Construction is ONE global index permutation:
+every node owns a contiguous slice of a single `idx[]` array that is
+partitioned in place (stable, quadrant-major); the recursion never
+re-indexes the body arrays. Tree nodes are internal to the TU; the
+public API is three functions (force, velocity-Verlet step, energy).
+
+Determinism: the force walk is slab-parallel over bodies with the
+read-only tree; pool(8) is bit-identical to serial (gated in
+`tests/test_nbody.c`). The Verlet step divides force by mass
+(`a = F/m`).
+
+Measured gates (8 tests): theta -> 0 agrees with the O(n^2) direct
+force (< 1e-10); theta scaling monotone; pool determinism; 2-body
+elliptic 20k-step drift < 1e-5; 2-body parabolic 50k-step absolute
+drift < 1e-5 (E0 = 0); mass-weighting central/satellite drift <
+1e-4; 800-body chaotic 10k steps bounded (drift < 0.25); error
+inputs.
+
+### 10.3 MCMC / HMC / NUTS (`src/core/mcmc.c`)
+
+All randomness is H1 PCG64 through ONE stream per chain in a fixed
+consumption order (fixed seed -> bit-identical chain, gated). Chains
+are sequential by nature; the module adds no threading (independent
+chains = different seeds, the caller's job).
+
+- **MH** — random-walk Gaussian proposal, exact Metropolis test.
+- **HMC** — fresh momentum per iteration, `L` leapfrog steps, the
+  EXACT slice-HMC test (`A = logp - 1/2||r||^2`; accept iff
+  `A1 >= A0 + z`), which is the joint Metropolis test for the
+  extended target — no separate HMC error term.
+- **NUTS** — H-G 2014 tree growth (one-sided extension per level,
+  coin-flipped direction, `A_min/A_max` stopping), divergence when
+  `|H - H0| > 1000`, and the update is **exact slice sampling over
+  {root} + the nodes under the slice, uniformly** (Neal 2011 slice
+  HMC with a discrete trajectory set). The H-G max-node/"S"
+  surrogate is deliberately NOT used: its identity was the part of
+  H-G that could not be verified from the paper alone, and the
+  discrete slice needs no surrogate at all.
+- **ESS** — Geyer initial-monotone-sequence autocorrelation
+  estimator (the statistical-gate primitive).
+- **Integrators** (`rcre_mcmc_integrate_f64`) — plain MC (PCG64),
+  antithetic (paired, even n), stratified (nearest perfect d-th
+  power grid, index-pure), Sobol' (H1, d <= 20) and Halton (H1,
+  d <= 3 — cleanly rejected beyond).
+
+**Adaptation — measured deviation from the Stan/H-G form.** The
+draft implemented the H-G 2014 §4.1 dual averaging exactly as in
+Stan (`Hbar <- Hbar - exp(-gamma t)(log m - log target)`,
+`eps' = exp(mu + alpha (Hbar - log eps + log m))`). Measurement: on
+easy targets (1-D Gaussian) the tree always runs to `max_tree`,
+`log m` has no restoring term, `Hbar` decays by ~112 over a 750-step
+warmup, and **eps is driven to ~1e-5 — the chain measurably FROZE**
+(x constant to 6 digits for thousands of iterations). What ships:
+acceptance-based dual averaging — Robbins-Monro root-finding on
+`E[P(pick != root)] = 0.80` (step `alpha/sqrt(k)`, moving-average
+signal, span 100) plus a **divergence guard** (any divergence halves
+eps, floor 1e-3, ceiling 5.0). The 0.80 target (not Metropolis
+NUTS's 0.65) because exact slice sampling has no rejection step:
+P(pick != root) ~ 1 is healthy, -> 0 means a stuck chain.
+
+**The acceptance bar lives on HMC.** The game plan's "NUTS
+acceptance 0.6-0.8 on rook/banana" is a Metropolis-acceptance
+concept. Here the HMC 2-D banana gate is the real thing:
+eps=0.1, L=50, n=20000, burn-in 5000 -> measured acceptance **0.692**
+(in band), E[y] -0.008, sd[y] 0.83. NUTS gates are moment quality +
+divergence bounds instead (8-D anisotropic Gaussian: per-dim sd
+within 15%, measured ~4%, 0 divergences, ESS(stiff dim) >= 500).
+
+Measured MCMC gates (`tests/test_mcmc.c`, 9 tests / 66 checks): MH
+moments + acceptance + fixed-seed bit-identity; HMC banana
+acceptance in [0.55, 0.85] and moments; HMC acceptance monotone in
+eps; NUTS 1-D fixed-eps mechanism; NUTS banana (divergences <= 100,
+measured ~8); NUTS 8-D stress target; ESS white-noise ~ n and
+AR(1) ~ n/19; integrators within 10 SE of a 16^5 midpoint reference;
+error inputs.
+
+### 10.4 QMC note
+
+Sobol'/Halton come from H1 (direction numbers / primes, stateless
+random access); the integrator wraps them with the plain/antithetic/
+stratified MC paths so all five share ONE API and ONE stderr
+contract (Welford over the samples, ESS not applicable — i.i.d. or
+low-discrepancy, so the reported SE is the plain sample SE, an
+honest over-estimate for the QMC paths).
+
+### 10.5 Streaming statistics (`src/core/stream.c`)
+
+- **`RCRE_StreamStats`** — running mean/var/skew/kurtosis. The push
+  is implemented as a merge with a one-element state so the
+  single-stream path reuses the (verified) Chan et al. (2010)
+  parallel-merge math — no separate recurrence, no duplicated bug
+  surface. Skew/kurtosis are the bias-corrected (Fisher) sample
+  estimators. Gated vs a naive two-pass reference (<= 1e-8 relative)
+  and vs chunked merge (== full stream).
+- **`RCRE_P2Quantile`** — the P^2 online quantile (Jain & Chlamtac
+  1985), 5 markers, O(1) memory. **Measured deviation from the
+  plan**: the plan named t-digest/KLL/GK. A Greenwald-Khanna draft
+  was tried first and retired: with eps = 0.01 the size cap is
+  n*eps^-1 = 1e8 tuples, so under 1e6 items the sketch never
+  compresses — yet the cumulative-gap quantile walk still placed the
+  0.5-quantile of 1e6 uniforms at rank ~0.0002, a bookkeeping error
+  (gap bookkeeping vs the paper's query) that could not be
+  reconciled from memory. P^2 ships instead: 60 lines, no merge
+  machinery, and its rank error is gated empirically against exact
+  quantiles: p in {0.1, 0.5, 0.9} on a 1e6 stream, worst |err|
+  **0.0005** (bar 0.02).
+- **Bootstrap** — ordinary and moving-block resampling of a
+  statistic, PCG64 substreams keyed by (seed, resample_id) so
+  resamples are slab-parallel by construction (the same substream
+  contract as the e-means/H0 determinism policy). Gated: mean-SE
+  ratio 0.85-1.15 (measured 1.01), fixed-seed bit-identity,
+  distinct resample ids draw differently.
+
+### 10.6 Measured bugs, H7 (all fixed in-tree, all documented where
+they live)
+
+1. **Slab task scratch shared across rows** (PDE DST-I): the serial
+   loop passed `&tk[i]` while the task indexed `[row]` from the
+   base — out-of-bounds access, SEGV under ASan. Fixed to the
+   documented task contract (`arg` base + `task_id`).
+2. **Burgers CFL gate** `dt/dx <= 1` silently rejected legitimate
+   large-dt cases and accepted unstable `max|u| > 1` ones; the gate
+   is now `dt*max|u|/dx <= 1`.
+3. **N-body point-mass power**: the first draft used `r^-4`; exact
+   2-body at separation 1.0 passed (r^-3 == r^-4 at r=1) and larger
+   separations gave ratios 1/3, 1/9. Fixed to `r^-3`.
+4. **N-body tree construction** went through two bad designs (per-node
+   scratch written with absolute positions -> ASan
+   heap-buffer-overflow; relative positions treated as absolute ->
+   vanished bodies) before the single-global-permutation design.
+5. **Dangling `RCRE_NbNode*` across `realloc`** (heap-use-after-free
+   under ASan): node fields are now re-derived through `t->nodes[]`
+   after recursive calls.
+6. **Verlet force-vs-acceleration**: raw force applied as
+   acceleration; mass-1 tests hid it, a 100:0.01 central/satellite
+   system exposed it. Fixed to `a = F/m`.
+7. **NUTS selection**: sampling all nodes with weights `exp(A_m)` is
+   a generic MH kernel, NOT slice sampling — nodes below the slice
+   must be EXCLUDED. The chain ran but banana moments were badly
+   biased (E[y] +1.04 vs 0). Fixed to uniform-over-nodes-under-slice.
+8. **NUTS dual averaging (Stan form)**: the log-m drift has no
+   restoring term; easy targets drive eps -> ~1e-5 and the chain
+   freezes. Replaced with acceptance-based Robbins-Monro DA +
+   divergence guard (docs §10.3). An earlier transcription of the
+   same block also double-logged eps (mu -> NaN at iteration 2,
+   guard silently pinned eps).
+9. **out_accept contract**: the draft wrote an n_samples array
+   (`out_accept[k]`) while callers (and the header's intent) passed
+   one double — a measured stack-buffer-overflow under ASan. The API
+   is now a single double = mean acceptance.
+10. **P^2**: three separate bugs — the init-buffer insertion scan
+    broke at the first match from the top (mis-sorted buffer); the
+    new-max branch incremented only markers 1..3, leaving marker 4
+    at n - (record count) until the markers collapsed and the
+    parabolic update divided by zero; and a non-paper "slope
+    ordering" linear-update condition that crossed adjacent markers
+    at item 560 of a uniform stream and then produced 1e308 values.
+    The paper-exact piecewise-linear/parabolic update with the OLD
+    position passed to P^2 (its formula adds d internally) is what
+    ships.
+11. **Kurtosis double -3**: the bias-correction formula was fed the
+    EXCESS (m4/m2^2 - 3) and subtracted 3 again — a constant -3
+    offset (measured -4.1989 vs -1.1989 on uniforms). The formula
+    takes the population kurtosis m4/m2^2.
+12. **A test that read past its own buffer**: the 1-D NUTS "blowup"
+    to 1e308 was the test indexing out[5749] of a 5000-element
+    buffer — stack garbage, not a library bug. The library was
+    always fine; the DA freeze (item 8) was the real find behind it.
+
+### 10.7 Measured H7 bars (Apple M5 Max, 18 cores, Apple Clang 21,
+-O3, `make bench_h7`)
+
+Poisson 2D F64 (spectral / MG@1e-10 / AUTO, residual):
+
+```
+  n x n      cells     spectral   MG@1e-10   AUTO      resid
+   127 x  127     16129     6.602 ms   85.783 ms    1.524 ms  1.35e-14
+   255 x  255     65025     4.232 ms  392.077 ms    3.898 ms  1.52e-14
+   511 x  511    261121    15.443 ms 1698.760 ms   14.953 ms  3.25e-14
+  1023 x 1023   1046529    64.798 ms 6956.132 ms   61.302 ms  1.01e-13
+```
+
+Heat 2D FTCS 500 steps 512x512: serial 69.9 ms / pool 48.4 ms
+(1.44x — stencil I/O-bound at this size). Burgers 1-D Shu-Osher
+n=4096 one transit (16,384 steps): 214.6 ms (0.0131 ms/step). Wave
+1-D 10k steps: 6.4 ms (0.0006 ms/step).
+
+```
+N-body Barnes-Hut force (F64, theta=0.5):
+  n        serial    pool      speedup   (ms)
+     1000       0.369      0.258       1.43x
+    10000       4.820      1.108       4.35x
+   100000      60.432     11.072       5.46x
+N-body Verlet n=10k, 1k steps:  pool 2166.0 ms / serial 11098.8 ms (5.12x)
+MCMC (sequential by design):
+  NUTS banana     3300 iters     34.886 ms   (accept 0.88, div 19)
+  NUTS 8-D gauss  5500 iters    285.049 ms   (accept 0.91, div 0)
+  HMC banana      20000 iters (L=50)     14.079 ms   (accept 0.69)
+Streaming:
+  P^2 add x 10M   101.607 ms   (0.10 M adds/s, est 0.5001)
+  bootstrap mean x10k (n=10k)  352.034 ms
+  ESS (n=10k)     0.020 ms
+```
+
+The PDE and N-body slabs follow the library-wide determinism policy
+(bit-identical across pool sizes); MCMC and streaming are sequential
+by design and deterministic by seed.
+
+### 10.8 Documented deferrals (H7.1)
+
+The plan's H7 item list also named 3-D Barnes-Hut, 3-D / 7- / 9-point
+stencils, advection-diffusion, NUTS window (Wand) adaptation, and
+t-digest/KLL sketches. H7 closes at 2.4.0 with the coherent subset
+above; the rest is an explicit follow-on, not silent scope drop:
+
+- **3-D Barnes-Hut + 3-D stencils**: the 2-D BH machinery (single
+  global permutation, slab-parallel walk, bit-identical pool)
+  transfers directly to 3-D octants; queued as the first H7.1 item.
+- **Advection-diffusion** (upwind + centered diffusion, von Neumann
+  stability-gated): straightforward on the existing stencil
+  substrate; queued.
+- **NUTS window adaptation**: the acceptance-based DA + divergence
+  guard already keeps every measured target in a healthy regime
+  (0 divergences on the 8-D Gaussian, ~8/3300 on the banana);
+  window (Wand et al.) tuning is a refinement, not a correctness
+  gap. Queued with the 3-D BH work.
+- **t-digest/KLL**: the P^2 replacement is measured (rank error
+  0.0005 vs the 0.02 bar) and gates as well as the GK draft did
+  not; switching is only for API-completeness.
+- **ESS "within 20% of a Stan run"**: no Stan reference run exists
+  on this machine; the shipped ESS gate is the white-noise ~ n and
+  AR(1) ~ n/19 bars (Geyer IMS estimator vs theory). The statistical
+  gate is what it can be without the reference; the 20%-of-Stan bar
+  is queued for H9's conformance wave (where cross-tooling fixtures
+  already live).
+- **Burgers "±1 cell vs published shock positions"**: the shipped
+  bar is L1 <= 2e-2 vs the Hopf-Lax exact solution over one full
+  Shu-Osher transit (measured 1.2e-2) — the self-contained version
+  of the same property (L-inf stalls at ~half a shock jump by
+  design of 2nd-order TVD schemes, so cell-counting against a
+  specific published run was the less honest bar anyway).
+
+## 11. Phase H8 — Optimization Polish: L-BFGS, FISTA, CD-LASSO, SPSA (2.5.0)
+
+### 11.1 Scope
+
+Four first-class F64 optimizers in `src/core/opt.c`, all sequential and
+deterministic (SPSA under a fixed PCG64 seed), all with report-struct
+telemetry (no callbacks in the numerics path — the H4 lesson):
+
+- `rcre_lbfgs_f64` — two-loop L-BFGS (Nocedal-Wright, m = 1..64,
+  default 10; strong-positivity pair filter; non-descent reset to −g).
+  Armijo backtracking. Stopping tests are the **scipy L-BFGS-B
+  definitions** (ftol on max(|f|,|fp|,1), gtol on the infinity-norm
+  gradient, optional xtol measure max|x−y|/max(1+|x|) — disabled by
+  default here because scipy L-BFGS-B has no xtol option, so the bar
+  runs with matched test sets). Optional box bounds via **projected
+  backtracking trials** (documented heuristic — not the
+  Byrd-Lu-Petryakov bounded algorithm; an explicit deferral, §11.6).
+- `rcre_fista_f64` — Beck-Teboulle for min f(x) + g(x) with a user
+  `prox_g`; backtracking local-Lipschitz check on the smooth part.
+  out_f is the smooth value at the result (f + g is the caller's sum).
+- `rcre_cd_lasso_f64` — cyclic coordinate descent for
+  min 1/2||Ax−b||² + λ||x||₁ with the exact soft-threshold coordinate
+  update and classical AᵀA Gram bookkeeping (O(d²n) upfront,
+  documented). KKT-verifiable.
+- `rcre_spsa_f64` — Spall zeroth-order: 2-point estimate
+  (f(x+cΔ)−f(x))/(cΔ) and 4-point sign estimate (f(x+cΔ)−f(x−cΔ))/(2cΔ),
+  a_k = a0/(k+1)^γ, fresh ±1 perturbations from PCG64 (fixed
+  consumption order → bit-identical run per seed).
+
+### 11.2 Bars (measured — `tests/test_h8.c`, 98 checks)
+
+**L-BFGS vs scipy 1.18.1 L-BFGS-B** (fixture
+`tests/fixtures/h8_scipy_reference.txt`, generated by
+`tests/ref_h8_scipy.py`; both sides ftol=gtol=1e-10, xtol disabled on
+the C side, maxiter=1000·d):
+
+| problem      | d  | f (ours)            | f (scipy)           | rel err | iters (ours/scipy) |
+|--------------|----|---------------------|---------------------|---------|--------------------|
+| rosen2       | 2  | 4.5731e-16          | 2.7863e-14          | 2.7e-14 | 9 / 14             |
+| rosen10      | 10 | 1.7048e-16          | 6.3934e-17          | 1.1e-16 | 14 / 12            |
+| beale        | 2  | 3.2240e-17          | 1.9484e-15          | 1.9e-15 | 12 / 15            |
+| wood         | 4  | 2.8480e-15          | 3.8922e-13          | 3.9e-13 | 47 / 58            |
+| styblinski5  | 5  | −3.641601197e+01    | −3.641601197e+01    | 0.0     | 5 / 5              |
+| exponlin10   | 10 | −5.8065e+01         | −5.7866e+01         | —       | 3 / 1              |
+| quad50 (SPD) | 50 | −1.533598751e-01    | −1.533598751e-01    | 1.9e-13 | 11 / 12            |
+| boundquad30  | 30 | −1.629004516e-01    | −1.629004516e-01    | 5.0e-13 | 10 / 10 (f only)   |
+
+Bar classes (both documented in the test):
+
+- **status-0 class** (scipy converged by ftol/gtol): |f_ours − f_scipy|
+  ≤ 1e-10 relative AND iterations ≤ 1.25× scipy nit (+1 accepted-step
+  off-by-one guard). All of the above pass; worst measured relative
+  error 5.0e-13, worst iteration ratio 1.17 (rosen10, 14 vs 12 —
+  scipy's stronger Wolfe line search finds the valley bottom 2 steps
+  sooner; our Armijo takes slightly more, always cheaper steps).
+- **early-stop class** (exponlin10): scipy's status=2 means the
+  **Fortran L-BFGS-B driver's internal relative-step test** stopped it
+  — measured: scipy stops at nit=1 for *any* ftol in 1e-8..1e-15, so
+  the step test is internal, not an option. Bar: f_ours ≤ f_scipy
+  (we must reach at least as low; −5.8065 < −5.7866 ✓) and bounded
+  extra work (3 iters ≤ 4·1+2 ✓).
+
+**CD-LASSO** (400×80 random instance, λ ∈ {0.05, 0.25, 1.0}): KKT
+violation ≤ 1e-8·(1+λ) (measured 2.7e-9..3.6e-9), objective improves
+from x0=0, bit-identical across repeated runs.
+
+**FISTA vs CD-LASSO** (independent algorithms, same instance):
+composite objectives within 1e-4 relative — **measured 1.2e-16..4.9e-16**
+(machine precision: they land on the same minimizer).
+
+**SPSA** (SPD quad-20, equal eval budgets: 4-point 500 steps = 1501
+evals, 2-point 750 steps = 1501 evals): both reach ≥95% of the total
+possible decrease of an L-BFGS reference (measured: 4-point f=0.379,
+2-point f=0.328 vs need ≤ 4.23; on this single seed the 2-point edge
+is the measured trend — reported, not gated). Fixed-seed runs are
+bit-identical (memcmp on x_out + exact f equality).
+
+### 11.3 Bugs measured during H8 (fixed in-tree)
+
+1. **FISTA Lipschitz anchor** — the backtracking check used f(x_k)
+   (the previous iterate) instead of f(y_k) (the gradient point): on a
+   random 400×80 LASSO the check failed until L doubled **53 times
+   (L ≈ 9e15)**, the prox step collapsed to ~2.5e-15, and the chain
+   stalled at x0 (identical output for all three λ — the symptom).
+   Fix: anchor at f(y), one extra value evaluation per iterate.
+2. **L-BFGS y-storage order** — the draft stored y = g_new − g_old
+   *after* copying g_new over g_old (y ≡ 0 → every H_k ≡ I, a silent
+   degradation to steepest descent). Fix: capture y before the
+   overwrite.
+3. **SPSA sign-estimator scale** — the 4-point (sign) estimator has
+   O(‖∇f‖²) per-component variance (each component is
+   Σ_j ∇f_j Δ_jΔ_i): a0 = 0.5 and 0.1 both diverge on quad-20
+   (measured f → 1e33..1e108), and a0 = 5e-3 diverges on quad-100.
+   The initial step must be O(1): a0 ≈ c/‖∇f(x0)‖₂.
+4. Test-side (documented per the H4 lesson, kept out of the library
+   blame list): (a) a quad objective draft computed ½xᵀ(Qx−p) — the ½
+   applied to the linear term too — giving f = −1.5e-3 at the true
+   minimizer of a problem whose f* is −0.153; (b) the KKT check used
+   |aⱼᵀr + λ| instead of |aⱼᵀr − λ·sign(xⱼ)| — violations read exactly
+   2λ at every λ; (c) a FISTA smoke prox ignored λ (threshold = step
+   instead of λ·step) — all three λ runs returned the identical
+   solution, which looked like FISTA "ignoring λ".
+
+### 11.4 Benchmark bars (`make bench_h8`, M5 Max 18 cores, -O3)
+
+```text
+L-BFGS rosenbrock-100:            0.038 ms  (20 iters, 51 fE, f=3.1e-13)
+L-BFGS SPD-quad-500:              3.42 ms   (12 iters, 22 fE, f=-0.131)
+CD-LASSO 2000x500 lam=0.5:        259.5 ms  (31 passes, obj=2.637e+02)
+FISTA-L1 2000x500 lam=0.5:        318.4 ms  (226 iters, obj=2.637e+02)
+SPSA-4 quad-100, 10k steps:       72.1 ms   (30k fE, 95.9% of the drop,
+                                              0.42 M evals/s)
+```
+
+FISTA and CD-LASSO agree on the 2000×500 objective to all printed
+digits (2.637e+02). The CD Gram build (O(d²n) = 5e8 flops) is a
+visible part of the CD cost at this size; FISTA's backtracking L adds
+~30% over CD's 31 passes (226 prox-grad iters — sublinear O(1/k²)
+convergence, as theory predicts; CD is the recommended solver for the
+plain LASSO form).
+
+### 11.5 Explicit deferrals (H8.x)
+
+- Byrd-Lu-Petryakov bounded L-BFGS (we ship the projection heuristic;
+  box KKT is not exact at the active set).
+- Trust-region / conjugate-gradient / Newton (need Hessian or
+  Hessian-vector products — a separate API).
+- Bundled prox operators (LAD/denoising): the FISTA framework takes a
+  user prox; nothing is bundled.
+- SPSA iterate averaging / best-point tracking (we return the final
+  iterate).
+- Parallelism: the optimizers are sequential by design (stateful
+  recurrences); parallelizing objective evaluation is the caller's job.
+- CD for generalized LASSO / logistic regression (plain LASSO form
+  only).
+
+## 12. Phase H9 — HPC Wave: MPI Shim, Distributed Ops, 3-D Poisson, Pow2 FFT (2.6.0)
+
+### 12.1 Scope (game-plan H9, honest local subset)
+
+The game plan's H9 is the *silicon wave*: SVE2/AMX/RVV validation on
+real Neoverse/SPR/emission silicon plus a first distributed
+operation. This machine is Apple M5 Max with no MPI installed and no
+RISC-V userspace target, so the silicon-validation half is **deferred
+with the deferral documented** (the RPi5/RPi4 devices are the
+registered cross-machine pair; SVE2/AMX require the server silicon
+when it is attached). What H9 ships here, in the same closure order
+(H0–H8 pattern):
+
+- **A 12-function MPI shim** over self-registering backends (the D1
+  bridge pattern; `loopback` always present as the conformance
+  oracle, `mpi` optional behind `RCRE_HAVE_MPI`, compiled empty
+  without MPI — the H6 CUDA pattern: a missing backend is a skipped
+  gate, not a build failure).
+- **The first distributed operations** on that shim: a row-block
+  distributed SpMV (+ all-to-all gather) and a **halo-exchange
+  5-point stencil** (one halo row per neighbor via isend/irecv).
+- **A 3-D PDE domain layer**: 7-point Dirichlet stencil (h=1, F64) and
+  the **3-D Poisson spectral solver** (separable 1-D DST-I over three
+  axes, strided-line driver, no transposes).
+- **The H2 bar-gated FFT optimization**: an in-place power-of-two F64
+  FFT with a per-call twiddle table (`rcre_fft_pow2_f64`), wired as
+  the fast path for all pow2 lengths (recursion and Bluestein
+  included).
+- **`-ffp-contract=off` library-wide** (measured: FMA contraction
+  across code shapes broke the 256³ serial-vs-pool bit-identity;
+  identical with the flag off — the rcvc palette precedent, promoted
+  to policy).
+- **The game-plan full PDE run**: one 256³ Poisson solve, measured
+  bit-reproducible across pool sizes {NULL,1,2,4,8,18} (FNV-1a hashes
+  identical — `make bench_h9`), residual ≤ 1e-13, and the
+  cross-machine half queued for the RPi5 registration.
+
+### 12.2 Determinism (across processes)
+
+The library-wide determinism policy now spans process boundaries:
+
+- The shim's collectives are **ordered**: bcast copies from the root;
+  `allreduce_sum_f64` is an ascending-rank left fold (the real-MPI
+  backend implements the fold explicitly — gather to rank 0, fold in
+  rank order, broadcast — because a vendor's `MPI_Allreduce(MPI_SUM)`
+  pairwise tree is NOT bit-stable against the serial path).
+- The distributed ops use the **core row expression verbatim**
+  (same values, same operation order — the halo rows ARE the true
+  neighbor rows), so a 2-process run is bit-identical to the serial
+  oracle. Verified on the data path against the loopback backend
+  (`test_h9`); the real 2-process run is `make test-mpi2` (skips
+  clean without MPI).
+- Slab partitions are deterministic functions of (total, size, rank);
+  an empty slab (total < size) neither sends nor computes.
+
+### 12.3 3-D Poisson solver
+
+Layout: `c = j*nz*nx + k*nx + i` (the H4/H7 2-D layout extended; x is
+fastest). Operator `A = T_x⊗I⊗I + I⊗T_y⊗I + I⊗I⊗T_z`, `T =
+tridiag(-1,2,-1)`, zero Dirichlet (boundary folded into b). Solve:
+three forward + three inverse strided-line DST-I stages (line lengths
+per axis: x lines over i (stride 1), y lines over j (stride nz·nx,
+base i+k·nx), z lines over k (stride nx, base j·nz·nx+i)), the
+eigenvalue divide `1/(λx[i]+λy[j]+λz[k])` in between, one final
+scale. `O(n³ log n)`.
+
+Two measured implementation notes:
+
+- **n = 256 is the pathological DST size**: the odd-extension length
+  is 2(n+1) = 514 = 2·257 (257 prime) — every line runs the
+  Bluestein half (three 512-FFTs + chirps). The H9 pow2 table path
+  makes that 3·(8.6 µs) + chirp ≈ 120 µs/line instead of the H2
+  recursion's ~450 µs — the 40× in the 256³ wall times (193 s → 4.8 s
+  serial; 193 s → 4.1 s pooled is NOT the speedup — pooled is 4.1 s,
+  serial 46 s: ~11× on 18 cores).
+- **The no-half writeback**: the 3-D stages write `-Im(FFT)` (2× the
+  DST per stage; the 2-D solver keeps its `-0.5·Im` — independent
+  code, unchanged) and divide the final scale by 2⁶. Residual
+  7e-15 (64³) / 1.8e-14 (256³) vs bar 1e-13.
+- **Pow2 fast path + slab scratch**: 65,536 lines × per-line malloc
+  cost minutes; the stage now partitions lines into ≤ 4·cores slabs
+  with per-slab scratch (the H7 slab contract at 3-D scale — slab
+  count never changes the per-line arithmetic, so bit-identity holds
+  across pool sizes AND slab counts).
+- **NaN gate (measured bug)**: the pow2 dispatch reads `im` as input
+  (zero imaginary part) — the line scratch must zero BOTH halves per
+  line; the generic path hid the bug with its calloc'd temp. Caught
+  by the irregular 33×31×29 fixture (n=31 → 2(n+1)=64 is pow2).
+
+### 12.4 Measured bars (Apple M5 Max, 18 cores, -O3, -ffp-contract=off)
+
+`make bench_h9`:
+
+```text
+fft-512 f64:          pow2-inplace 8.6 us  (H2 recursion was 40.1 us — 4.7x)
+fft-514 f64 (Bluestein, the 256-DST line): 119.8 us
+SpMV 4096^2 CSR:      core 38.2 ms | loopback-dist 36.1 ms | bit-identical
+stencil5 256^2:       core 0.1 ms  | loopback-dist 0.1 ms   | bit-identical
+Poisson 64^3:         pool-18 ~26 ms | serial 305.7 ms
+Poisson 256^3 (full run):
+  pool=0 : 46357.9 ms   hash=1e84709827a34f24
+  pool=1 : 46098.4 ms   hash=1e84709827a34f24
+  pool=2 : 16340.4 ms   hash=1e84709827a34f24
+  pool=4 : 10900.5 ms   hash=1e84709827a34f24
+  pool=8 :  6790.8 ms   hash=1e84709827a34f24
+  pool=18:  4064.7 ms   hash=1e84709827a34f24
+  bit-reproducible across pool sizes: YES (6/6 hashes identical)
+  residual (test_h9): 7.0e-15 (64^3), 1.8e-14 (256^3) — bar 1e-13
+```
+
+Honest bars, per policy:
+
+- The 256³ serial time (46 s) is what a zero-dependency spectral 3-D
+  solver costs when the axis size makes every DST line Bluestein.
+  Reference libraries (MAGMA/Ginkgo) on the same run are the
+  silicon-wave comparison — deferred with the silicon.
+- pool=1 ≈ serial (46.1 s vs 46.4 s): the threadpool's main-thread
+  participation with a 1-worker pool is measured parity, not 2×.
+- The loopback dist-ops cost ≈ the core (same row arithmetic, zero
+  communication) — the 2-process numbers (real halo latency) are the
+  `test-mpi2`/server measurement.
+- Cross-machine bit-reproducibility (the game-plan bar's second half)
+  is queued: same binary + pool set on the RPi5 once the runner is
+  registered; the FNV-1a hash above is the comparison tag.
+
+### 12.5 Public API (additions)
+
+```c
+/* FFT (the H2 header's bar-gated table optimization) */
+RCRE_NODISCARD int rcre_fft_pow2_f64(double* re, double* im, size_t n,
+                                     int invert); /* in-place, pow2 only */
+
+/* 3-D domain layer (layout c = j*nz*nx + k*nx + i) */
+RCRE_NODISCARD int rcre_pde_stencil7_f64(size_t nx, size_t ny, size_t nz,
+                                         const double* u, double* v,
+                                         RCRE_ThreadPool* pool);
+RCRE_NODISCARD int rcre_pde_poisson3d_fft_f64(size_t nx, size_t ny, size_t nz,
+                                              const double* b, double* u,
+                                              RCRE_ThreadPool* pool);
+
+/* distributed ops on the 12-fn MPI shim (extras/rcre_mpi.h) */
+RCRE_NODISCARD int rcre_dist_spmv_rows_f64(RCRE_MpiCtx* ctx,
+                                           const size_t* row_ptr,
+                                           const size_t* col_idx,
+                                           const double* values, int rows,
+                                           int r0, int r1, const double* x,
+                                           double* y_local);
+RCRE_NODISCARD int rcre_dist_gather_rows_f64(RCRE_MpiCtx* ctx, int n, int r0,
+                                             int r1, const double* y_local,
+                                             double* y_full);
+RCRE_NODISCARD int rcre_dist_stencil5_f64(RCRE_MpiCtx* ctx, size_t nx,
+                                          size_t ny, const double* u_local,
+                                          double* v_local);
+/* ctx == NULL is the serial oracle path for every dist op. */
+
+/* the shim (include/extras/rcre_mpi.h, self-contained header) */
+rcre_mpi_open / _close / _size / _rank / _barrier / _bcast_f64 /
+rcre_mpi_send_f64 / _recv_f64 / _isend_f64 / _irecv_f64 / _wait /
+rcre_mpi_allreduce_sum_f64   /* ordered ascending-rank fold */
+```
+
+### 12.6 Test gates (tests/test_h9.c — 56 checks)
+
+- **Shim (loopback)**: registration, size/rank, bcast/allreduce
+  identity, point-to-point contract, error inputs; the `mpi` backend
+  absent → open fails clean (the H6 pattern).
+- **Dist SpMV oracle**: serial path, loopback path, and a manual
+  2048/2048 row-block split all bit-identical to `rcre_spmv_f64`
+  (64×64 Poisson CSR, ascending col order — the H4/H6 convention).
+- **Halo stencil oracle**: serial + loopback bit-identical to
+  `rcre_pde_stencil5_f64`; the boundary-row arithmetic with a real
+  halo value verified against the core row expression.
+- **Poisson 64³**: residual ≤ 1e-13 and bit-identity across pool
+  sizes {NULL,1,2,4,8,18}.
+- **Poisson 256³ (the game-plan run)**: serial vs pool-18 bit-identical
+  + residual ≤ 1e-13.
+- **Irregular 33×31×29 vs the external numpy DST-I fixture**
+  (`tests/fixtures/h9_poisson3d_reference.txt`, regenerated by
+  `tests/ref_h9_vectors.py` — infra-immune): max rel err 1.1e-15,
+  NaN-aware. 33/31/29 are all prime — the fixture exercises the
+  Bluestein half of every DST line.
+- `make test-mpi2`: the real 2-process gates (halo stencil + dist
+  SpMV/gather + ordered allreduce vs the serial oracle) — `mpirun
+  -np 2`, skips clean without MPI.
+- `make test-sanitizers` covers `test_h9` (ASan+UBSan, zero findings —
+  it caught the 2048/2048 test-side overflow pre-gate).
+
+## 13. Validation gates (per release)
 
 - `make all` — zero warnings (`-Wall -Wextra -Wpedantic`).
 - `make test` — full suite incl. `test_linalg` (14 suites, 827,421
-  assertions), `test_rng` (7 tests, 395,456 assertions),
+  assertions), `test_rng` (9 tests, 395,474 assertions incl. the
+  Philox-4x32-10 fixture bits),
   `test_fft_f64` (3 tests, 4,632 assertions), `test_direct` (7 tests,
   139 assertions), `test_h4` (10 tests, 1,097 assertions incl. the
-  BiCGStab 40-step parity fixture) and the amalgamated single-header
-  build.
+  BiCGStab 40-step parity fixture), `test_zarr` (9 tests, 141
+  assertions: metadata golden, 12-dtype round-trips, fill semantics
+  incl. NaN/bool, edge chunks, 1D–8D, zstd, slab determinism,
+  strided blocks, errors), `test_pde` (13 tests: DST-I, spectral
+  Poisson eigenvector + residual, FFT-vs-MG, pool determinism, heat
+  mode + stability gate, Burgers Shu-Osher L1/mass/range, Hopf-Lax,
+  wave convergence + energy + CFL gate), `test_nbody` (8 tests: BH
+  vs direct, theta scaling, pool determinism, 2-body elliptic/
+  parabolic, mass weighting, 800-body chaos, errors), `test_mcmc`
+  (9 tests / 66 checks: MH, HMC banana acceptance 0.692, NUTS 1-D/
+  banana/8-D, ESS, integrators, errors), `test_stream` (7 tests / 32
+  checks: Welford vs naive, merge, P^2 rank <= 0.0005, bootstrap, 
+  errors), `test_h8` (4 groups / 98 checks: L-BFGS vs the scipy
+  fixture — final-f 1e-10 rel + 1.25x iterations on the status-0
+  class, f_ours <= f_scipy on the early-stop class — CD-LASSO KKT,
+  FISTA-vs-CD objective 1e-4 rel (measured 1e-16), SPSA 95% decrease
+  + fixed-seed bit-identity, error inputs), `test_h9` (5 groups / 56
+  checks: MPI-shim loopback oracle, dist SpMV/halo-stencil bit-
+  identity vs the core ops, Poisson 64^3 residual + pool
+  bit-identity, the 256^3 game-plan run serial-vs-pool-18 bit-
+  identical + residual, the 33x31x29 numpy DST-I fixture 1e-15 rel,
+  error inputs), `test_gpu` (5 tests; 363 assertions on the
+  RTX 5060 Ti: buffer round-trips, CPU-backend bit-identity, device
+  precision bars + double-launch determinism, 65,536-word Philox
+  bit-identity, CG+ILU(0) parity at 75 vs 76 iters; the device gates
+  skip clean where no CUDA backend is linked) and the amalgamated
+  single-header build.
+- `make test-mpi2` — the real 2-process distributed gates (halo
+  stencil + dist SpMV/gather + ordered allreduce vs the serial
+  oracle) under `mpirun -np 2`; skips clean where mpicc/mpirun are
+  absent (the loopback backend covers the data paths).
+- `make conformance-zarr` — 13 fixed arrays bit-identical C ↔
+  zarr-python in both directions + golden metadata + NaN fill
+  (skips clean without a zarr venv).
 - `make test-sanitizers` — ASan + UBSan + leak check, zero findings.
 - `make bench` — numbers appended to this file / `docs/benchmarks_sota.md`
-  with machine + toolchain + commit.
+  with machine + toolchain + commit (`bench_h5` covers the Zarr I/O
+  bars of §8.5; `bench_h6` covers the GPU bridge bars of §9.4;
+  `bench_h7` covers the domain-layer bars of §10.7;
+  `bench_h9` covers the H9 bars of §12.4 — the 256^3 bit-reproducible
+  run (6 pool sizes, FNV-1a hashes), dist ops, pow2 FFT;
+  `bench_h8` covers the optimization bars of §11.4).
+- `make test-portable` — the amalgamated header compiles + runs in a
+  truly clean directory (no repo includes on the line — the probe
+  deliberately drops `$(CFLAGS)` so a leaked local include cannot be
+  rescued by the worktree).
 - x86 path: AVX2/AVX-512 cells compile under their pragma-guarded TUs on
   any x86-64 compiler and are only dispatched when CPUID reports the
   feature; validated on the next x86 CI runner (H9).

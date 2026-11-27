@@ -35,10 +35,24 @@ C_FILES = [
     SRC_DIR / "core" / "sf.c",
     SRC_DIR / "core" / "rng.c",
     SRC_DIR / "core" / "fft.c",
+    SRC_DIR / "core" / "direct.c",
+    SRC_DIR / "core" / "krylov.c",
+    SRC_DIR / "core" / "multigrid.c",
+    SRC_DIR / "core" / "chunked.c",
+    SRC_DIR / "core" / "pde.c",      # H7 domain layer: PDE solvers (2.4.0)
+    SRC_DIR / "core" / "nbody.c",    # H7 domain layer: Barnes-Hut gravity (2.4.0)
+    SRC_DIR / "core" / "mcmc.c",     # H7 domain layer: MH/HMC/NUTS + QMC (2.4.0)
+    SRC_DIR / "core" / "stream.c",   # H7 domain layer: streaming stats + bootstrap (2.4.0)
+    SRC_DIR / "core" / "opt.c",      # H8 optimization: L-BFGS/FISTA/CD-LASSO/SPSA (2.5.0)
+    SRC_DIR / "extras" / "gpu_ctx.c",  # H6 bridge registry + cpu backend (zero-dep)
+    SRC_DIR / "core" / "dist.c",       # H9 distributed ops (SpMV/halo stencil) on the MPI shim
+    SRC_DIR / "extras" / "mpi_ctx.c",  # H9 MPI shim registry + loopback backend (zero-dep)
+    SRC_DIR / "extras" / "mpi_real.c", # H9 optional real-MPI backend TU (empty unless RCRE_HAVE_MPI)
     SRC_DIR / "core" / "adapt.c",
     SRC_DIR / "core" / "threadpool.c",
     SRC_DIR / "core" / "prof.c",
     SRC_DIR / "core" / "sparse.c",
+    SRC_DIR / "core" / "nlp.c",
     SRC_DIR / "core" / "io.c",
     SRC_DIR / "core" / "df.c",
     SRC_DIR / "cv" / "color.c",
@@ -84,7 +98,7 @@ def clean_file_content(content: str) -> str:
     for line in content.splitlines():
         # P4: also strip PATH-QUALIFIED local includes (e.g. "../core/rcre_rng.h")
         # that previously leaked into dist/rcre.h and broke out-of-tree builds.
-        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer)/)?(rcre\.h|rcre_str\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|rcre_sparse\.h|rcre_io\.h|rcre_llm\.h|rcre_codec\.h|rcre_df\.h|rcre_stat\.h|rcre_prep\.h|rcre_metric\.h|rcre_vis_ds\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h|e_means_internal\.h)[">]', line):
+        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer|extras)/)?(rcre\.h|rcre_str\.h|rcre_nlp\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|rcre_sparse\.h|rcre_io\.h|rcre_llm\.h|rcre_codec\.h|rcre_df\.h|rcre_stat\.h|rcre_prep\.h|rcre_metric\.h|rcre_vis_ds\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h|e_means_internal\.h|rcre_gpu\.h|rcre_mpi\.h|rng_pcg_table\.h|rng_sobol_table\.h)[">]', line):
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -174,8 +188,16 @@ def main():
     prof_header = (INCLUDE_DIR / "rcre_prof.h").read_text(encoding="utf-8")
     header_content = header_content + "\n" + "/* --- Profiling & Telemetry Subsystem (rcre_prof) --- */\n" + clean_file_content(prof_header) + "\n"
 
+    gpu_header = (INCLUDE_DIR / "extras" / "rcre_gpu.h").read_text(encoding="utf-8")
+    header_content = header_content + "\n" + "/* --- H6 GPU Bridge (rcre_gpu; cpu backend bundled, cuda is an opt-in TU) --- */\n" + clean_file_content(gpu_header) + "\n"
+    mpi_header = (INCLUDE_DIR / "extras" / "rcre_mpi.h").read_text(encoding="utf-8")
+    header_content = header_content + "\n" + "/* --- H9 MPI shim (rcre_mpi; loopback bundled, real MPI is an opt-in TU) --- */\n" + clean_file_content(mpi_header) + "\n"
+
     sparse_header = (INCLUDE_DIR / "rcre_sparse.h").read_text(encoding="utf-8")
     header_content = header_content + "\n" + "/* --- Sparse Matrix & Pruning Engine (rcre_sparse) --- */\n" + clean_file_content(sparse_header) + "\n"
+
+    nlp_header = (INCLUDE_DIR / "rcre_nlp.h").read_text(encoding="utf-8")
+    header_content = header_content + "\n" + "/* --- HPC Natural Language Processing Engine (rcre_nlp) --- */\n" + clean_file_content(nlp_header) + "\n"
 
     hal_internal = (SRC_DIR / "hal" / "hal_internal.h").read_text(encoding="utf-8")
     ml_internal = (SRC_DIR / "ml" / "ml_internal.h").read_text(encoding="utf-8")
