@@ -57,6 +57,7 @@ C_FILES = [
     SRC_DIR / "core" / "df.c",
     SRC_DIR / "cv" / "color.c",
     SRC_DIR / "cv" / "geom.c",
+    SRC_DIR / "cv" / "resize_gm.c",
     SRC_DIR / "cv" / "filter.c",
     SRC_DIR / "cv" / "fft.c",
     SRC_DIR / "cv" / "features.c",

@@ -115,10 +115,62 @@ static void test_color_hsv_roundtrip(void) {
     rcre_arena_destroy(arena);
 }
 
+static void test_resize_gm_filters(void) {
+    RCRE_Arena* arena = rcre_arena_create(2 * 1024 * 1024);
+    ASSERT_NOT_NULL(arena);
+
+    size_t in_shape[2] = {4, 4};
+    size_t out_up[2]   = {8, 8};
+    size_t out_down[2] = {2, 2};
+
+    RCRE_Tensor src = rcre_tensor_create(in_shape, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
+    RCRE_Tensor dst_up = rcre_tensor_create(out_up, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
+    RCRE_Tensor dst_down = rcre_tensor_create(out_down, 2, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
+    ASSERT_NOT_NULL(src.data);
+    ASSERT_NOT_NULL(dst_up.data);
+    ASSERT_NOT_NULL(dst_down.data);
+
+    float* in_ptr = (float*)src.data;
+    for (size_t y = 0; y < 4; ++y) {
+        for (size_t x = 0; x < 4; ++x) {
+            in_ptr[y * 4 + x] = (float)(x + y);
+        }
+    }
+
+    /* Test GM-Lanczos upscale */
+    int status_lanczos = rcre_cv_resize_gm(&src, &dst_up, RCRE_CV_INTERP_GM_LANCZOS, arena);
+    ASSERT_INT_EQ(RCRE_OK, status_lanczos);
+
+    /* Test GM-Mitchell downscale */
+    int status_mitchell = rcre_cv_resize_gm(&src, &dst_down, RCRE_CV_INTERP_GM_MITCHELL, arena);
+    ASSERT_INT_EQ(RCRE_OK, status_mitchell);
+
+    /* Test GM-Bessel with NULL arena (heap fallback) */
+    int status_bessel = rcre_cv_resize_gm(&src, &dst_up, RCRE_CV_INTERP_GM_BESSEL, NULL);
+    ASSERT_INT_EQ(RCRE_OK, status_bessel);
+
+    /* Test GM-Triangle, Box, Hermite, Catrom, Sinc */
+    ASSERT_INT_EQ(RCRE_OK, rcre_cv_resize_gm(&src, &dst_up, RCRE_CV_INTERP_GM_TRIANGLE, arena));
+    ASSERT_INT_EQ(RCRE_OK, rcre_cv_resize_gm(&src, &dst_down, RCRE_CV_INTERP_GM_BOX, arena));
+    ASSERT_INT_EQ(RCRE_OK, rcre_cv_resize_gm(&src, &dst_up, RCRE_CV_INTERP_GM_HERMITE, arena));
+    ASSERT_INT_EQ(RCRE_OK, rcre_cv_resize_gm(&src, &dst_up, RCRE_CV_INTERP_GM_CATROM, arena));
+    ASSERT_INT_EQ(RCRE_OK, rcre_cv_resize_gm(&src, &dst_up, RCRE_CV_INTERP_GM_SINC, arena));
+
+    /* Test 3D CHW planar multichannel resize */
+    size_t sh3_in[3] = {3, 4, 4};
+    size_t sh3_out[3] = {3, 6, 6};
+    RCRE_Tensor src3 = rcre_tensor_create(sh3_in, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
+    RCRE_Tensor dst3 = rcre_tensor_create(sh3_out, 3, RCRE_DTYPE_F32, RCRE_LAYOUT_CHW, arena);
+    ASSERT_INT_EQ(RCRE_OK, rcre_cv_resize_gm(&src3, &dst3, RCRE_CV_INTERP_GM_LANCZOS, arena));
+
+    rcre_arena_destroy(arena);
+}
+
 int main(void) {
     test_suite_begin("RCRE Image Resizing & Color Spaces (CV-REQ-02)");
     TEST_RUN(test_resize_identity);
     TEST_RUN(test_resize_bilinear_2x2_to_4x4);
     TEST_RUN(test_color_hsv_roundtrip);
+    TEST_RUN(test_resize_gm_filters);
     return test_suite_report();
 }

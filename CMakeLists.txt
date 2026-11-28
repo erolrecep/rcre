@@ -31,6 +31,7 @@ set(RCRE_CORE_SRCS
     src/core/io.c
     src/cv/color.c
     src/cv/geom.c
+    src/cv/resize_gm.c
     src/cv/filter.c
     src/cv/fft.c
     src/cv/features.c

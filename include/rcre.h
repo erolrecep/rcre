@@ -503,6 +503,46 @@ RCRE_NODISCARD int rcre_cv_resize_nn(const RCRE_Tensor* src, RCRE_Tensor* dst);
 RCRE_NODISCARD int rcre_cv_resize_bilinear(const RCRE_Tensor* src, RCRE_Tensor* dst);
 
 /**
+ * @brief Resampling filters for GM-exact continuous resizing (rcre_cv_resize_gm).
+ * Bit-for-bit mathematical ports of GraphicsMagick 1.3.49 resamplers.
+ */
+typedef enum {
+    RCRE_CV_INTERP_NN           = 0,
+    RCRE_CV_INTERP_BILINEAR     = 1,
+    RCRE_CV_INTERP_GM_POINT     = 10,
+    RCRE_CV_INTERP_GM_BOX       = 11,
+    RCRE_CV_INTERP_GM_TRIANGLE  = 12,
+    RCRE_CV_INTERP_GM_HERMITE   = 13,
+    RCRE_CV_INTERP_GM_HANNING   = 14,
+    RCRE_CV_INTERP_GM_HAMMING   = 15,
+    RCRE_CV_INTERP_GM_BLACKMAN  = 16,
+    RCRE_CV_INTERP_GM_GAUSSIAN  = 17,
+    RCRE_CV_INTERP_GM_QUADRATIC = 18,
+    RCRE_CV_INTERP_GM_CUBIC     = 19,
+    RCRE_CV_INTERP_GM_CATROM    = 20,
+    RCRE_CV_INTERP_GM_MITCHELL  = 21,
+    RCRE_CV_INTERP_GM_LANCZOS   = 22,
+    RCRE_CV_INTERP_GM_BESSEL    = 23,
+    RCRE_CV_INTERP_GM_SINC      = 24
+} RCRE_CV_Interp;
+
+/**
+ * @brief GM-exact separable 2D image resampler with 16 continuous windowed filter kernels.
+ *
+ * Implements GraphicsMagick 1.3.49's HorizontalFilter/VerticalFilter window math,
+ * with continuous subpixel coordinates, pass-ordering heuristic, and double-precision
+ * filter accumulation. Supports 2D [H, W] and 3D [H, W, C] / [C, H, W] F32 tensors.
+ *
+ * @param src Source tensor (F32, rank 2 or 3)
+ * @param dst Destination tensor (F32, rank 2 or 3 matching src channel count)
+ * @param interp GM filter selector (e.g. RCRE_CV_INTERP_GM_LANCZOS, RCRE_CV_INTERP_GM_TRIANGLE)
+ * @param arena Optional arena for temporary tap buffers and pass scratchpad (NULL uses malloc/free)
+ * @return RCRE_OK on success, or RCRE error code
+ */
+RCRE_NODISCARD int rcre_cv_resize_gm(const RCRE_Tensor* src, RCRE_Tensor* dst,
+                                     RCRE_CV_Interp interp, RCRE_Arena* arena);
+
+/**
  * @brief Separable 2D Gaussian blur with reflection padding.
  */
 RCRE_NODISCARD int rcre_cv_gaussian_blur(const RCRE_Tensor* src, RCRE_Tensor* dst, 

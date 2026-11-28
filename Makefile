@@ -129,6 +129,7 @@ SRCS = src/core/arena.c \
        src/core/chunked.c \
        src/cv/color.c \
        src/cv/geom.c \
+       src/cv/resize_gm.c \
        src/cv/filter.c \
        src/cv/fft.c \
        src/cv/features.c \
@@ -211,7 +212,7 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help prep all clean test test-sanitizers test-parity test-portable test-all bench bench_h5 bench_io conformance-zarr profile bench_h6 bench_h7 bench_h8 examples dist docs up_docs sync_blog up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo gpt_train sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench project_omnisearch_test project_omnisearch_demo project_omnisearch_bench project_galton_test project_galton_demo project_galton_bench project_emeans_test project_emeans_demo project_emeans_bench project_manifold_test project_manifold_demo project_manifold_animate project_manifold_swiss project_manifold_pacmap project_manifold_san project_gen_test project_gen_demo project_gen_san project_gen_pipeline project_gen_deploy
+.PHONY: default help prep all clean test test-sanitizers test-parity test-portable test-all bench bench_h5 bench_io conformance-zarr profile bench_h6 bench_h7 bench_h8 examples dist docs up_docs sync_blog up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo gpt_train sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench project_omnisearch_test project_omnisearch_demo project_omnisearch_bench project_galton_test project_galton_demo project_galton_bench project_emeans_test project_emeans_demo project_emeans_bench project_manifold_test project_manifold_demo project_manifold_animate project_manifold_swiss project_manifold_pacmap project_manifold_san project_gen_test project_gen_demo project_gen_san project_gen_pipeline project_gen_deploy project_rcvc_sync project_rcvc_test project_rcvc_san project_rcvc_all
 
 default: help
 
@@ -459,6 +460,21 @@ project_gen_pipeline: $(LIB)
 
 project_gen_deploy: $(LIB)
 	@$(MAKE) -C projects/rcre_gen_studio deploy
+
+# ---------------------------------------------------------------------------
+# RCVC: High-Performance Computer Vision Engine Integration
+# ---------------------------------------------------------------------------
+project_rcvc_sync: dist
+	@cp dist/rcre.h ../rcvc/include/rcre.h
+	@echo "✅ Synced dist/rcre.h to apps/rcvc/include/rcre.h"
+
+project_rcvc_test: project_rcvc_sync
+	@$(MAKE) -C ../rcvc test
+
+project_rcvc_san: project_rcvc_sync
+	@$(MAKE) -C ../rcvc san
+
+project_rcvc_all: project_rcvc_test project_rcvc_san
 
 
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
