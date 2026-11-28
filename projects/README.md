@@ -23,6 +23,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-emeans`** | [`rcre_emeans/`](rcre_emeans/) | Fast mini-batch EMA k-means clustering with scaling-law recipes & dead-cluster revival | EMA Updates, Gumbel-Max Revival, Dual-Kernel Argmin, ThreadPool Determinism |
 | **`rcre-manifold`** | [`rcre_manifold/`](rcre_manifold/) | Multi-dimensional manifold learning, UMAP, Barnes-Hut t-SNE & PaCMAP untangling | Fuzzy Simplicial Sets, Barnes-Hut 2D Quadtree, 3-Tier Pair Annealing, WebAssembly |
 | **`rcre-gen-studio`** | [`rcre_gen_studio/`](rcre_gen_studio/) | End-to-end generative & vision AI studio (ConvAE, ConvVAE, Diffusion Tiny U-Net, ViT, DiT) | Tensor Tape Autograd, Reparameterization, DDPM/DDIM, Batched MHSA, AdaLN-Zero, PNG/SafeTensors |
+| **`rcre-server-bench`** | [`rcre_server_vs_go_benchmark/`](rcre_server_vs_go_benchmark/) | High-performance C23 HTTP/1.1 kqueue reactor vs Go 1.27 web server benchmark | Zero-malloc SPSC kqueue reactor, BM25 Index, GBDT Inference, Arena Allocator |
 | **`rcre-cv-ops`** | [`rcre_cv_ops/`](rcre_cv_ops/) | **[TODO / Planned]** Turnkey Image & Computer Vision CLI (absorbing retired `rcvc` ops) | Continuous GM Resizing (16 Filters), Convolutions, Colorimetry, e-Means Palette, Sixel/Kitty Display |
 
 ---
@@ -391,7 +392,41 @@ For full CLI options, quantization tables, HTTP server, and Docker deployment in
 
 ---
 
-## 14. `rcre-cv-ops` (Turnkey Image & Computer Vision CLI) — [TODO / Planned]
+## 14. `rcre-server-bench` (C23 HTTP/1.1 Reactor vs Go Web Server Benchmark)
+
+An apples-to-apples, reproducible systems benchmark suite evaluating an ISO C23 zero-malloc `kqueue` HTTP/1.1 reactor server built on RCRE against Go 1.27 (`net/http`) across both idiomatic and zero-allocation tuned implementations.
+
+### Key Capabilities
+* **Shared-Nothing Worker Reactor**: Uses a worker-per-core `kqueue` event loop with non-blocking I/O. In 1-worker mode, `accept()` folds inline; in $N>1$ worker mode, a dedicated non-blocking acceptor dispatches accepted file descriptors round-robin over lock-free SPSC ring buffers with `EVFILT_USER` wakeups.
+* **Zero-Malloc Request Hot Path**: Pre-allocated connection tables per worker, slab-pooled 16 KB I/O buffers attached strictly during read/write activity and detached on idle (~96 bytes / idle socket), and per-worker linear scratchpad memory arenas (`RCRE_Arena`) with $\mathcal{O}(1)$ request reset.
+* **Integrated Systems Workloads**:
+  * **W1 (`GET /health`)**: High-throughput HTTP/1.1 I/O baseline (`text/plain`, `OK`).
+  * **W2 (`POST /api/v1/validate`)**: Vectorized RFC 3629 UTF-8 validation (`rcre_str.h`), codepoint counting, and FNV-1a checksums over 4 KB payloads.
+  * **W3 (`GET /api/v1/search?q=...&k=10`)**: Stateful Okapi BM25 ranked search (`rcre_nlp.h`) over 10,000 indexed documents.
+  * **W4 (`POST /api/v1/infer`)**: Machine learning inference evaluating 64 samples × 16 features through a 100-tree flat GBDT ensemble (`rcre_ml.h`).
+  * **W5 (`GET /health` @ high concurrency)**: Connection fan-out scaling ($C \in \{64, 256, 1024, 2048\}$) and steady-state RSS profiling.
+* **Cross-Server Conformance & Byte-Exact Parity**: Python test harness (`run_verify.py`) running against all servers concurrently under Clang AddressSanitizer and UBSan.
+
+### Quick Start
+```bash
+# Build C23 release, ASan/UBSan, and Go server binaries:
+make project_server_bench_build
+
+# Run ASan/UBSan safety gate + HTTP/1.1 conformance & parity checks:
+make project_server_bench_verify
+
+# Run full automated benchmark matrix (Phases A-D) and generate Markdown report:
+make project_server_bench_bench
+
+# Clean compiled binaries and benchmark outputs:
+make project_server_bench_clean
+```
+
+For full architectural comparison, memory model breakdowns, and benchmark results, see [`projects/rcre_server_vs_go_benchmark/README.md`](rcre_server_vs_go_benchmark/README.md).
+
+---
+
+## 15. `rcre-cv-ops` (Turnkey Image & Computer Vision CLI) — [TODO / Planned]
 
 A dedicated, lightweight, zero-dependency C23 command-line utility designed to provide turnkey CLI access to the full computer vision operation suite originally developed and validated in the retired `rcvc` project.
 

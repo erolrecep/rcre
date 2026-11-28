@@ -462,6 +462,25 @@ project_gen_deploy: $(LIB)
 	@$(MAKE) -C projects/rcre_gen_studio deploy
 
 # ---------------------------------------------------------------------------
+# Project 14: RCRE vs Go High-Performance Server Benchmark (rcre-server-bench)
+# ---------------------------------------------------------------------------
+project_server_bench_build: $(LIB)
+	@$(MAKE) -C projects/rcre_server_vs_go_benchmark build
+
+project_server_bench_verify: $(LIB)
+	@$(MAKE) -C projects/rcre_server_vs_go_benchmark verify
+
+project_server_bench_test: project_server_bench_verify
+
+project_server_bench_san: project_server_bench_verify
+
+project_server_bench_bench: $(LIB)
+	@$(MAKE) -C projects/rcre_server_vs_go_benchmark bench
+
+project_server_bench_clean:
+	@$(MAKE) -C projects/rcre_server_vs_go_benchmark clean
+
+# ---------------------------------------------------------------------------
 # RCVC: High-Performance Computer Vision Engine (Archived / Retired)
 # ---------------------------------------------------------------------------
 project_rcvc_sync: dist

@@ -1,0 +1,38 @@
+{"service":"rcre-bench","region":"us-central","msg":"High-throughput zero-malloc C23 arena reactor on Apple Silicon"}
+{"locale":"tr","note":"İstanbul çağdaş yazılım mimarisi ve yüksek performanslı bellek yönetimi — ölçüm #1"}
+{"locale":"ja","note":"超高速イベントループとゼロコピー文字列解析のベンチマーク評価"}
+{"locale":"math","formula":"∑(i=1..N) αᵢ·xᵢ ≤ ε (10⁻⁵) → O(1) arena rewind ✓"}
+{"metrics":{"p50_us":42.5,"p99_us":118.2,"rss_mb":14.8,"allocs":0,"simd":"ARM_NEON"}}
+{"service":"rcre-bench","region":"us-central","msg":"High-throughput zero-malloc C23 arena reactor on Apple Silicon"}
+{"locale":"tr","note":"İstanbul çağdaş yazılım mimarisi ve yüksek performanslı bellek yönetimi — ölçüm #1"}
+{"locale":"ja","note":"超高速イベントループとゼロコピー文字列解析のベンチマーク評価"}
+{"locale":"math","formula":"∑(i=1..N) αᵢ·xᵢ ≤ ε (10⁻⁵) → O(1) arena rewind ✓"}
+{"metrics":{"p50_us":42.5,"p99_us":118.2,"rss_mb":14.8,"allocs":0,"simd":"ARM_NEON"}}
+{"service":"rcre-bench","region":"us-central","msg":"High-throughput zero-malloc C23 arena reactor on Apple Silicon"}
+{"locale":"tr","note":"İstanbul çağdaş yazılım mimarisi ve yüksek performanslı bellek yönetimi — ölçüm #1"}
+{"locale":"ja","note":"超高速イベントループとゼロコピー文字列解析のベンチマーク評価"}
+{"locale":"math","formula":"∑(i=1..N) αᵢ·xᵢ ≤ ε (10⁻⁵) → O(1) arena rewind ✓"}
+{"metrics":{"p50_us":42.5,"p99_us":118.2,"rss_mb":14.8,"allocs":0,"simd":"ARM_NEON"}}
+{"service":"rcre-bench","region":"us-central","msg":"High-throughput zero-malloc C23 arena reactor on Apple Silicon"}
+{"locale":"tr","note":"İstanbul çağdaş yazılım mimarisi ve yüksek performanslı bellek yönetimi — ölçüm #1"}
+{"locale":"ja","note":"超高速イベントループとゼロコピー文字列解析のベンチマーク評価"}
+{"locale":"math","formula":"∑(i=1..N) αᵢ·xᵢ ≤ ε (10⁻⁵) → O(1) arena rewind ✓"}
+{"metrics":{"p50_us":42.5,"p99_us":118.2,"rss_mb":14.8,"allocs":0,"simd":"ARM_NEON"}}
+{"service":"rcre-bench","region":"us-central","msg":"High-throughput zero-malloc C23 arena reactor on Apple Silicon"}
+{"locale":"tr","note":"İstanbul çağdaş yazılım mimarisi ve yüksek performanslı bellek yönetimi — ölçüm #1"}
+{"locale":"ja","note":"超高速イベントループとゼロコピー文字列解析のベンチマーク評価"}
+{"locale":"math","formula":"∑(i=1..N) αᵢ·xᵢ ≤ ε (10⁻⁵) → O(1) arena rewind ✓"}
+{"metrics":{"p50_us":42.5,"p99_us":118.2,"rss_mb":14.8,"allocs":0,"simd":"ARM_NEON"}}
+{"service":"rcre-bench","region":"us-central","msg":"High-throughput zero-malloc C23 arena reactor on Apple Silicon"}
+{"locale":"tr","note":"İstanbul çağdaş yazılım mimarisi ve yüksek performanslı bellek yönetimi — ölçüm #1"}
+{"locale":"ja","note":"超高速イベントループとゼロコピー文字列解析のベンチマーク評価"}
+{"locale":"math","formula":"∑(i=1..N) αᵢ·xᵢ ≤ ε (10⁻⁵) → O(1) arena rewind ✓"}
+{"metrics":{"p50_us":42.5,"p99_us":118.2,"rss_mb":14.8,"allocs":0,"simd":"ARM_NEON"}}
+{"service":"rcre-bench","region":"us-central","msg":"High-throughput zero-malloc C23 arena reactor on Apple Silicon"}
+{"locale":"tr","note":"İstanbul çağdaş yazılım mimarisi ve yüksek performanslı bellek yönetimi — ölçüm #1"}
+{"locale":"ja","note":"超高速イベントループとゼロコピー文字列解析のベンチマーク評価"}
+{"locale":"math","formula":"∑(i=1..N) αᵢ·xᵢ ≤ ε (10⁻⁵) → O(1) arena rewind ✓"}
+{"metrics":{"p50_us":42.5,"p99_us":118.2,"rss_mb":14.8,"allocs":0,"simd":"ARM_NEON"}}
+{"service":"rcre-bench","region":"us-central","msg":"High-throughput zero-malloc C23 arena reactor on Apple Silicon"}
+{"locale":"tr","note":"İstanbul çağdaş yazılım mimarisi ve yüksek performanslı bellek yönetimi — ölçüm #1"}
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
