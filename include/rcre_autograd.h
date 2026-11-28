@@ -97,15 +97,22 @@ bool rcre_scalar_export_dot(RCRE_ScalarVal* root, const char* filename);
 RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc(RCRE_Arena* arena, const size_t* shape, uint8_t ndim);
 RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc_1d(RCRE_Arena* arena, size_t d0);
 RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc_2d(RCRE_Arena* arena, size_t rows, size_t cols);
+RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc_3d(RCRE_Arena* arena, size_t d0, size_t d1, size_t d2);
 RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc_4d(RCRE_Arena* arena, size_t n, size_t c, size_t h, size_t w);
 
 /* Initialization Routines (require F32; no-op otherwise) */
 void rcre_tensor_fill(RCRE_Tensor* t, float val);
 void rcre_tensor_zeros(RCRE_Tensor* t);
 void rcre_tensor_ones(RCRE_Tensor* t);
+void rcre_tensor_fill_normal(RCRE_Tensor* t, float mean, float std, uint64_t* rng);
 void rcre_tensor_init_xavier(RCRE_Tensor* t, size_t fan_in, size_t fan_out, uint64_t* rng);
 void rcre_tensor_init_he(RCRE_Tensor* t, size_t fan_in, uint64_t* rng);
 void rcre_tensor_zero_grad(RCRE_Tensor* t);
+
+/* Sinusoidal timestep embedding [batch_size, embed_dim] (even embed_dim >= 2)
+ * using standard DDPM / DiT log-spaced frequencies exp(-ln(10000) * k / half). */
+RCRE_NODISCARD RCRE_Tensor* rcre_sinusoidal_timestep_embed(
+    RCRE_Arena* arena, const float* timesteps, size_t batch_size, size_t embed_dim);
 
 /* View & Shape Manipulations */
 /* Allocates a new arena struct referencing the source memory (O(1)). */
@@ -133,7 +140,7 @@ struct RCRE_TensorNode {
     void (*backward)(RCRE_TensorNode* node);
 };
 
-typedef struct {
+typedef struct RCRE_TensorTape {
     RCRE_TensorNode* nodes;
     size_t           count;
     size_t           capacity;
@@ -166,11 +173,38 @@ void rcre_tensor_tape_backward(RCRE_TensorTape* tape);
  */
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_matmul(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_sub(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_mul(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_scale(RCRE_TensorTape* tape, RCRE_Tensor* x, float scalar);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_exp(RCRE_TensorTape* tape, RCRE_Tensor* x);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* bias);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add_bias_4d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* bias);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_linear(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* weight, RCRE_Tensor* bias);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_relu(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_leaky_relu(RCRE_TensorTape* tape, RCRE_Tensor* x, float neg_slope);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_tanh(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_silu(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_gelu(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_layernorm(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* gamma, RCRE_Tensor* beta, float eps);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_groupnorm(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* gamma, RCRE_Tensor* beta, size_t num_groups, float eps);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_film_4d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* scale, RCRE_Tensor* shift);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_adaln_3d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* scale, RCRE_Tensor* shift);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_gate_3d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* gate);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_reshape(RCRE_TensorTape* tape, RCRE_Tensor* x, const size_t* new_shape, uint8_t new_ndim);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_slice_cols(RCRE_TensorTape* tape, RCRE_Tensor* x, size_t col_start, size_t col_width);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_concat_channels(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_upsample2d_nearest(RCRE_TensorTape* tape, RCRE_Tensor* x, size_t scale);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_avgpool2d(RCRE_TensorTape* tape, RCRE_Tensor* x, size_t kernel_size, size_t stride);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_conv2d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* weight, size_t stride, size_t padding);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_patchify(RCRE_TensorTape* tape, RCRE_Tensor* img, size_t patch_size);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_unpatchify(RCRE_TensorTape* tape, RCRE_Tensor* tokens, size_t channels, size_t height, size_t width, size_t patch_size);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add_pos_emb_3d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* pos_emb);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_mean_pool_seq(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_embed_lookup(RCRE_TensorTape* tape, RCRE_Tensor* table, const size_t* indices, size_t batch_size);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_attention(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE_Tensor* k, RCRE_Tensor* v);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_mhsa(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE_Tensor* k, RCRE_Tensor* v, size_t num_heads);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_reparameterize(RCRE_TensorTape* tape, RCRE_Tensor* mu, RCRE_Tensor* logvar, RCRE_Tensor* eps);
 
 /* ========================================================================= */
 /* 4. Loss Functions & Gradients                                             */
@@ -193,6 +227,10 @@ float rcre_loss_mse(const RCRE_Tensor* preds, const RCRE_Tensor* targets, RCRE_T
 float rcre_loss_bce(const RCRE_Tensor* preds, const RCRE_Tensor* targets, RCRE_Tensor* grad_out);
 float rcre_loss_cross_entropy_logits(const RCRE_Tensor* logits, const size_t* targets, size_t batch_size, size_t num_classes, RCRE_Tensor* grad_out);
 float rcre_loss_kl_divergence(const RCRE_Tensor* mu, const RCRE_Tensor* logvar, RCRE_Tensor* grad_mu, RCRE_Tensor* grad_logvar);
+/* Accumulating (+=) beta-weighted KL divergence for VAE training alongside a
+ * reconstruction loss on the same tape. Returns the unweighted mean KL value;
+ * adds beta * dKL/dmu and beta * dKL/dlogvar into grad_mu->grad / grad_logvar->grad. */
+float rcre_loss_kl_divergence_add(const RCRE_Tensor* mu, const RCRE_Tensor* logvar, float beta, RCRE_Tensor* grad_mu, RCRE_Tensor* grad_logvar);
 
 /*
  * Returns the index of the first target outside [0, num_classes), or -1 if
@@ -221,7 +259,7 @@ typedef enum : uint8_t {
     RCRE_OPTIM_ADAFACTOR
 } RCRE_OptimType;
 
-typedef struct {
+typedef struct RCRE_TensorOptim {
     RCRE_OptimType type;
     RCRE_Tensor** params;
     size_t         num_params;
@@ -250,6 +288,8 @@ RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_adafactor_create(RCRE_Arena* 
  * (beta == 1 would divide by zero in the bias correction). */
 void rcre_tensor_optim_step(RCRE_TensorOptim* opt);
 void rcre_tensor_optim_zero_grad(RCRE_TensorOptim* opt);
+/* Global L2 gradient norm clipping across parameter tensors; returns pre-clip norm. */
+float rcre_tensor_clip_grad_norm(RCRE_Tensor** params, size_t num_params, float max_norm);
 
 /* Scalar Autograd Optimizer */
 typedef struct {

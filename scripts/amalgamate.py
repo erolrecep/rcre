@@ -90,6 +90,11 @@ C_FILES = [
     SRC_DIR / "transformer" / "generate.c",
     SRC_DIR / "transformer" / "gguf.c",
     SRC_DIR / "transformer" / "llm.c",
+    SRC_DIR / "gen" / "ae.c",
+    SRC_DIR / "gen" / "vae.c",
+    SRC_DIR / "gen" / "diffusion.c",
+    SRC_DIR / "gen" / "vit_dit.c",
+    SRC_DIR / "gen" / "lifecycle.c",
 ]
 
 def clean_file_content(content: str) -> str:
@@ -98,7 +103,7 @@ def clean_file_content(content: str) -> str:
     for line in content.splitlines():
         # P4: also strip PATH-QUALIFIED local includes (e.g. "../core/rcre_rng.h")
         # that previously leaked into dist/rcre.h and broke out-of-tree builds.
-        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer|extras)/)?(rcre\.h|rcre_str\.h|rcre_nlp\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|rcre_sparse\.h|rcre_io\.h|rcre_llm\.h|rcre_codec\.h|rcre_df\.h|rcre_stat\.h|rcre_prep\.h|rcre_metric\.h|rcre_vis_ds\.h|transformer_internal\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h|e_means_internal\.h|rcre_gpu\.h|rcre_mpi\.h|rng_pcg_table\.h|rng_sobol_table\.h)[">]', line):
+        if re.match(r'^\s*#include\s*["<]((?:\.\./)?(?:core|hal|ml|transformer|extras)/)?(rcre\.h|rcre_str\.h|rcre_nlp\.h|rcre_prof\.h|rcre_autograd\.h|rcre_transformer\.h|rcre_sparse\.h|rcre_io\.h|rcre_llm\.h|rcre_codec\.h|rcre_df\.h|rcre_stat\.h|rcre_prep\.h|rcre_metric\.h|rcre_vis_ds\.h|rcre_gen\.h|transformer_internal\.h|gen_diff_sample_int\.h|rcre_rng\.h|hal_internal\.h|ml_internal\.h|e_means_internal\.h|rcre_gpu\.h|rcre_mpi\.h|rng_pcg_table\.h|rng_sobol_table\.h)[">]', line):
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -185,6 +190,9 @@ def main():
     vis_ds_header = (INCLUDE_DIR / "rcre_vis_ds.h").read_text(encoding="utf-8")
     header_content = header_content.replace('#include "rcre_vis_ds.h"', clean_file_content(vis_ds_header))
 
+    gen_header = (INCLUDE_DIR / "rcre_gen.h").read_text(encoding="utf-8")
+    header_content = header_content.replace('#include "rcre_gen.h"', clean_file_content(gen_header))
+
     prof_header = (INCLUDE_DIR / "rcre_prof.h").read_text(encoding="utf-8")
     header_content = header_content + "\n" + "/* --- Profiling & Telemetry Subsystem (rcre_prof) --- */\n" + clean_file_content(prof_header) + "\n"
 
@@ -206,6 +214,7 @@ def main():
     pcg_table = (SRC_DIR / "core" / "rng_pcg_table.h").read_text(encoding="utf-8")
     sobol_table = (SRC_DIR / "core" / "rng_sobol_table.h").read_text(encoding="utf-8")
     transformer_internal = (SRC_DIR / "transformer" / "transformer_internal.h").read_text(encoding="utf-8")
+    gen_sample_internal = (SRC_DIR / "gen" / "gen_diff_sample_int.h").read_text(encoding="utf-8")
 
     out_lines = []
     out_lines.append("/* ========================================================================= */")
@@ -237,6 +246,9 @@ def main():
     out_lines.append("")
     out_lines.append("/* --- Internal Transformer Definitions & Helpers --- */")
     out_lines.append(clean_file_content(transformer_internal))
+    out_lines.append("")
+    out_lines.append("/* --- Generative Diffusion Sampler Steppers (shared DDPM/DDIM) --- */")
+    out_lines.append(clean_file_content(gen_sample_internal))
     out_lines.append("")
 
     for c_file in C_FILES:

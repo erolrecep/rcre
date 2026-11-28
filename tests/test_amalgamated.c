@@ -86,10 +86,65 @@ static void test_amalgamated_scientific_io(void) {
     rcre_arena_destroy(arena);
 }
 
+static void test_amalgamated_gen(void) {
+    /* Single-header smoke for the generative suite (rcre_gen.h bundled in
+     * dist/rcre.h): build a ConvAE, run a few train steps, then verify the
+     * DDIM eta=0 determinism contract through the amalgamated sampler. */
+    RCRE_Arena* perma = rcre_arena_create(8 * 1024 * 1024);
+    RCRE_Arena* tape_arena = rcre_arena_create(16 * 1024 * 1024);
+    ASSERT_NOT_NULL(perma);
+    ASSERT_NOT_NULL(tape_arena);
+
+    uint64_t rng = 11ULL;
+    RCRE_Tensor* imgs = nullptr;
+    ASSERT_INT_EQ(RCRE_OK, rcre_gen_make_shapes_dataset(perma, 4, 16, 16, true, &rng, &imgs, nullptr));
+
+    RCRE_ConvAEConfig cfg = { .in_channels = 1, .height = 16, .width = 16,
+                              .base_channels = 8, .latent_dim = 8, .output_sigmoid = true };
+    RCRE_ConvAE* ae = rcre_convae_create(perma, cfg, &rng);
+    ASSERT_NOT_NULL(ae);
+    RCRE_Tensor* params[RCRE_CONVAE_NUM_PARAMS];
+    size_t np = rcre_convae_params(ae, params, RCRE_CONVAE_NUM_PARAMS);
+    ASSERT_UINT_EQ(RCRE_CONVAE_NUM_PARAMS, np);
+    RCRE_TensorOptim* opt = rcre_tensor_optim_adamw_create(perma, params, np, 8e-3f, 0.9f, 0.999f, 1e-8f, 1e-4f);
+    RCRE_TensorTape* tape = rcre_tensor_tape_create(tape_arena, 64);
+    ASSERT_NOT_NULL(tape);
+
+    float first = 0.0f, last = 0.0f;
+    for (int step = 0; step < 25; ++step) {
+        float loss = rcre_convae_train_step(ae, tape, opt, imgs, 0.05f, &rng, 2.0f);
+        ASSERT_TRUE(isfinite(loss));
+        if (step == 0) first = loss;
+        last = loss;
+    }
+    ASSERT_TRUE(last < first);
+
+    /* Diffusion schedule + DDIM determinism through the single header */
+    RCRE_DiffSchedule* sched = rcre_diff_schedule_create(perma, 20, RCRE_DIFF_SCHED_COSINE, 0.0f, 0.0f);
+    ASSERT_NOT_NULL(sched);
+    RCRE_TinyUNetConfig ucfg = { .in_channels = 1, .height = 16, .width = 16,
+                                 .base_channels = 8, .num_groups = 4, .time_dim = 16 };
+    RCRE_TinyUNet* unet = rcre_tinyunet_create(perma, ucfg, &rng);
+    ASSERT_NOT_NULL(unet);
+    uint64_t s1 = 4242ULL, s2 = 4242ULL;
+    RCRE_Tensor* d1 = rcre_tinyunet_sample_ddim(unet, sched, perma, tape_arena, 1, 3, 0.0f, &s1);
+    RCRE_Tensor* d2 = rcre_tinyunet_sample_ddim(unet, sched, perma, tape_arena, 1, 3, 0.0f, &s2);
+    ASSERT_NOT_NULL(d1);
+    ASSERT_NOT_NULL(d2);
+    for (size_t i = 0; i < d1->numel; ++i) {
+        ASSERT_FLOAT_NEAR(rcre_tensor_f32_data(d1)[i], rcre_tensor_f32_data(d2)[i], 0.0f);
+    }
+
+    rcre_tensor_tape_destroy(tape);
+    rcre_arena_destroy(tape_arena);
+    rcre_arena_destroy(perma);
+}
+
 int main(void) {
     test_suite_begin("RCRE Single-Header (dist/rcre.h) Amalgamation Self-Test");
     TEST_RUN(test_amalgamated_single_header);
     TEST_RUN(test_amalgamated_transformer);
     TEST_RUN(test_amalgamated_scientific_io);
+    TEST_RUN(test_amalgamated_gen);
     return test_suite_report();
 }

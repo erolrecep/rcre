@@ -22,6 +22,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-galton`** | [`rcre_galtonboard/`](rcre_galtonboard/) | High-speed Galton Board (Quincunx) flow simulator, Bernoulli trials & Central Limit Theorem | xoshiro256** PRNG, SIMD Bit-Level Popcount, Dynamic Histograms, Chi-Square Goodness-of-Fit, WebAssembly Canvas2D |
 | **`rcre-emeans`** | [`rcre_emeans/`](rcre_emeans/) | Fast mini-batch EMA k-means clustering with scaling-law recipes & dead-cluster revival | EMA Updates, Gumbel-Max Revival, Dual-Kernel Argmin, ThreadPool Determinism |
 | **`rcre-manifold`** | [`rcre_manifold/`](rcre_manifold/) | Multi-dimensional manifold learning, UMAP, Barnes-Hut t-SNE & PaCMAP untangling | Fuzzy Simplicial Sets, Barnes-Hut 2D Quadtree, 3-Tier Pair Annealing, WebAssembly |
+| **`rcre-gen-studio`** | [`rcre_gen_studio/`](rcre_gen_studio/) | End-to-end generative & vision AI studio (ConvAE, ConvVAE, Diffusion Tiny U-Net, ViT, DiT) | Tensor Tape Autograd, Reparameterization, DDPM/DDIM, Batched MHSA, AdaLN-Zero, PNG/SafeTensors |
 
 ---
 
@@ -353,6 +354,39 @@ make project_manifold_san
 ```
 
 For complete documentation and interactive web laboratory, see [`projects/rcre_manifold/web/index.html`](rcre_manifold/web/index.html).
+
+---
+
+## 13. `rcre-gen-studio` (Generative & Vision AI Studio: AE, VAE, Diffusion, ViT & DiT)
+
+A pure ISO C23, zero-dependency generative & vision AI suite built directly on `include/rcre_gen.h`, `RCRE_TensorTape`, and 64-byte aligned `RCRE_Arena`s.
+
+### Key Capabilities
+* **Phase 1 — Convolutional & Denoising Autoencoder (`RCRE_ConvAE`)**: 2-stage Conv2D encoder/decoder with Gaussian corruption denoising, PSNR evaluation, and `.safetensors` checkpoint export/import.
+* **Phase 2 — Convolutional Variational Autoencoder (`RCRE_ConvVAE`)**: $\mu / \log\sigma^2$ heads, differentiable reparameterization trick, $\beta$-annealed ELBO (`MSE + beta * KL`), prior sampling $z \sim \mathcal{N}(0, I)$, and latent-space interpolation.
+* **Phase 3 — Diffusion Model (`RCRE_DiffSchedule` + `RCRE_TinyUNet`)**: Linear & Cosine $\beta_t$ schedules, GroupNorm + SiLU + FiLM time-conditioned ResBlocks, U-Net skip connections, ancestral DDPM, and deterministic DDIM sampling.
+* **Phase 4 — Vision Transformer (`RCRE_ViT`) & Diffusion Transformer (`RCRE_DiT`)**: Differentiable `patchify`/`unpatchify`, zero-malloc batched multi-head self-attention (`rcre_autograd_mhsa`), ViT classification, and class-conditional DiT with AdaLN-Zero residual gating.
+* **Zero-Dep Visual & Checkpoint Output**: Terminal ASCII previews plus lossless PNG sprite grids (`rcre_codec_save_png`) and `.safetensors` checkpoints.
+
+### Quick Start
+```bash
+# Run full lifecycle demo (train -> compress -> quantize -> infer) across all 5 models:
+make project_gen_demo
+
+# Run automated full pipeline (SafeTensors F32, Pruned RCRZ, F16, Q8_0, Q4_0):
+make project_gen_pipeline
+
+# Package a standalone single-header edge deployment bundle (+ Dockerfile):
+make project_gen_deploy
+
+# Run the core generative & lifecycle unit suite:
+make project_gen_test
+
+# Run AddressSanitizer & UBSan verification:
+make project_gen_san
+```
+
+For full CLI options, quantization tables, HTTP server, and Docker deployment instructions, see [`projects/rcre_gen_studio/README.md`](rcre_gen_studio/README.md) and [`projects/rcre_gen_studio/DEPLOYMENT.md`](rcre_gen_studio/DEPLOYMENT.md).
 
 
 

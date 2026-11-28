@@ -143,6 +143,38 @@ float rcre_loss_kl_divergence(const RCRE_Tensor* mu, const RCRE_Tensor* logvar, 
     return kl_sum / (float)n;
 }
 
+float rcre_loss_kl_divergence_add(const RCRE_Tensor* mu, const RCRE_Tensor* logvar,
+                                  float beta, RCRE_Tensor* grad_mu, RCRE_Tensor* grad_logvar) {
+    if (!loss_is_f32(mu) || !loss_is_f32(logvar) ||
+        mu->numel != logvar->numel || mu->numel == 0) return 0.0f;
+
+    const float* md  = rcre_tensor_f32_data(mu);
+    const float* ldv = rcre_tensor_f32_data(logvar);
+    float* gm  = (grad_mu != nullptr) ? grad_mu->grad : nullptr;
+    float* glv = (grad_logvar != nullptr) ? grad_logvar->grad : nullptr;
+
+    size_t n = mu->numel;
+    float inv_n = 1.0f / (float)n;
+    float kl_sum = 0.0f;
+
+    for (size_t i = 0; i < n; ++i) {
+        float m = md[i];
+        float raw_lv = ldv[i];
+        float lv = raw_lv;
+        if (lv < -20.0f) lv = -20.0f;
+        if (lv >  20.0f) lv =  20.0f;
+        float var = expf(lv);
+
+        kl_sum += -0.5f * (1.0f + lv - m * m - var);
+
+        if (gm != nullptr)  gm[i]  += beta * m * inv_n;
+        if (glv != nullptr && raw_lv > -20.0f && raw_lv < 20.0f) {
+            glv[i] += beta * 0.5f * (var - 1.0f) * inv_n;
+        }
+    }
+    return kl_sum * inv_n;
+}
+
 int rcre_data_validate_labels(const size_t* targets, size_t n, size_t num_classes) {
     if (!targets) return -1;
     for (size_t i = 0; i < n; ++i) {

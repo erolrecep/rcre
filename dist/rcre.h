@@ -32,7 +32,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 2
-#define RCRE_VERSION_MINOR 6
+#define RCRE_VERSION_MINOR 7
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -3026,15 +3026,22 @@ bool rcre_scalar_export_dot(RCRE_ScalarVal* root, const char* filename);
 RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc(RCRE_Arena* arena, const size_t* shape, uint8_t ndim);
 RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc_1d(RCRE_Arena* arena, size_t d0);
 RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc_2d(RCRE_Arena* arena, size_t rows, size_t cols);
+RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc_3d(RCRE_Arena* arena, size_t d0, size_t d1, size_t d2);
 RCRE_NODISCARD RCRE_Tensor* rcre_tensor_alloc_4d(RCRE_Arena* arena, size_t n, size_t c, size_t h, size_t w);
 
 /* Initialization Routines (require F32; no-op otherwise) */
 void rcre_tensor_fill(RCRE_Tensor* t, float val);
 void rcre_tensor_zeros(RCRE_Tensor* t);
 void rcre_tensor_ones(RCRE_Tensor* t);
+void rcre_tensor_fill_normal(RCRE_Tensor* t, float mean, float std, uint64_t* rng);
 void rcre_tensor_init_xavier(RCRE_Tensor* t, size_t fan_in, size_t fan_out, uint64_t* rng);
 void rcre_tensor_init_he(RCRE_Tensor* t, size_t fan_in, uint64_t* rng);
 void rcre_tensor_zero_grad(RCRE_Tensor* t);
+
+/* Sinusoidal timestep embedding [batch_size, embed_dim] (even embed_dim >= 2)
+ * using standard DDPM / DiT log-spaced frequencies exp(-ln(10000) * k / half). */
+RCRE_NODISCARD RCRE_Tensor* rcre_sinusoidal_timestep_embed(
+    RCRE_Arena* arena, const float* timesteps, size_t batch_size, size_t embed_dim);
 
 /* View & Shape Manipulations */
 /* Allocates a new arena struct referencing the source memory (O(1)). */
@@ -3062,7 +3069,7 @@ struct RCRE_TensorNode {
     void (*backward)(RCRE_TensorNode* node);
 };
 
-typedef struct {
+typedef struct RCRE_TensorTape {
     RCRE_TensorNode* nodes;
     size_t           count;
     size_t           capacity;
@@ -3095,11 +3102,38 @@ void rcre_tensor_tape_backward(RCRE_TensorTape* tape);
  */
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_matmul(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_sub(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_mul(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_scale(RCRE_TensorTape* tape, RCRE_Tensor* x, float scalar);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_exp(RCRE_TensorTape* tape, RCRE_Tensor* x);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add_bias(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* bias);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add_bias_4d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* bias);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_linear(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* weight, RCRE_Tensor* bias);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_relu(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_leaky_relu(RCRE_TensorTape* tape, RCRE_Tensor* x, float neg_slope);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_sigmoid(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_tanh(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_silu(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_gelu(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_layernorm(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* gamma, RCRE_Tensor* beta, float eps);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_groupnorm(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* gamma, RCRE_Tensor* beta, size_t num_groups, float eps);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_film_4d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* scale, RCRE_Tensor* shift);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_adaln_3d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* scale, RCRE_Tensor* shift);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_gate_3d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* gate);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_reshape(RCRE_TensorTape* tape, RCRE_Tensor* x, const size_t* new_shape, uint8_t new_ndim);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_slice_cols(RCRE_TensorTape* tape, RCRE_Tensor* x, size_t col_start, size_t col_width);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_concat_channels(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_upsample2d_nearest(RCRE_TensorTape* tape, RCRE_Tensor* x, size_t scale);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_avgpool2d(RCRE_TensorTape* tape, RCRE_Tensor* x, size_t kernel_size, size_t stride);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_conv2d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* weight, size_t stride, size_t padding);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_patchify(RCRE_TensorTape* tape, RCRE_Tensor* img, size_t patch_size);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_unpatchify(RCRE_TensorTape* tape, RCRE_Tensor* tokens, size_t channels, size_t height, size_t width, size_t patch_size);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_add_pos_emb_3d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* pos_emb);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_mean_pool_seq(RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_embed_lookup(RCRE_TensorTape* tape, RCRE_Tensor* table, const size_t* indices, size_t batch_size);
 RCRE_NODISCARD RCRE_Tensor* rcre_autograd_attention(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE_Tensor* k, RCRE_Tensor* v);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_mhsa(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE_Tensor* k, RCRE_Tensor* v, size_t num_heads);
+RCRE_NODISCARD RCRE_Tensor* rcre_autograd_reparameterize(RCRE_TensorTape* tape, RCRE_Tensor* mu, RCRE_Tensor* logvar, RCRE_Tensor* eps);
 
 /* ========================================================================= */
 /* 4. Loss Functions & Gradients                                             */
@@ -3122,6 +3156,10 @@ float rcre_loss_mse(const RCRE_Tensor* preds, const RCRE_Tensor* targets, RCRE_T
 float rcre_loss_bce(const RCRE_Tensor* preds, const RCRE_Tensor* targets, RCRE_Tensor* grad_out);
 float rcre_loss_cross_entropy_logits(const RCRE_Tensor* logits, const size_t* targets, size_t batch_size, size_t num_classes, RCRE_Tensor* grad_out);
 float rcre_loss_kl_divergence(const RCRE_Tensor* mu, const RCRE_Tensor* logvar, RCRE_Tensor* grad_mu, RCRE_Tensor* grad_logvar);
+/* Accumulating (+=) beta-weighted KL divergence for VAE training alongside a
+ * reconstruction loss on the same tape. Returns the unweighted mean KL value;
+ * adds beta * dKL/dmu and beta * dKL/dlogvar into grad_mu->grad / grad_logvar->grad. */
+float rcre_loss_kl_divergence_add(const RCRE_Tensor* mu, const RCRE_Tensor* logvar, float beta, RCRE_Tensor* grad_mu, RCRE_Tensor* grad_logvar);
 
 /*
  * Returns the index of the first target outside [0, num_classes), or -1 if
@@ -3150,7 +3188,7 @@ typedef enum : uint8_t {
     RCRE_OPTIM_ADAFACTOR
 } RCRE_OptimType;
 
-typedef struct {
+typedef struct RCRE_TensorOptim {
     RCRE_OptimType type;
     RCRE_Tensor** params;
     size_t         num_params;
@@ -3179,6 +3217,8 @@ RCRE_NODISCARD RCRE_TensorOptim* rcre_tensor_optim_adafactor_create(RCRE_Arena* 
  * (beta == 1 would divide by zero in the bias correction). */
 void rcre_tensor_optim_step(RCRE_TensorOptim* opt);
 void rcre_tensor_optim_zero_grad(RCRE_TensorOptim* opt);
+/* Global L2 gradient norm clipping across parameter tensors; returns pre-clip norm. */
+float rcre_tensor_clip_grad_norm(RCRE_Tensor** params, size_t num_params, float max_norm);
 
 /* Scalar Autograd Optimizer */
 typedef struct {
@@ -5604,6 +5644,547 @@ RCRE_NODISCARD int rcre_cv_stratified_kfold(
 #endif
 
 /* ========================================================================= */
+/* Generative & Vision Deep Learning Suite (AE, VAE, Diffusion, ViT, DiT)    */
+/* ========================================================================= */
+#ifndef RCRE_NO_GEN
+/**
+ * @file rcre_gen.h
+ * @brief RCRE Generative & Vision Deep Learning Suite (ISO C23)
+ *
+ * Implements four unified, zero-dependency generative & vision architectures
+ * built directly on RCRE's unified tensor tape autograd (rcre_autograd.h) and
+ * 64-byte aligned linear memory arenas:
+ *   1. Convolutional & Denoising Autoencoder (RCRE_ConvAE)
+ *   2. Convolutional Variational Autoencoder (RCRE_ConvVAE / beta-VAE)
+ *   3. DDPM / DDIM Diffusion Scheduler & Time-Conditioned Tiny U-Net (RCRE_TinyUNet)
+ *   4. Vision Transformer (RCRE_ViT) & Diffusion Transformer w/ AdaLN-Zero (RCRE_DiT)
+ *
+ * Strict ISO C23 compliant, zero external dependencies, zero heap allocations
+ * inside forward/backward/sampling hot loops.
+ */
+
+#ifndef RCRE_GEN_H
+#define RCRE_GEN_H
+
+
+typedef struct RCRE_TensorTape RCRE_TensorTape;
+typedef struct RCRE_TensorOptim RCRE_TensorOptim;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ========================================================================= */
+/* 1. Phase 1: Convolutional & Denoising Autoencoder (RCRE_ConvAE)           */
+/* ========================================================================= */
+
+typedef struct {
+    size_t in_channels;     /* e.g., 1 (grayscale) or 3 (RGB)               */
+    size_t height;          /* Image height (must be divisible by 4)        */
+    size_t width;           /* Image width  (must be divisible by 4)        */
+    size_t base_channels;   /* First conv stage channels (stage 2 uses 2x)  */
+    size_t latent_dim;      /* Bottleneck dimensionality                    */
+    bool   output_sigmoid;  /* true: [0,1] sigmoid; false: [-1,1] tanh      */
+} RCRE_ConvAEConfig;
+
+typedef struct {
+    RCRE_ConvAEConfig cfg;
+    size_t feat_h;          /* height / 4                                   */
+    size_t feat_w;          /* width  / 4                                   */
+    size_t flat_dim;        /* (2 * base_channels) * feat_h * feat_w        */
+
+    /* Encoder weights */
+    RCRE_Tensor* enc_conv1_w; /* [C, in_ch, 3, 3] */
+    RCRE_Tensor* enc_conv1_b; /* [C]              */
+    RCRE_Tensor* enc_conv2_w; /* [2C, C, 3, 3]    */
+    RCRE_Tensor* enc_conv2_b; /* [2C]             */
+    RCRE_Tensor* enc_fc_w;    /* [flat, latent]   */
+    RCRE_Tensor* enc_fc_b;    /* [latent]         */
+
+    /* Decoder weights */
+    RCRE_Tensor* dec_fc_w;    /* [latent, flat]   */
+    RCRE_Tensor* dec_fc_b;    /* [flat]           */
+    RCRE_Tensor* dec_conv1_w; /* [C, 2C, 3, 3]    */
+    RCRE_Tensor* dec_conv1_b; /* [C]              */
+    RCRE_Tensor* dec_conv2_w; /* [in_ch, C, 3, 3] */
+    RCRE_Tensor* dec_conv2_b; /* [in_ch]          */
+} RCRE_ConvAE;
+
+#define RCRE_CONVAE_NUM_PARAMS 12
+
+RCRE_NODISCARD RCRE_ConvAE* rcre_convae_create(RCRE_Arena* arena, RCRE_ConvAEConfig cfg, uint64_t* rng);
+RCRE_NODISCARD size_t rcre_convae_params(const RCRE_ConvAE* m, RCRE_Tensor** out_params, size_t max_params);
+RCRE_NODISCARD RCRE_Tensor* rcre_convae_encode(const RCRE_ConvAE* m, RCRE_TensorTape* tape, RCRE_Tensor* x);
+RCRE_NODISCARD RCRE_Tensor* rcre_convae_decode(const RCRE_ConvAE* m, RCRE_TensorTape* tape, RCRE_Tensor* z);
+RCRE_NODISCARD RCRE_Tensor* rcre_convae_forward(const RCRE_ConvAE* m, RCRE_TensorTape* tape, RCRE_Tensor* x);
+
+/**
+ * @brief Executes one training step (standard AE if noise_std <= 0,
+ *        Denoising Autoencoder if noise_std > 0). Returns MSE reconstruction loss.
+ */
+RCRE_NODISCARD float rcre_convae_train_step(
+    RCRE_ConvAE* m,
+    RCRE_TensorTape* tape,
+    RCRE_TensorOptim* opt,
+    RCRE_Tensor* x_clean,
+    float noise_std,
+    uint64_t* rng,
+    float max_grad_norm
+);
+
+RCRE_NODISCARD float rcre_gen_psnr(const RCRE_Tensor* ref, const RCRE_Tensor* recon, float max_val);
+
+/* ========================================================================= */
+/* 2. Phase 2: Convolutional Variational Autoencoder (RCRE_ConvVAE)          */
+/* ========================================================================= */
+
+typedef struct {
+    size_t in_channels;
+    size_t height;          /* Divisible by 4 */
+    size_t width;           /* Divisible by 4 */
+    size_t base_channels;
+    size_t latent_dim;
+    bool   output_sigmoid;  /* true: [0,1] sigmoid; false: [-1,1] tanh */
+} RCRE_ConvVAEConfig;
+
+typedef struct {
+    RCRE_ConvVAEConfig cfg;
+    size_t feat_h;
+    size_t feat_w;
+    size_t flat_dim;
+
+    /* Encoder */
+    RCRE_Tensor* enc_conv1_w;
+    RCRE_Tensor* enc_conv1_b;
+    RCRE_Tensor* enc_conv2_w;
+    RCRE_Tensor* enc_conv2_b;
+    RCRE_Tensor* fc_mu_w;     /* [flat, latent] */
+    RCRE_Tensor* fc_mu_b;     /* [latent]       */
+    RCRE_Tensor* fc_lv_w;     /* [flat, latent] */
+    RCRE_Tensor* fc_lv_b;     /* [latent]       */
+
+    /* Decoder */
+    RCRE_Tensor* dec_fc_w;    /* [latent, flat] */
+    RCRE_Tensor* dec_fc_b;    /* [flat]         */
+    RCRE_Tensor* dec_conv1_w;
+    RCRE_Tensor* dec_conv1_b;
+    RCRE_Tensor* dec_conv2_w;
+    RCRE_Tensor* dec_conv2_b;
+} RCRE_ConvVAE;
+
+#define RCRE_CONVVAE_NUM_PARAMS 14
+
+RCRE_NODISCARD RCRE_ConvVAE* rcre_convvae_create(RCRE_Arena* arena, RCRE_ConvVAEConfig cfg, uint64_t* rng);
+RCRE_NODISCARD size_t rcre_convvae_params(const RCRE_ConvVAE* m, RCRE_Tensor** out_params, size_t max_params);
+RCRE_NODISCARD int rcre_convvae_encode(const RCRE_ConvVAE* m, RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                       RCRE_Tensor** out_mu, RCRE_Tensor** out_logvar);
+RCRE_NODISCARD RCRE_Tensor* rcre_convvae_decode(const RCRE_ConvVAE* m, RCRE_TensorTape* tape, RCRE_Tensor* z);
+RCRE_NODISCARD RCRE_Tensor* rcre_convvae_forward(const RCRE_ConvVAE* m, RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                                 uint64_t* rng, RCRE_Tensor** out_mu,
+                                                 RCRE_Tensor** out_logvar, RCRE_Tensor** out_z);
+
+/**
+ * @brief Executes one beta-VAE ELBO step: loss = MSE(x_hat, x) + beta * KL(q||p).
+ */
+RCRE_NODISCARD float rcre_convvae_train_step(
+    RCRE_ConvVAE* m,
+    RCRE_TensorTape* tape,
+    RCRE_TensorOptim* opt,
+    RCRE_Tensor* x,
+    float beta,
+    uint64_t* rng,
+    float max_grad_norm,
+    float* out_recon_loss,
+    float* out_kl_loss
+);
+
+/** Samples `num_samples` images from standard normal prior z ~ N(0, I). */
+RCRE_NODISCARD RCRE_Tensor* rcre_convvae_sample(
+    const RCRE_ConvVAE* m, RCRE_Arena* scratch, size_t num_samples, uint64_t* rng);
+
+/** Linearly interpolates between latent vectors z_start and z_end ([latent_dim]). */
+RCRE_NODISCARD RCRE_Tensor* rcre_convvae_interpolate(
+    const RCRE_ConvVAE* m, RCRE_Arena* scratch,
+    const float* z_start, const float* z_end, size_t num_steps);
+
+/* ========================================================================= */
+/* 3. Phase 3: Diffusion Schedule & Time-Conditioned Tiny U-Net              */
+/* ========================================================================= */
+
+typedef enum : uint8_t {
+    RCRE_DIFF_SCHED_LINEAR = 0,
+    RCRE_DIFF_SCHED_COSINE = 1
+} RCRE_DiffSchedType;
+
+typedef struct {
+    size_t num_steps;                /* T (e.g., 50, 100, 1000) */
+    RCRE_DiffSchedType type;
+    float* betas;
+    float* alphas;
+    float* alpha_bar;
+    float* sqrt_alpha_bar;
+    float* sqrt_one_minus_alpha_bar;
+    float* posterior_variance;
+} RCRE_DiffSchedule;
+
+RCRE_NODISCARD RCRE_DiffSchedule* rcre_diff_schedule_create(
+    RCRE_Arena* arena, size_t num_steps, RCRE_DiffSchedType type,
+    float beta_start, float beta_end);
+
+/** Forward diffusion q(x_t | x_0): x_t = sqrt(alpha_bar[t]) * x_0 + sqrt(1 - alpha_bar[t]) * noise */
+RCRE_NODISCARD int rcre_diff_q_sample(
+    const RCRE_DiffSchedule* sched,
+    const RCRE_Tensor* x0,
+    const size_t* t_indices,
+    const RCRE_Tensor* noise,
+    RCRE_Tensor* x_t_out
+);
+
+typedef struct {
+    size_t in_channels;
+    size_t height;          /* Divisible by 4 */
+    size_t width;           /* Divisible by 4 */
+    size_t base_channels;   /* Divisible by num_groups (e.g., 8, 16, 32) */
+    size_t num_groups;      /* GroupNorm groups (e.g., 4) */
+    size_t time_dim;        /* Even sinusoidal time embedding dim (e.g., 32) */
+} RCRE_TinyUNetConfig;
+
+typedef struct {
+    size_t in_ch;
+    size_t out_ch;
+    size_t num_groups;
+    RCRE_Tensor* gn1_g;     /* [in_ch]                  */
+    RCRE_Tensor* gn1_b;     /* [in_ch]                  */
+    RCRE_Tensor* conv1_w;   /* [out_ch, in_ch, 3, 3]    */
+    RCRE_Tensor* conv1_b;   /* [out_ch]                 */
+    RCRE_Tensor* time_w;    /* [time_dim, 2 * out_ch]   */
+    RCRE_Tensor* time_b;    /* [2 * out_ch]             */
+    RCRE_Tensor* gn2_g;     /* [out_ch]                 */
+    RCRE_Tensor* gn2_b;     /* [out_ch]                 */
+    RCRE_Tensor* conv2_w;   /* [out_ch, out_ch, 3, 3]   */
+    RCRE_Tensor* conv2_b;   /* [out_ch]                 */
+    RCRE_Tensor* skip_w;    /* [out_ch, in_ch, 1, 1] or NULL if in_ch == out_ch */
+    RCRE_Tensor* skip_b;    /* [out_ch]              or NULL if in_ch == out_ch */
+} RCRE_UNetResBlock;
+
+typedef struct {
+    RCRE_TinyUNetConfig cfg;
+
+    /* Time embedding MLP: [time_dim -> time_dim -> time_dim] */
+    RCRE_Tensor* time_fc1_w;
+    RCRE_Tensor* time_fc1_b;
+    RCRE_Tensor* time_fc2_w;
+    RCRE_Tensor* time_fc2_b;
+
+    /* Stem conv: [in_ch -> C] */
+    RCRE_Tensor* in_conv_w;
+    RCRE_Tensor* in_conv_b;
+
+    /* U-Net blocks */
+    RCRE_UNetResBlock enc1; /* C  -> C  (H, W)     */
+    RCRE_UNetResBlock enc2; /* C  -> 2C (H/2, W/2) */
+    RCRE_UNetResBlock mid;  /* 2C -> 2C (H/4, W/4) */
+    RCRE_UNetResBlock dec2; /* 4C -> C  (H/2, W/2) */
+    RCRE_UNetResBlock dec1; /* 2C -> C  (H, W)     */
+
+    /* Output head: GroupNorm -> SiLU -> Conv(C -> in_ch) */
+    RCRE_Tensor* out_gn_g;
+    RCRE_Tensor* out_gn_b;
+    RCRE_Tensor* out_conv_w;
+    RCRE_Tensor* out_conv_b;
+} RCRE_TinyUNet;
+
+#define RCRE_TINYUNET_MAX_PARAMS 80
+
+RCRE_NODISCARD RCRE_TinyUNet* rcre_tinyunet_create(RCRE_Arena* arena, RCRE_TinyUNetConfig cfg, uint64_t* rng);
+RCRE_NODISCARD size_t rcre_tinyunet_params(const RCRE_TinyUNet* m, RCRE_Tensor** out_params, size_t max_params);
+RCRE_NODISCARD RCRE_Tensor* rcre_tinyunet_forward(
+    const RCRE_TinyUNet* m, RCRE_TensorTape* tape, RCRE_Tensor* x_t, const float* timesteps);
+
+/** Executes one DDPM epsilon-prediction training step; returns MSE(eps_pred, eps). */
+RCRE_NODISCARD float rcre_tinyunet_train_step(
+    RCRE_TinyUNet* m,
+    const RCRE_DiffSchedule* sched,
+    RCRE_TensorTape* tape,
+    RCRE_TensorOptim* opt,
+    const RCRE_Tensor* x0,
+    uint64_t* rng,
+    float max_grad_norm
+);
+
+/** Full ancestral DDPM reverse diffusion sampling [num_samples, C, H, W]. */
+RCRE_NODISCARD RCRE_Tensor* rcre_tinyunet_sample_ddpm(
+    const RCRE_TinyUNet* m, const RCRE_DiffSchedule* sched,
+    RCRE_Arena* out_arena, RCRE_Arena* scratch,
+    size_t num_samples, uint64_t* rng);
+
+/** Accelerated DDIM reverse sampling (eta = 0.0f is deterministic ODE). */
+RCRE_NODISCARD RCRE_Tensor* rcre_tinyunet_sample_ddim(
+    const RCRE_TinyUNet* m, const RCRE_DiffSchedule* sched,
+    RCRE_Arena* out_arena, RCRE_Arena* scratch,
+    size_t num_samples, size_t ddim_steps, float eta, uint64_t* rng);
+
+/* ========================================================================= */
+/* 4. Phase 4: Vision Transformer (RCRE_ViT) & Diffusion Transformer (DiT)   */
+/* ========================================================================= */
+
+typedef struct {
+    size_t in_channels;
+    size_t height;          /* Divisible by patch_size */
+    size_t width;           /* Divisible by patch_size */
+    size_t patch_size;
+    size_t embed_dim;       /* Divisible by num_heads  */
+    size_t num_heads;
+    size_t num_layers;
+    size_t mlp_dim;
+    size_t num_classes;
+} RCRE_ViTConfig;
+
+typedef struct {
+    RCRE_Tensor* ln1_g;
+    RCRE_Tensor* ln1_b;
+    RCRE_Tensor* wq; RCRE_Tensor* bq;
+    RCRE_Tensor* wk; RCRE_Tensor* bk;
+    RCRE_Tensor* wv; RCRE_Tensor* bv;
+    RCRE_Tensor* wo; RCRE_Tensor* bo;
+    RCRE_Tensor* ln2_g;
+    RCRE_Tensor* ln2_b;
+    RCRE_Tensor* fc1_w; RCRE_Tensor* fc1_b;
+    RCRE_Tensor* fc2_w; RCRE_Tensor* fc2_b;
+} RCRE_ViTBlock;
+
+typedef struct {
+    RCRE_ViTConfig cfg;
+    size_t num_patches;
+    size_t patch_dim;
+
+    RCRE_Tensor* patch_w;   /* [patch_dim, embed_dim]  */
+    RCRE_Tensor* patch_b;   /* [embed_dim]             */
+    RCRE_Tensor* pos_emb;   /* [num_patches, embed_dim]*/
+    RCRE_ViTBlock* blocks;  /* [num_layers]            */
+    RCRE_Tensor* ln_f_g;    /* [embed_dim]             */
+    RCRE_Tensor* ln_f_b;    /* [embed_dim]             */
+    RCRE_Tensor* head_w;    /* [embed_dim, num_classes]*/
+    RCRE_Tensor* head_b;    /* [num_classes]           */
+} RCRE_ViT;
+
+RCRE_NODISCARD RCRE_ViT* rcre_vit_create(RCRE_Arena* arena, RCRE_ViTConfig cfg, uint64_t* rng);
+RCRE_NODISCARD size_t rcre_vit_param_count(const RCRE_ViT* m);
+RCRE_NODISCARD size_t rcre_vit_params(const RCRE_ViT* m, RCRE_Tensor** out_params, size_t max_params);
+RCRE_NODISCARD RCRE_Tensor* rcre_vit_forward(const RCRE_ViT* m, RCRE_TensorTape* tape, RCRE_Tensor* img);
+RCRE_NODISCARD float rcre_vit_train_step(
+    RCRE_ViT* m, RCRE_TensorTape* tape, RCRE_TensorOptim* opt,
+    RCRE_Tensor* img, const size_t* labels, float max_grad_norm);
+RCRE_NODISCARD int rcre_vit_predict(const RCRE_ViT* m, RCRE_Arena* scratch,
+                                    RCRE_Tensor* img, size_t* out_preds);
+
+/* --- Diffusion Transformer (DiT with AdaLN-Zero) --- */
+
+typedef struct {
+    size_t in_channels;
+    size_t height;          /* Divisible by patch_size */
+    size_t width;           /* Divisible by patch_size */
+    size_t patch_size;
+    size_t embed_dim;       /* Even & divisible by num_heads */
+    size_t num_heads;
+    size_t num_layers;
+    size_t mlp_dim;
+    size_t num_classes;     /* 0 = unconditional; >0 = class-conditioned */
+} RCRE_DiTConfig;
+
+typedef struct {
+    RCRE_Tensor* ada_w;     /* [embed_dim, 6 * embed_dim] (zero-init) */
+    RCRE_Tensor* ada_b;     /* [6 * embed_dim]            (zero-init) */
+    RCRE_Tensor* wq; RCRE_Tensor* bq;
+    RCRE_Tensor* wk; RCRE_Tensor* bk;
+    RCRE_Tensor* wv; RCRE_Tensor* bv;
+    RCRE_Tensor* wo; RCRE_Tensor* bo;
+    RCRE_Tensor* fc1_w; RCRE_Tensor* fc1_b;
+    RCRE_Tensor* fc2_w; RCRE_Tensor* fc2_b;
+} RCRE_DiTBlock;
+
+typedef struct {
+    RCRE_DiTConfig cfg;
+    size_t num_patches;
+    size_t patch_dim;
+
+    RCRE_Tensor* patch_w;       /* [patch_dim, embed_dim]     */
+    RCRE_Tensor* patch_b;       /* [embed_dim]                */
+    RCRE_Tensor* pos_emb;       /* [num_patches, embed_dim]   */
+
+    RCRE_Tensor* time_fc1_w;    /* [embed_dim, embed_dim]     */
+    RCRE_Tensor* time_fc1_b;    /* [embed_dim]                */
+    RCRE_Tensor* time_fc2_w;    /* [embed_dim, embed_dim]     */
+    RCRE_Tensor* time_fc2_b;    /* [embed_dim]                */
+    RCRE_Tensor* class_emb;     /* [num_classes, embed_dim] or NULL */
+
+    RCRE_DiTBlock* blocks;      /* [num_layers]               */
+
+    RCRE_Tensor* final_ada_w;   /* [embed_dim, 2 * embed_dim] (zero-init) */
+    RCRE_Tensor* final_ada_b;   /* [2 * embed_dim]            (zero-init) */
+    RCRE_Tensor* final_w;       /* [embed_dim, patch_dim]     (zero-init) */
+    RCRE_Tensor* final_b;       /* [patch_dim]                (zero-init) */
+} RCRE_DiT;
+
+RCRE_NODISCARD RCRE_DiT* rcre_dit_create(RCRE_Arena* arena, RCRE_DiTConfig cfg, uint64_t* rng);
+RCRE_NODISCARD size_t rcre_dit_param_count(const RCRE_DiT* m);
+RCRE_NODISCARD size_t rcre_dit_params(const RCRE_DiT* m, RCRE_Tensor** out_params, size_t max_params);
+
+/** Forward pass: predicts noise epsilon [N, C, H, W] from noisy x_t, timesteps, optional class labels. */
+RCRE_NODISCARD RCRE_Tensor* rcre_dit_forward(
+    const RCRE_DiT* m, RCRE_TensorTape* tape, RCRE_Tensor* x_t,
+    const float* timesteps, const size_t* class_labels);
+
+RCRE_NODISCARD float rcre_dit_train_step(
+    RCRE_DiT* m,
+    const RCRE_DiffSchedule* sched,
+    RCRE_TensorTape* tape,
+    RCRE_TensorOptim* opt,
+    const RCRE_Tensor* x0,
+    const size_t* class_labels,
+    uint64_t* rng,
+    float max_grad_norm
+);
+
+RCRE_NODISCARD RCRE_Tensor* rcre_dit_sample_ddim(
+    const RCRE_DiT* m, const RCRE_DiffSchedule* sched,
+    RCRE_Arena* out_arena, RCRE_Arena* scratch,
+    size_t num_samples, const size_t* class_labels,
+    size_t ddim_steps, float eta, uint64_t* rng);
+
+/* ========================================================================= */
+/* 5. Shared Generative Utilities: Synthetic Sprites & SafeTensors I/O       */
+/* ========================================================================= */
+
+/**
+ * @brief Generates a deterministic multi-class small-image dataset [N, 1, H, W]
+ *        (4 geometric shape classes: 0=disk, 1=square, 2=cross, 3=ring)
+ *        normalized to [0, 1] (if zero_to_one) or [-1, 1].
+ */
+RCRE_NODISCARD int rcre_gen_make_shapes_dataset(
+    RCRE_Arena* arena,
+    size_t num_samples,
+    size_t height,
+    size_t width,
+    bool zero_to_one,
+    uint64_t* rng,
+    RCRE_Tensor** out_images,
+    size_t** out_labels
+);
+
+/** Saves an array of F32 parameter tensors into a .safetensors archive. */
+RCRE_NODISCARD int rcre_gen_save_safetensors(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_Arena* scratch
+);
+
+/** Loads an array of F32 parameter tensors from a .safetensors archive. */
+RCRE_NODISCARD int rcre_gen_load_safetensors(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath
+);
+
+/* ========================================================================= */
+/* 6. Model Lifecycle: Pruning, Lossless RCRZ Compression & Quantization     */
+/* ========================================================================= */
+
+typedef enum : uint8_t {
+    RCRE_GEN_QUANT_F16  = 1, /* IEEE-754 FP16 (2.0x smaller)                 */
+    RCRE_GEN_QUANT_BF16 = 2, /* Google BF16   (2.0x smaller, F32 range)      */
+    RCRE_GEN_QUANT_Q8_0 = 3, /* Block-32 INT8 + FP16 scale (~3.76x smaller)  */
+    RCRE_GEN_QUANT_Q4_0 = 4  /* Block-32 INT4 + FP16 scale (~7.11x smaller)  */
+} RCRE_GenQuantType;
+
+typedef struct {
+    size_t total_params;      /* Total scalar weights across all tensors      */
+    size_t zero_params;       /* Exact zero weights (after pruning/loading)   */
+    float  sparsity;          /* zero_params / total_params in [0, 1]         */
+    size_t raw_bytes;         /* Uncompressed F32 bytes (total_params * 4)    */
+    size_t artifact_bytes;    /* Serialized file size on disk                 */
+    float  compression_ratio; /* raw_bytes / artifact_bytes                   */
+    float  rmse;              /* Root-mean-square error vs original F32       */
+    float  max_abs_err;       /* Maximum absolute elementwise error           */
+    float  sqnr_db;           /* Signal-to-Quantization-Noise Ratio (dB)      */
+} RCRE_GenModelStats;
+
+/**
+ * @brief Applies unstructured magnitude pruning in-place across model parameters.
+ *        When `skip_1d_tensors` is true, 1D bias/norm tensors are preserved.
+ */
+RCRE_NODISCARD int rcre_gen_prune_magnitude(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    float target_sparsity,
+    bool skip_1d_tensors,
+    RCRE_Arena* scratch,
+    RCRE_GenModelStats* out_stats
+);
+
+/**
+ * @brief Saves model parameters as a lossless, 0-ULP bit-exact SIMD byte-shuffled
+ *        RCRZ compressed archive ("RGC1", .rgc1). Ideal after magnitude pruning.
+ */
+RCRE_NODISCARD int rcre_gen_save_compressed(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_Arena* scratch,
+    RCRE_GenModelStats* out_stats
+);
+
+/** Loads a lossless "RGC1" compressed parameter archive back into params[]. */
+RCRE_NODISCARD int rcre_gen_load_compressed(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_Arena* scratch
+);
+
+/**
+ * @brief Quantizes model parameters to F16, BF16, Q8_0, or Q4_0 and saves
+ *        a compact "RGQ1" (.rgq1) quantized artifact with exact SQNR/RMSE stats.
+ */
+RCRE_NODISCARD int rcre_gen_save_quantized(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    RCRE_GenQuantType qtype,
+    const char* filepath,
+    RCRE_Arena* scratch,
+    RCRE_GenModelStats* out_stats
+);
+
+/** Loads and dequantizes an "RGQ1" quantized checkpoint back into params[]. */
+RCRE_NODISCARD int rcre_gen_load_quantized(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_GenQuantType* out_qtype
+);
+
+/**
+ * @brief Auto-detects file format ("RGC1", "RGQ1", or ".safetensors") and loads
+ *        weights into params[]. Optionally writes human-readable format tag.
+ */
+RCRE_NODISCARD int rcre_gen_load_any(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_Arena* scratch,
+    char* out_format,
+    size_t max_fmt
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* RCRE_GEN_H */
+#endif
+
+/* ========================================================================= */
 /* Data Science Terminal & ASCII Visualizations (rcre_vis_ds)                */
 /* ========================================================================= */
 #ifndef RCRE_NO_VIS_DS
@@ -7887,6 +8468,170 @@ static inline void gpt_scratch_end(GPTScratch *s) {
     if (s->arena) { rcre_arena_temp_end(s->tmp); }
     else { for (size_t i = 0; i < s->n_heap; i++) free(s->heap[i]); }
 }
+
+/* --- Generative Diffusion Sampler Steppers (shared DDPM/DDIM) --- */
+/**
+ * @file gen_diff_sample_int.h
+ * @brief Shared DDPM / DDIM reverse-diffusion steppers (internal, gen module).
+ *
+ * The Tiny U-Net (diffusion.c) and the DiT (vit_dit.c) share one exact
+ * sampler implementation; the only per-architecture difference is the
+ * epsilon-prediction forward pass, injected as a function pointer. Keeping
+ * the DDPM/DDIM schedule arithmetic in exactly one place prevents the two
+ * samplers from drifting apart (they must stay bit-identical for a fixed
+ * seed — the determinism contract, verified in tests/test_gen.c).
+ *
+ * All temporary allocations use caller-supplied arenas; the per-step tape
+ * is created on `scratch` and rewound (arena temp) after each step, so the
+ * steady state is zero-allocation per step.
+ */
+
+#ifndef RCRE_GEN_DIFF_SAMPLE_INT_H
+#define RCRE_GEN_DIFF_SAMPLE_INT_H
+
+#include <math.h>
+
+typedef RCRE_Tensor* (*gen_diff_fwd_fn)(const void* model, RCRE_TensorTape* tape,
+                                        RCRE_Tensor* x, const float* timesteps, void* ctx);
+
+/* Ancestral DDPM: x_{t-1} = 1/sqrt(alpha_t) * (x_t - beta_t/sqrt(1-abar_t) * eps)
+ *                  + sqrt(posterior_variance_t) * z,   z ~ N(0, I) (t > 0)
+ * The final step (t = 0) uses the deterministic mean clamped to [-1, 1]. */
+static inline RCRE_Tensor* gen_diff_sample_ddpm(
+    const void* model, gen_diff_fwd_fn fwd, void* ctx,
+    const RCRE_DiffSchedule* sched, size_t in_ch, size_t H, size_t W,
+    RCRE_Arena* out_arena, RCRE_Arena* scratch, size_t num_samples,
+    uint64_t* rng, size_t tape_cap)
+{
+    if (!model || !sched || !out_arena || !scratch || num_samples == 0 || !rng) return nullptr;
+
+    RCRE_Tensor* x = rcre_tensor_alloc_4d(out_arena, num_samples, in_ch, H, W);
+    if (!x) return nullptr;
+    rcre_tensor_fill_normal(x, 0.0f, 1.0f, rng);
+
+    RCRE_TensorTape* tape = rcre_tensor_tape_create(scratch, tape_cap);
+    if (!tape) return nullptr;
+    float* t_flt = (float*)rcre_arena_alloc(scratch, num_samples * sizeof(float), 16);
+    if (!t_flt) {
+        rcre_tensor_tape_destroy(tape);
+        return nullptr;
+    }
+
+    float* xd = rcre_tensor_f32_data(x);
+    for (size_t step = sched->num_steps; step > 0; --step) {
+        size_t t = step - 1U;
+        for (size_t n = 0; n < num_samples; ++n) t_flt[n] = (float)t;
+
+        RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+        rcre_tensor_tape_reset(tape);
+        RCRE_Tensor* eps = fwd(model, tape, x, t_flt, ctx);
+        if (!eps) {
+            rcre_arena_temp_end(tmp);
+            rcre_tensor_tape_destroy(tape);
+            return nullptr;
+        }
+
+        const float* ed = rcre_tensor_f32_data(eps);
+        float inv_sqrt_alpha = 1.0f / sqrtf(sched->alphas[t]);
+        float beta_over_som  = sched->betas[t] / (sched->sqrt_one_minus_alpha_bar[t] + 1e-12f);
+        float sigma          = (t > 0) ? sqrtf(sched->posterior_variance[t]) : 0.0f;
+
+        for (size_t i = 0; i < x->numel; ++i) {
+            float mean = inv_sqrt_alpha * (xd[i] - beta_over_som * ed[i]);
+            if (t > 0) {
+                xd[i] = mean + sigma * rcre_rng_gaussian_f32(rng, 0.0f, 1.0f);
+            } else {
+                if (mean < -1.0f) mean = -1.0f;
+                if (mean >  1.0f) mean =  1.0f;
+                xd[i] = mean;
+            }
+        }
+        rcre_arena_temp_end(tmp);
+    }
+
+    rcre_tensor_tape_destroy(tape);
+    return x;
+}
+
+/* DDIM sampling (eta = 0 is the deterministic ODE). Sub-step mapping:
+ * t_k = (T-1)(K-1-k)/(K-1); x0_hat clamped to [-1, 1];
+ * x_{t_prev} = sqrt(abar_prev) * x0_hat + sqrt(1 - abar_prev - sigma^2) * eps
+ *             + sigma * z,  sigma = eta * sqrt(((1-abar_prev)/(1-abar_t)) * (1 - abar_t/abar_prev)). */
+static inline RCRE_Tensor* gen_diff_sample_ddim(
+    const void* model, gen_diff_fwd_fn fwd, void* ctx,
+    const RCRE_DiffSchedule* sched, size_t in_ch, size_t H, size_t W,
+    RCRE_Arena* out_arena, RCRE_Arena* scratch, size_t num_samples,
+    size_t ddim_steps, float eta, uint64_t* rng, size_t tape_cap)
+{
+    if (!model || !sched || !out_arena || !scratch || num_samples == 0 ||
+        ddim_steps == 0 || ddim_steps > sched->num_steps || !rng) {
+        return nullptr;
+    }
+
+    RCRE_Tensor* x = rcre_tensor_alloc_4d(out_arena, num_samples, in_ch, H, W);
+    if (!x) return nullptr;
+    rcre_tensor_fill_normal(x, 0.0f, 1.0f, rng);
+
+    RCRE_TensorTape* tape = rcre_tensor_tape_create(scratch, tape_cap);
+    if (!tape) return nullptr;
+    float* t_flt = (float*)rcre_arena_alloc(scratch, num_samples * sizeof(float), 16);
+    if (!t_flt) {
+        rcre_tensor_tape_destroy(tape);
+        return nullptr;
+    }
+
+    float* xd = rcre_tensor_f32_data(x);
+    size_t T = sched->num_steps;
+
+    for (size_t k = 0; k < ddim_steps; ++k) {
+        size_t t = (ddim_steps == 1)
+                       ? (T - 1U)
+                       : ((T - 1U) * (ddim_steps - 1U - k)) / (ddim_steps - 1U);
+        bool is_last = (k + 1U == ddim_steps);
+        size_t t_prev = is_last ? 0U : ((T - 1U) * (ddim_steps - 2U - k)) / (ddim_steps - 1U);
+
+        for (size_t n = 0; n < num_samples; ++n) t_flt[n] = (float)t;
+
+        RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+        rcre_tensor_tape_reset(tape);
+        RCRE_Tensor* eps = fwd(model, tape, x, t_flt, ctx);
+        if (!eps) {
+            rcre_arena_temp_end(tmp);
+            rcre_tensor_tape_destroy(tape);
+            return nullptr;
+        }
+
+        const float* ed = rcre_tensor_f32_data(eps);
+        float ab_t    = sched->alpha_bar[t];
+        float ab_prev = is_last ? 1.0f : sched->alpha_bar[t_prev];
+        float sa_t    = sqrtf(ab_t);
+        float som_t   = sqrtf(fmaxf(0.0f, 1.0f - ab_t));
+        float sa_prev = sqrtf(ab_prev);
+
+        float sigma = 0.0f;
+        if (!is_last && eta > 0.0f) {
+            float ratio = (1.0f - ab_prev) / fmaxf(1e-12f, 1.0f - ab_t);
+            float inner = ratio * fmaxf(0.0f, 1.0f - ab_t / fmaxf(1e-12f, ab_prev));
+            sigma = eta * sqrtf(fmaxf(0.0f, inner));
+        }
+        float dir_coeff = sqrtf(fmaxf(0.0f, 1.0f - ab_prev - sigma * sigma));
+
+        for (size_t i = 0; i < x->numel; ++i) {
+            float x0_hat = (xd[i] - som_t * ed[i]) / fmaxf(1e-12f, sa_t);
+            if (x0_hat < -1.0f) x0_hat = -1.0f;
+            if (x0_hat >  1.0f) x0_hat =  1.0f;
+            float nxt = sa_prev * x0_hat + dir_coeff * ed[i];
+            if (sigma > 0.0f) nxt += sigma * rcre_rng_gaussian_f32(rng, 0.0f, 1.0f);
+            xd[i] = nxt;
+        }
+        rcre_arena_temp_end(tmp);
+    }
+
+    rcre_tensor_tape_destroy(tape);
+    return x;
+}
+
+#endif /* RCRE_GEN_DIFF_SAMPLE_INT_H */
 
 /* --- Source: kernels_scalar.c --- */
 /**
@@ -41584,6 +42329,11 @@ RCRE_Tensor* rcre_tensor_alloc_2d(RCRE_Arena* arena, size_t rows, size_t cols) {
     return rcre_tensor_alloc(arena, shape, 2);
 }
 
+RCRE_Tensor* rcre_tensor_alloc_3d(RCRE_Arena* arena, size_t d0, size_t d1, size_t d2) {
+    size_t shape[3] = { d0, d1, d2 };
+    return rcre_tensor_alloc(arena, shape, 3);
+}
+
 RCRE_Tensor* rcre_tensor_alloc_4d(RCRE_Arena* arena, size_t n, size_t c, size_t h, size_t w) {
     size_t shape[4] = { n, c, h, w };
     return rcre_tensor_alloc(arena, shape, 4);
@@ -41602,6 +42352,38 @@ void rcre_tensor_zeros(RCRE_Tensor* t) {
 
 void rcre_tensor_ones(RCRE_Tensor* t) {
     rcre_tensor_fill(t, 1.0f);
+}
+
+void rcre_tensor_fill_normal(RCRE_Tensor* t, float mean, float std, uint64_t* rng) {
+    if (!is_f32(t) || !rng) return;
+    float* td = rcre_tensor_f32_data(t);
+    for (size_t i = 0; i < t->numel; ++i) {
+        td[i] = rcre_rng_gaussian_f32(rng, mean, std);
+    }
+}
+
+RCRE_Tensor* rcre_sinusoidal_timestep_embed(
+    RCRE_Arena* arena, const float* timesteps, size_t batch_size, size_t embed_dim) {
+    if (arena == nullptr || timesteps == nullptr || batch_size == 0 ||
+        embed_dim < 2 || (embed_dim & 1U) != 0) {
+        return nullptr;
+    }
+    RCRE_Tensor* out = rcre_tensor_alloc_2d(arena, batch_size, embed_dim);
+    if (!out) return nullptr;
+
+    float* od = rcre_tensor_f32_data(out);
+    size_t half = embed_dim / 2U;
+    const float log_max_period = logf(10000.0f);
+
+    for (size_t k = 0; k < half; ++k) {
+        float freq = expf(-log_max_period * (float)k / (float)half);
+        for (size_t b = 0; b < batch_size; ++b) {
+            float angle = timesteps[b] * freq;
+            od[b * embed_dim + k]        = sinf(angle);
+            od[b * embed_dim + half + k] = cosf(angle);
+        }
+    }
+    return out;
 }
 
 void rcre_tensor_zero_grad(RCRE_Tensor* t) {
@@ -42148,6 +42930,1575 @@ RCRE_Tensor* rcre_autograd_attention(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE
     return out;
 }
 
+/* ========================================================================= */
+/* Phase 0 Generative & Vision Autograd Primitives                           */
+/* ========================================================================= */
+
+static inline bool ag_is_f32_contig(const RCRE_Tensor* t) {
+    return is_f32(t) && rcre_tensor_is_contiguous(t);
+}
+
+static inline size_t ag_pack_f32(float v) {
+    uint32_t bits = 0;
+    memcpy(&bits, &v, sizeof(bits));
+    return (size_t)bits;
+}
+
+static inline float ag_unpack_f32(size_t u) {
+    uint32_t bits = (uint32_t)u;
+    float v = 0.0f;
+    memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+/* --- Elementwise: sub, mul, scale, exp --- */
+
+static void ag_backward_sub(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* a   = node->inputs[0];
+    RCRE_Tensor* b   = node->inputs[1];
+    const float* og  = out->grad;
+    for (size_t i = 0; i < out->numel; ++i) {
+        if (a->grad) a->grad[i] += og[i];
+        if (b->grad) b->grad[i] -= og[i];
+    }
+}
+
+RCRE_Tensor* rcre_autograd_sub(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b) {
+    if (!tape || !ag_is_f32_contig(a) || !ag_is_f32_contig(b) || a->numel != b->numel) return nullptr;
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, a->shape, a->ndim);
+    if (!out) return nullptr;
+    const float* ad = rcre_tensor_f32_data(a);
+    const float* bd = rcre_tensor_f32_data(b);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t i = 0; i < out->numel; ++i) od[i] = ad[i] - bd[i];
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = a; node->inputs[1] = b; node->num_inputs = 2;
+    node->backward = ag_backward_sub;
+    return out;
+}
+
+static void ag_backward_mul(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* a   = node->inputs[0];
+    RCRE_Tensor* b   = node->inputs[1];
+    const float* ad  = rcre_tensor_f32_data(a);
+    const float* bd  = rcre_tensor_f32_data(b);
+    const float* og  = out->grad;
+    for (size_t i = 0; i < out->numel; ++i) {
+        if (a->grad) a->grad[i] += bd[i] * og[i];
+        if (b->grad) b->grad[i] += ad[i] * og[i];
+    }
+}
+
+RCRE_Tensor* rcre_autograd_mul(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b) {
+    if (!tape || !ag_is_f32_contig(a) || !ag_is_f32_contig(b) || a->numel != b->numel) return nullptr;
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, a->shape, a->ndim);
+    if (!out) return nullptr;
+    const float* ad = rcre_tensor_f32_data(a);
+    const float* bd = rcre_tensor_f32_data(b);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t i = 0; i < out->numel; ++i) od[i] = ad[i] * bd[i];
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = a; node->inputs[1] = b; node->num_inputs = 2;
+    node->backward = ag_backward_mul;
+    return out;
+}
+
+static void ag_backward_scale(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    float s = ag_unpack_f32(node->aux[0]);
+    const float* og = out->grad;
+    float* xg = x->grad;
+    for (size_t i = 0; i < out->numel; ++i) xg[i] += og[i] * s;
+}
+
+RCRE_Tensor* rcre_autograd_scale(RCRE_TensorTape* tape, RCRE_Tensor* x, float scalar) {
+    if (!tape || !ag_is_f32_contig(x)) return nullptr;
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, x->ndim);
+    if (!out) return nullptr;
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t i = 0; i < out->numel; ++i) od[i] = xd[i] * scalar;
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->aux[0] = ag_pack_f32(scalar);
+    node->backward = ag_backward_scale;
+    return out;
+}
+
+static void ag_backward_exp(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    const float* od = rcre_tensor_f32_data(out);
+    const float* og = out->grad;
+    float* xg = x->grad;
+    for (size_t i = 0; i < out->numel; ++i) xg[i] += od[i] * og[i];
+}
+
+RCRE_Tensor* rcre_autograd_exp(RCRE_TensorTape* tape, RCRE_Tensor* x) {
+    if (!tape || !ag_is_f32_contig(x)) return nullptr;
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, x->ndim);
+    if (!out) return nullptr;
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t i = 0; i < out->numel; ++i) od[i] = expf(xd[i]);
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->backward = ag_backward_exp;
+    return out;
+}
+
+/* --- 4D Channel Bias & General 2D/3D Linear --- */
+
+static void ag_backward_add_bias_4d(RCRE_TensorNode* node) {
+    RCRE_Tensor* out  = node->out;
+    RCRE_Tensor* x    = node->inputs[0];
+    RCRE_Tensor* bias = node->inputs[1];
+    size_t N = out->shape[0], C = out->shape[1], HW = out->shape[2] * out->shape[3];
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t c = 0; c < C; ++c) {
+            const float* g_ch = og + (n * C + c) * HW;
+            float* x_ch = x->grad ? (x->grad + (n * C + c) * HW) : nullptr;
+            float b_acc = 0.0f;
+            for (size_t i = 0; i < HW; ++i) {
+                if (x_ch) x_ch[i] += g_ch[i];
+                b_acc += g_ch[i];
+            }
+            if (bias->grad) bias->grad[c] += b_acc;
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_add_bias_4d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* bias) {
+    if (!tape || !ag_is_f32_contig(x) || !ag_is_f32_contig(bias) ||
+        x->ndim != 4 || bias->ndim != 1 || bias->shape[0] != x->shape[1]) {
+        return nullptr;
+    }
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, 4);
+    if (!out) return nullptr;
+    size_t N = x->shape[0], C = x->shape[1], HW = x->shape[2] * x->shape[3];
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* bd = rcre_tensor_f32_data(bias);
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t c = 0; c < C; ++c) {
+            float bv = bd[c];
+            const float* x_ch = xd + (n * C + c) * HW;
+            float* o_ch = od + (n * C + c) * HW;
+            for (size_t i = 0; i < HW; ++i) o_ch[i] = x_ch[i] + bv;
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->inputs[1] = bias; node->num_inputs = 2;
+    node->backward = ag_backward_add_bias_4d;
+    return out;
+}
+
+static void ag_backward_linear(RCRE_TensorNode* node) {
+    RCRE_Tensor* out  = node->out;
+    RCRE_Tensor* x    = node->inputs[0];
+    RCRE_Tensor* w    = node->inputs[1];
+    RCRE_Tensor* bias = node->inputs[2];
+
+    size_t Din  = w->shape[0];
+    size_t Dout = w->shape[1];
+    size_t M    = x->numel / Din;
+
+    if (x->grad) {
+        rcre_ag_gemm(false, true, M, Din, Dout, 1.0f,
+                     out->grad, Dout, rcre_tensor_f32_data(w), Dout, 1.0f, x->grad, Din);
+    }
+    if (w->grad) {
+        rcre_ag_gemm(true, false, Din, Dout, M, 1.0f,
+                     rcre_tensor_f32_data(x), Din, out->grad, Dout, 1.0f, w->grad, Dout);
+    }
+    if (bias && bias->grad) {
+        const float* og = out->grad;
+        for (size_t r = 0; r < M; ++r) {
+            const float* row = og + r * Dout;
+            for (size_t c = 0; c < Dout; ++c) bias->grad[c] += row[c];
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_linear(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* weight, RCRE_Tensor* bias) {
+    if (!tape || !ag_is_f32_contig(x) || !ag_is_f32_contig(weight) ||
+        (x->ndim != 2 && x->ndim != 3) || weight->ndim != 2) {
+        return nullptr;
+    }
+    size_t Din  = weight->shape[0];
+    size_t Dout = weight->shape[1];
+    if (x->shape[x->ndim - 1] != Din) return nullptr;
+    if (bias != nullptr) {
+        if (!ag_is_f32_contig(bias) || bias->ndim != 1 || bias->shape[0] != Dout) return nullptr;
+    }
+
+    size_t out_shape[3] = {0, 0, 0};
+    if (x->ndim == 2) {
+        out_shape[0] = x->shape[0];
+        out_shape[1] = Dout;
+    } else {
+        out_shape[0] = x->shape[0];
+        out_shape[1] = x->shape[1];
+        out_shape[2] = Dout;
+    }
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, out_shape, x->ndim);
+    if (!out) return nullptr;
+
+    size_t M = x->numel / Din;
+    float* od = rcre_tensor_f32_data(out);
+    rcre_ag_gemm(false, false, M, Dout, Din, 1.0f,
+                 rcre_tensor_f32_data(x), Din,
+                 rcre_tensor_f32_data(weight), Dout,
+                 0.0f, od, Dout);
+
+    if (bias != nullptr) {
+        const float* bd = rcre_tensor_f32_data(bias);
+        for (size_t r = 0; r < M; ++r) {
+            float* row = od + r * Dout;
+            for (size_t c = 0; c < Dout; ++c) row[c] += bd[c];
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out;
+    node->inputs[0] = x;
+    node->inputs[1] = weight;
+    node->inputs[2] = bias;
+    node->num_inputs = bias ? 3 : 2;
+    node->backward = ag_backward_linear;
+    return out;
+}
+
+/* --- Activations: LeakyReLU, Tanh, SiLU, GELU --- */
+
+static void ag_backward_leaky_relu(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    float slope = ag_unpack_f32(node->aux[0]);
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* og = out->grad;
+    float* xg = x->grad;
+    for (size_t i = 0; i < out->numel; ++i) {
+        xg[i] += (xd[i] > 0.0f ? 1.0f : slope) * og[i];
+    }
+}
+
+RCRE_Tensor* rcre_autograd_leaky_relu(RCRE_TensorTape* tape, RCRE_Tensor* x, float neg_slope) {
+    if (!tape || !ag_is_f32_contig(x)) return nullptr;
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, x->ndim);
+    if (!out) return nullptr;
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t i = 0; i < out->numel; ++i) {
+        od[i] = (xd[i] > 0.0f) ? xd[i] : (neg_slope * xd[i]);
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->aux[0] = ag_pack_f32(neg_slope);
+    node->backward = ag_backward_leaky_relu;
+    return out;
+}
+
+static void ag_backward_tanh(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    const float* od = rcre_tensor_f32_data(out);
+    const float* og = out->grad;
+    float* xg = x->grad;
+    for (size_t i = 0; i < out->numel; ++i) {
+        float t = od[i];
+        xg[i] += (1.0f - t * t) * og[i];
+    }
+}
+
+RCRE_Tensor* rcre_autograd_tanh(RCRE_TensorTape* tape, RCRE_Tensor* x) {
+    if (!tape || !ag_is_f32_contig(x)) return nullptr;
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, x->ndim);
+    if (!out) return nullptr;
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t i = 0; i < out->numel; ++i) od[i] = tanhf(xd[i]);
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->backward = ag_backward_tanh;
+    return out;
+}
+
+static void ag_backward_silu(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* od = rcre_tensor_f32_data(out);
+    const float* og = out->grad;
+    float* xg = x->grad;
+    for (size_t i = 0; i < out->numel; ++i) {
+        float sig = 1.0f / (1.0f + expf(-xd[i]));
+        float deriv = sig + od[i] * (1.0f - sig);
+        xg[i] += deriv * og[i];
+    }
+}
+
+RCRE_Tensor* rcre_autograd_silu(RCRE_TensorTape* tape, RCRE_Tensor* x) {
+    if (!tape || !ag_is_f32_contig(x)) return nullptr;
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, x->ndim);
+    if (!out) return nullptr;
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t i = 0; i < out->numel; ++i) {
+        float v = xd[i];
+        od[i] = v / (1.0f + expf(-v));
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->backward = ag_backward_silu;
+    return out;
+}
+
+static void ag_backward_gelu(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* og = out->grad;
+    float* xg = x->grad;
+    const float c = 0.7978845608028654f; /* sqrt(2 / pi) */
+    const float k = 0.044715f;
+    for (size_t i = 0; i < out->numel; ++i) {
+        float v  = xd[i];
+        float v2 = v * v;
+        float u  = c * (v + k * v * v2);
+        float t  = tanhf(u);
+        float du = c * (1.0f + 3.0f * k * v2);
+        float deriv = 0.5f * (1.0f + t) + 0.5f * v * (1.0f - t * t) * du;
+        xg[i] += deriv * og[i];
+    }
+}
+
+RCRE_Tensor* rcre_autograd_gelu(RCRE_TensorTape* tape, RCRE_Tensor* x) {
+    if (!tape || !ag_is_f32_contig(x)) return nullptr;
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, x->ndim);
+    if (!out) return nullptr;
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    const float c = 0.7978845608028654f;
+    const float k = 0.044715f;
+    for (size_t i = 0; i < out->numel; ++i) {
+        float v = xd[i];
+        float u = c * (v + k * v * v * v);
+        od[i] = 0.5f * v * (1.0f + tanhf(u));
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->backward = ag_backward_gelu;
+    return out;
+}
+
+/* --- Normalization: LayerNorm & GroupNorm --- */
+
+static void ag_backward_layernorm(RCRE_TensorNode* node) {
+    RCRE_Tensor* out   = node->out;
+    RCRE_Tensor* x     = node->inputs[0];
+    RCRE_Tensor* gamma = node->inputs[1];
+    RCRE_Tensor* beta  = node->inputs[2];
+    float eps = ag_unpack_f32(node->aux[0]);
+
+    size_t C = x->shape[x->ndim - 1];
+    size_t M = x->numel / C;
+    float inv_C = 1.0f / (float)C;
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* gd = gamma ? rcre_tensor_f32_data(gamma) : nullptr;
+    const float* og = out->grad;
+
+    for (size_t r = 0; r < M; ++r) {
+        const float* xr = xd + r * C;
+        const float* or_ = og + r * C;
+
+        float mean = 0.0f;
+        for (size_t c = 0; c < C; ++c) mean += xr[c];
+        mean *= inv_C;
+
+        float var = 0.0f;
+        for (size_t c = 0; c < C; ++c) {
+            float d = xr[c] - mean;
+            var += d * d;
+        }
+        var *= inv_C;
+        float rstd = 1.0f / sqrtf(var + eps);
+
+        float s1 = 0.0f;
+        float s2 = 0.0f;
+        for (size_t c = 0; c < C; ++c) {
+            float xhat = (xr[c] - mean) * rstd;
+            float dy = or_[c];
+            if (gamma && gamma->grad) gamma->grad[c] += dy * xhat;
+            if (beta  && beta->grad)  beta->grad[c]  += dy;
+            float g_val = gd ? (dy * gd[c]) : dy;
+            s1 += g_val;
+            s2 += g_val * xhat;
+        }
+        s1 *= inv_C;
+        s2 *= inv_C;
+
+        if (x->grad) {
+            float* xgr = x->grad + r * C;
+            for (size_t c = 0; c < C; ++c) {
+                float xhat = (xr[c] - mean) * rstd;
+                float g_val = gd ? (or_[c] * gd[c]) : or_[c];
+                xgr[c] += rstd * (g_val - s1 - xhat * s2);
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_layernorm(RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                     RCRE_Tensor* gamma, RCRE_Tensor* beta, float eps) {
+    if (!tape || !ag_is_f32_contig(x) || (x->ndim != 2 && x->ndim != 3) || !(eps > 0.0f)) {
+        return nullptr;
+    }
+    size_t C = x->shape[x->ndim - 1];
+    if (C == 0) return nullptr;
+    if (gamma && (!ag_is_f32_contig(gamma) || gamma->ndim != 1 || gamma->shape[0] != C)) return nullptr;
+    if (beta  && (!ag_is_f32_contig(beta)  || beta->ndim  != 1 || beta->shape[0]  != C)) return nullptr;
+
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, x->ndim);
+    if (!out) return nullptr;
+
+    size_t M = x->numel / C;
+    float inv_C = 1.0f / (float)C;
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* gd = gamma ? rcre_tensor_f32_data(gamma) : nullptr;
+    const float* bd = beta  ? rcre_tensor_f32_data(beta)  : nullptr;
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t r = 0; r < M; ++r) {
+        const float* xr = xd + r * C;
+        float* or_ = od + r * C;
+
+        float mean = 0.0f;
+        for (size_t c = 0; c < C; ++c) mean += xr[c];
+        mean *= inv_C;
+
+        float var = 0.0f;
+        for (size_t c = 0; c < C; ++c) {
+            float d = xr[c] - mean;
+            var += d * d;
+        }
+        var *= inv_C;
+        float rstd = 1.0f / sqrtf(var + eps);
+
+        for (size_t c = 0; c < C; ++c) {
+            float v = (xr[c] - mean) * rstd;
+            if (gd) v *= gd[c];
+            if (bd) v += bd[c];
+            or_[c] = v;
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out;
+    node->inputs[0] = x;
+    node->inputs[1] = gamma;
+    node->inputs[2] = beta;
+    node->num_inputs = 3;
+    node->aux[0] = ag_pack_f32(eps);
+    node->backward = ag_backward_layernorm;
+    return out;
+}
+
+static void ag_backward_groupnorm(RCRE_TensorNode* node) {
+    RCRE_Tensor* out   = node->out;
+    RCRE_Tensor* x     = node->inputs[0];
+    RCRE_Tensor* gamma = node->inputs[1];
+    RCRE_Tensor* beta  = node->inputs[2];
+    size_t G  = node->aux[0];
+    float eps = ag_unpack_f32(node->aux[1]);
+
+    size_t N = x->shape[0], C = x->shape[1], HW = x->shape[2] * x->shape[3];
+    size_t cpg = C / G;
+    size_t group_sz = cpg * HW;
+    float inv_gsz = 1.0f / (float)group_sz;
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* gd = gamma ? rcre_tensor_f32_data(gamma) : nullptr;
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t g = 0; g < G; ++g) {
+            size_t c0 = g * cpg;
+            float mean = 0.0f;
+            for (size_t ci = 0; ci < cpg; ++ci) {
+                const float* ch = xd + (n * C + c0 + ci) * HW;
+                for (size_t i = 0; i < HW; ++i) mean += ch[i];
+            }
+            mean *= inv_gsz;
+
+            float var = 0.0f;
+            for (size_t ci = 0; ci < cpg; ++ci) {
+                const float* ch = xd + (n * C + c0 + ci) * HW;
+                for (size_t i = 0; i < HW; ++i) {
+                    float d = ch[i] - mean;
+                    var += d * d;
+                }
+            }
+            var *= inv_gsz;
+            float rstd = 1.0f / sqrtf(var + eps);
+
+            float s1 = 0.0f;
+            float s2 = 0.0f;
+            for (size_t ci = 0; ci < cpg; ++ci) {
+                size_t c = c0 + ci;
+                const float* xch = xd + (n * C + c) * HW;
+                const float* gch = og + (n * C + c) * HW;
+                float gscale = gd ? gd[c] : 1.0f;
+                float dg_acc = 0.0f;
+                float db_acc = 0.0f;
+                for (size_t i = 0; i < HW; ++i) {
+                    float xhat = (xch[i] - mean) * rstd;
+                    float dy = gch[i];
+                    dg_acc += dy * xhat;
+                    db_acc += dy;
+                    float dxhat = dy * gscale;
+                    s1 += dxhat;
+                    s2 += dxhat * xhat;
+                }
+                if (gamma && gamma->grad) gamma->grad[c] += dg_acc;
+                if (beta  && beta->grad)  beta->grad[c]  += db_acc;
+            }
+            s1 *= inv_gsz;
+            s2 *= inv_gsz;
+
+            if (x->grad) {
+                for (size_t ci = 0; ci < cpg; ++ci) {
+                    size_t c = c0 + ci;
+                    const float* xch = xd + (n * C + c) * HW;
+                    const float* gch = og + (n * C + c) * HW;
+                    float* dxch = x->grad + (n * C + c) * HW;
+                    float gscale = gd ? gd[c] : 1.0f;
+                    for (size_t i = 0; i < HW; ++i) {
+                        float xhat = (xch[i] - mean) * rstd;
+                        float dxhat = gch[i] * gscale;
+                        dxch[i] += rstd * (dxhat - s1 - xhat * s2);
+                    }
+                }
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_groupnorm(RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                     RCRE_Tensor* gamma, RCRE_Tensor* beta,
+                                     size_t num_groups, float eps) {
+    if (!tape || !ag_is_f32_contig(x) || x->ndim != 4 || num_groups == 0 ||
+        x->shape[1] == 0 || (x->shape[1] % num_groups) != 0 || !(eps > 0.0f)) {
+        return nullptr;
+    }
+    size_t N = x->shape[0], C = x->shape[1], HW = x->shape[2] * x->shape[3];
+    if (HW == 0) return nullptr;
+    if (gamma && (!ag_is_f32_contig(gamma) || gamma->ndim != 1 || gamma->shape[0] != C)) return nullptr;
+    if (beta  && (!ag_is_f32_contig(beta)  || beta->ndim  != 1 || beta->shape[0]  != C)) return nullptr;
+
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, 4);
+    if (!out) return nullptr;
+
+    size_t cpg = C / num_groups;
+    size_t group_sz = cpg * HW;
+    float inv_gsz = 1.0f / (float)group_sz;
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* gd = gamma ? rcre_tensor_f32_data(gamma) : nullptr;
+    const float* bd = beta  ? rcre_tensor_f32_data(beta)  : nullptr;
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t g = 0; g < num_groups; ++g) {
+            size_t c0 = g * cpg;
+            float mean = 0.0f;
+            for (size_t ci = 0; ci < cpg; ++ci) {
+                const float* ch = xd + (n * C + c0 + ci) * HW;
+                for (size_t i = 0; i < HW; ++i) mean += ch[i];
+            }
+            mean *= inv_gsz;
+
+            float var = 0.0f;
+            for (size_t ci = 0; ci < cpg; ++ci) {
+                const float* ch = xd + (n * C + c0 + ci) * HW;
+                for (size_t i = 0; i < HW; ++i) {
+                    float d = ch[i] - mean;
+                    var += d * d;
+                }
+            }
+            var *= inv_gsz;
+            float rstd = 1.0f / sqrtf(var + eps);
+
+            for (size_t ci = 0; ci < cpg; ++ci) {
+                size_t c = c0 + ci;
+                const float* xch = xd + (n * C + c) * HW;
+                float* och = od + (n * C + c) * HW;
+                float gv = gd ? gd[c] : 1.0f;
+                float bv = bd ? bd[c] : 0.0f;
+                for (size_t i = 0; i < HW; ++i) {
+                    och[i] = ((xch[i] - mean) * rstd) * gv + bv;
+                }
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out;
+    node->inputs[0] = x;
+    node->inputs[1] = gamma;
+    node->inputs[2] = beta;
+    node->num_inputs = 3;
+    node->aux[0] = num_groups;
+    node->aux[1] = ag_pack_f32(eps);
+    node->backward = ag_backward_groupnorm;
+    return out;
+}
+
+/* --- Conditioning: FiLM 4D (UNet), AdaLN 3D & Gate 3D (DiT) --- */
+
+static void ag_backward_film_4d(RCRE_TensorNode* node) {
+    RCRE_Tensor* out   = node->out;
+    RCRE_Tensor* x     = node->inputs[0];
+    RCRE_Tensor* scale = node->inputs[1];
+    RCRE_Tensor* shift = node->inputs[2];
+    size_t N = x->shape[0], C = x->shape[1], HW = x->shape[2] * x->shape[3];
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* sd = scale ? rcre_tensor_f32_data(scale) : nullptr;
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t c = 0; c < C; ++c) {
+            size_t nc = n * C + c;
+            float mult = 1.0f + (sd ? sd[nc] : 0.0f);
+            const float* xch = xd + nc * HW;
+            const float* gch = og + nc * HW;
+            float* dxch = x->grad ? (x->grad + nc * HW) : nullptr;
+            float ds = 0.0f, db = 0.0f;
+            for (size_t i = 0; i < HW; ++i) {
+                if (dxch) dxch[i] += gch[i] * mult;
+                ds += gch[i] * xch[i];
+                db += gch[i];
+            }
+            if (scale && scale->grad) scale->grad[nc] += ds;
+            if (shift && shift->grad) shift->grad[nc] += db;
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_film_4d(RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                   RCRE_Tensor* scale, RCRE_Tensor* shift) {
+    if (!tape || !ag_is_f32_contig(x) || x->ndim != 4) return nullptr;
+    size_t N = x->shape[0], C = x->shape[1], HW = x->shape[2] * x->shape[3];
+    if (scale && (!ag_is_f32_contig(scale) || scale->ndim != 2 || scale->shape[0] != N || scale->shape[1] != C)) return nullptr;
+    if (shift && (!ag_is_f32_contig(shift) || shift->ndim != 2 || shift->shape[0] != N || shift->shape[1] != C)) return nullptr;
+
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, 4);
+    if (!out) return nullptr;
+
+    const float* xd  = rcre_tensor_f32_data(x);
+    const float* sd  = scale ? rcre_tensor_f32_data(scale) : nullptr;
+    const float* shd = shift ? rcre_tensor_f32_data(shift) : nullptr;
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t c = 0; c < C; ++c) {
+            size_t nc = n * C + c;
+            float mult = 1.0f + (sd ? sd[nc] : 0.0f);
+            float add  = shd ? shd[nc] : 0.0f;
+            const float* xch = xd + nc * HW;
+            float* och = od + nc * HW;
+            for (size_t i = 0; i < HW; ++i) och[i] = xch[i] * mult + add;
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->inputs[1] = scale; node->inputs[2] = shift;
+    node->num_inputs = 3;
+    node->backward = ag_backward_film_4d;
+    return out;
+}
+
+static void ag_backward_adaln_3d(RCRE_TensorNode* node) {
+    RCRE_Tensor* out   = node->out;
+    RCRE_Tensor* x     = node->inputs[0];
+    RCRE_Tensor* scale = node->inputs[1];
+    RCRE_Tensor* shift = node->inputs[2];
+    size_t B = x->shape[0], T = x->shape[1], C = x->shape[2];
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* sd = scale ? rcre_tensor_f32_data(scale) : nullptr;
+    const float* og = out->grad;
+
+    for (size_t b = 0; b < B; ++b) {
+        for (size_t t = 0; t < T; ++t) {
+            size_t base = (b * T + t) * C;
+            for (size_t c = 0; c < C; ++c) {
+                size_t bc = b * C + c;
+                float mult = 1.0f + (sd ? sd[bc] : 0.0f);
+                float g = og[base + c];
+                if (x->grad) x->grad[base + c] += g * mult;
+                if (scale && scale->grad) scale->grad[bc] += g * xd[base + c];
+                if (shift && shift->grad) shift->grad[bc] += g;
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_adaln_3d(RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                    RCRE_Tensor* scale, RCRE_Tensor* shift) {
+    if (!tape || !ag_is_f32_contig(x) || x->ndim != 3) return nullptr;
+    size_t B = x->shape[0], T = x->shape[1], C = x->shape[2];
+    if (scale && (!ag_is_f32_contig(scale) || scale->ndim != 2 || scale->shape[0] != B || scale->shape[1] != C)) return nullptr;
+    if (shift && (!ag_is_f32_contig(shift) || shift->ndim != 2 || shift->shape[0] != B || shift->shape[1] != C)) return nullptr;
+
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, 3);
+    if (!out) return nullptr;
+
+    const float* xd  = rcre_tensor_f32_data(x);
+    const float* sd  = scale ? rcre_tensor_f32_data(scale) : nullptr;
+    const float* shd = shift ? rcre_tensor_f32_data(shift) : nullptr;
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t b = 0; b < B; ++b) {
+        for (size_t t = 0; t < T; ++t) {
+            size_t base = (b * T + t) * C;
+            for (size_t c = 0; c < C; ++c) {
+                size_t bc = b * C + c;
+                float mult = 1.0f + (sd ? sd[bc] : 0.0f);
+                float add  = shd ? shd[bc] : 0.0f;
+                od[base + c] = xd[base + c] * mult + add;
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->inputs[1] = scale; node->inputs[2] = shift;
+    node->num_inputs = 3;
+    node->backward = ag_backward_adaln_3d;
+    return out;
+}
+
+static void ag_backward_gate_3d(RCRE_TensorNode* node) {
+    RCRE_Tensor* out  = node->out;
+    RCRE_Tensor* x    = node->inputs[0];
+    RCRE_Tensor* gate = node->inputs[1];
+    size_t B = x->shape[0], T = x->shape[1], C = x->shape[2];
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* gd = rcre_tensor_f32_data(gate);
+    const float* og = out->grad;
+
+    for (size_t b = 0; b < B; ++b) {
+        for (size_t t = 0; t < T; ++t) {
+            size_t base = (b * T + t) * C;
+            for (size_t c = 0; c < C; ++c) {
+                size_t bc = b * C + c;
+                float g = og[base + c];
+                if (x->grad) x->grad[base + c] += g * gd[bc];
+                if (gate->grad) gate->grad[bc] += g * xd[base + c];
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_gate_3d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* gate) {
+    if (!tape || !ag_is_f32_contig(x) || !ag_is_f32_contig(gate) ||
+        x->ndim != 3 || gate->ndim != 2 ||
+        gate->shape[0] != x->shape[0] || gate->shape[1] != x->shape[2]) {
+        return nullptr;
+    }
+    size_t B = x->shape[0], T = x->shape[1], C = x->shape[2];
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, 3);
+    if (!out) return nullptr;
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* gd = rcre_tensor_f32_data(gate);
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t b = 0; b < B; ++b) {
+        for (size_t t = 0; t < T; ++t) {
+            size_t base = (b * T + t) * C;
+            for (size_t c = 0; c < C; ++c) {
+                od[base + c] = xd[base + c] * gd[b * C + c];
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->inputs[1] = gate; node->num_inputs = 2;
+    node->backward = ag_backward_gate_3d;
+    return out;
+}
+
+/* --- Structural & Spatial: reshape, slice_cols, concat_channels, upsample2d, avgpool2d --- */
+
+static void ag_backward_reshape(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    const float* og = out->grad;
+    float* xg = x->grad;
+    for (size_t i = 0; i < out->numel; ++i) xg[i] += og[i];
+}
+
+RCRE_Tensor* rcre_autograd_reshape(RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                   const size_t* new_shape, uint8_t new_ndim) {
+    if (!tape || !ag_is_f32_contig(x) || !new_shape || new_ndim == 0 || new_ndim > RCRE_MAX_DIMS) {
+        return nullptr;
+    }
+    size_t new_numel = 1;
+    for (uint8_t i = 0; i < new_ndim; ++i) {
+        if (new_shape[i] == 0) return nullptr;
+        new_numel *= new_shape[i];
+    }
+    if (new_numel != x->numel) return nullptr;
+
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, new_shape, new_ndim);
+    if (!out) return nullptr;
+    memcpy(out->data, x->data, x->numel * sizeof(float));
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->backward = ag_backward_reshape;
+    return out;
+}
+
+static void ag_backward_slice_cols(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    size_t col_start = node->aux[0];
+    size_t col_width = node->aux[1];
+    size_t rows = x->shape[0];
+    size_t D    = x->shape[1];
+    const float* og = out->grad;
+    for (size_t r = 0; r < rows; ++r) {
+        float* xr = x->grad + r * D + col_start;
+        const float* or_ = og + r * col_width;
+        for (size_t c = 0; c < col_width; ++c) xr[c] += or_[c];
+    }
+}
+
+RCRE_Tensor* rcre_autograd_slice_cols(RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                      size_t col_start, size_t col_width) {
+    if (!tape || !ag_is_f32_contig(x) || x->ndim != 2 ||
+        col_width == 0 || col_start > x->shape[1] || col_width > x->shape[1] - col_start) {
+        return nullptr;
+    }
+    size_t rows = x->shape[0];
+    size_t D    = x->shape[1];
+    RCRE_Tensor* out = rcre_tensor_alloc_2d(tape->arena, rows, col_width);
+    if (!out) return nullptr;
+
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t r = 0; r < rows; ++r) {
+        memcpy(od + r * col_width, xd + r * D + col_start, col_width * sizeof(float));
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->aux[0] = col_start;
+    node->aux[1] = col_width;
+    node->backward = ag_backward_slice_cols;
+    return out;
+}
+
+static void ag_backward_concat_channels(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* a   = node->inputs[0];
+    RCRE_Tensor* b   = node->inputs[1];
+    size_t N  = out->shape[0];
+    size_t C1 = a->shape[1];
+    size_t C2 = b->shape[1];
+    size_t C  = C1 + C2;
+    size_t HW = out->shape[2] * out->shape[3];
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        if (a->grad) {
+            size_t len = C1 * HW;
+            float* ag = a->grad + n * len;
+            const float* go = og + (n * C) * HW;
+            for (size_t i = 0; i < len; ++i) ag[i] += go[i];
+        }
+        if (b->grad) {
+            size_t len = C2 * HW;
+            float* bg = b->grad + n * len;
+            const float* go = og + (n * C + C1) * HW;
+            for (size_t i = 0; i < len; ++i) bg[i] += go[i];
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_concat_channels(RCRE_TensorTape* tape, RCRE_Tensor* a, RCRE_Tensor* b) {
+    if (!tape || !ag_is_f32_contig(a) || !ag_is_f32_contig(b) ||
+        a->ndim != 4 || b->ndim != 4 ||
+        a->shape[0] != b->shape[0] || a->shape[2] != b->shape[2] || a->shape[3] != b->shape[3]) {
+        return nullptr;
+    }
+    size_t N = a->shape[0], C1 = a->shape[1], C2 = b->shape[1];
+    size_t H = a->shape[2], W  = a->shape[3], HW = H * W;
+    RCRE_Tensor* out = rcre_tensor_alloc_4d(tape->arena, N, C1 + C2, H, W);
+    if (!out) return nullptr;
+
+    const float* ad = rcre_tensor_f32_data(a);
+    const float* bd = rcre_tensor_f32_data(b);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t n = 0; n < N; ++n) {
+        memcpy(od + (n * (C1 + C2)) * HW,      ad + n * C1 * HW, C1 * HW * sizeof(float));
+        memcpy(od + (n * (C1 + C2) + C1) * HW, bd + n * C2 * HW, C2 * HW * sizeof(float));
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = a; node->inputs[1] = b; node->num_inputs = 2;
+    node->backward = ag_backward_concat_channels;
+    return out;
+}
+
+static void ag_backward_upsample2d_nearest(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    size_t scale = node->aux[0];
+    size_t N = x->shape[0], C = x->shape[1], H = x->shape[2], W = x->shape[3];
+    size_t Ho = H * scale, Wo = W * scale;
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t c = 0; c < C; ++c) {
+            float* xch = x->grad + (n * C + c) * H * W;
+            const float* och = og + (n * C + c) * Ho * Wo;
+            for (size_t h = 0; h < H; ++h) {
+                for (size_t w = 0; w < W; ++w) {
+                    float acc = 0.0f;
+                    for (size_t dh = 0; dh < scale; ++dh) {
+                        const float* row = och + (h * scale + dh) * Wo + w * scale;
+                        for (size_t dw = 0; dw < scale; ++dw) acc += row[dw];
+                    }
+                    xch[h * W + w] += acc;
+                }
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_upsample2d_nearest(RCRE_TensorTape* tape, RCRE_Tensor* x, size_t scale) {
+    if (!tape || !ag_is_f32_contig(x) || x->ndim != 4 || scale == 0) return nullptr;
+    size_t N = x->shape[0], C = x->shape[1], H = x->shape[2], W = x->shape[3];
+    size_t Ho = H * scale, Wo = W * scale;
+    RCRE_Tensor* out = rcre_tensor_alloc_4d(tape->arena, N, C, Ho, Wo);
+    if (!out) return nullptr;
+
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t c = 0; c < C; ++c) {
+            const float* xch = xd + (n * C + c) * H * W;
+            float* och = od + (n * C + c) * Ho * Wo;
+            for (size_t h = 0; h < H; ++h) {
+                for (size_t w = 0; w < W; ++w) {
+                    float val = xch[h * W + w];
+                    for (size_t dh = 0; dh < scale; ++dh) {
+                        float* row = och + (h * scale + dh) * Wo + w * scale;
+                        for (size_t dw = 0; dw < scale; ++dw) row[dw] = val;
+                    }
+                }
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->aux[0] = scale;
+    node->backward = ag_backward_upsample2d_nearest;
+    return out;
+}
+
+static void ag_backward_avgpool2d(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    size_t k = node->aux[0];
+    size_t s = node->aux[1];
+    size_t N = x->shape[0], C = x->shape[1], H = x->shape[2], W = x->shape[3];
+    size_t Ho = out->shape[2], Wo = out->shape[3];
+    float inv_k2 = 1.0f / (float)(k * k);
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t c = 0; c < C; ++c) {
+            float* xch = x->grad + (n * C + c) * H * W;
+            const float* och = og + (n * C + c) * Ho * Wo;
+            for (size_t ho = 0; ho < Ho; ++ho) {
+                for (size_t wo = 0; wo < Wo; ++wo) {
+                    float g = och[ho * Wo + wo] * inv_k2;
+                    for (size_t kh = 0; kh < k; ++kh) {
+                        float* row = xch + (ho * s + kh) * W + wo * s;
+                        for (size_t kw = 0; kw < k; ++kw) row[kw] += g;
+                    }
+                }
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_avgpool2d(RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                     size_t kernel_size, size_t stride) {
+    if (!tape || !ag_is_f32_contig(x) || x->ndim != 4 || kernel_size == 0 || stride == 0) {
+        return nullptr;
+    }
+    size_t N = x->shape[0], C = x->shape[1], H = x->shape[2], W = x->shape[3];
+    if (H < kernel_size || W < kernel_size) return nullptr;
+    size_t Ho = (H - kernel_size) / stride + 1U;
+    size_t Wo = (W - kernel_size) / stride + 1U;
+    RCRE_Tensor* out = rcre_tensor_alloc_4d(tape->arena, N, C, Ho, Wo);
+    if (!out) return nullptr;
+
+    float inv_k2 = 1.0f / (float)(kernel_size * kernel_size);
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t c = 0; c < C; ++c) {
+            const float* xch = xd + (n * C + c) * H * W;
+            float* och = od + (n * C + c) * Ho * Wo;
+            for (size_t ho = 0; ho < Ho; ++ho) {
+                for (size_t wo = 0; wo < Wo; ++wo) {
+                    float acc = 0.0f;
+                    for (size_t kh = 0; kh < kernel_size; ++kh) {
+                        const float* row = xch + (ho * stride + kh) * W + wo * stride;
+                        for (size_t kw = 0; kw < kernel_size; ++kw) acc += row[kw];
+                    }
+                    och[ho * Wo + wo] = acc * inv_k2;
+                }
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->aux[0] = kernel_size;
+    node->aux[1] = stride;
+    node->backward = ag_backward_avgpool2d;
+    return out;
+}
+
+/* --- Vision Transformer / DiT: patchify, unpatchify, batched MHSA --- */
+
+static void ag_backward_patchify(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* img = node->inputs[0];
+    if (!img->grad) return;
+    size_t P  = node->aux[0];
+    size_t N  = img->shape[0], C = img->shape[1], H = img->shape[2], W = img->shape[3];
+    size_t gh = H / P, gw = W / P, T = gh * gw, D = C * P * P;
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t py = 0; py < gh; ++py) {
+            for (size_t px = 0; px < gw; ++px) {
+                size_t t = py * gw + px;
+                const float* gtok = og + (n * T + t) * D;
+                for (size_t c = 0; c < C; ++c) {
+                    for (size_t dy = 0; dy < P; ++dy) {
+                        for (size_t dx = 0; dx < P; ++dx) {
+                            size_t img_idx = ((n * C + c) * H + (py * P + dy)) * W + (px * P + dx);
+                            size_t tok_idx = (c * P + dy) * P + dx;
+                            img->grad[img_idx] += gtok[tok_idx];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_patchify(RCRE_TensorTape* tape, RCRE_Tensor* img, size_t patch_size) {
+    if (!tape || !ag_is_f32_contig(img) || img->ndim != 4 || patch_size == 0) return nullptr;
+    size_t N = img->shape[0], C = img->shape[1], H = img->shape[2], W = img->shape[3];
+    if (H == 0 || W == 0 || (H % patch_size) != 0 || (W % patch_size) != 0) return nullptr;
+    size_t gh = H / patch_size, gw = W / patch_size;
+    size_t T  = gh * gw;
+    size_t D  = C * patch_size * patch_size;
+
+    RCRE_Tensor* out = rcre_tensor_alloc_3d(tape->arena, N, T, D);
+    if (!out) return nullptr;
+
+    const float* id = rcre_tensor_f32_data(img);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t py = 0; py < gh; ++py) {
+            for (size_t px = 0; px < gw; ++px) {
+                size_t t = py * gw + px;
+                float* otok = od + (n * T + t) * D;
+                for (size_t c = 0; c < C; ++c) {
+                    for (size_t dy = 0; dy < patch_size; ++dy) {
+                        for (size_t dx = 0; dx < patch_size; ++dx) {
+                            size_t img_idx = ((n * C + c) * H + (py * patch_size + dy)) * W + (px * patch_size + dx);
+                            otok[(c * patch_size + dy) * patch_size + dx] = id[img_idx];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = img; node->num_inputs = 1;
+    node->aux[0] = patch_size;
+    node->backward = ag_backward_patchify;
+    return out;
+}
+
+static void ag_backward_unpatchify(RCRE_TensorNode* node) {
+    RCRE_Tensor* out    = node->out;
+    RCRE_Tensor* tokens = node->inputs[0];
+    if (!tokens->grad) return;
+    size_t P  = node->aux[0];
+    size_t N  = out->shape[0], C = out->shape[1], H = out->shape[2], W = out->shape[3];
+    size_t gh = H / P, gw = W / P, T = gh * gw, D = C * P * P;
+    const float* og = out->grad;
+
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t py = 0; py < gh; ++py) {
+            for (size_t px = 0; px < gw; ++px) {
+                size_t t = py * gw + px;
+                float* gtok = tokens->grad + (n * T + t) * D;
+                for (size_t c = 0; c < C; ++c) {
+                    for (size_t dy = 0; dy < P; ++dy) {
+                        for (size_t dx = 0; dx < P; ++dx) {
+                            size_t img_idx = ((n * C + c) * H + (py * P + dy)) * W + (px * P + dx);
+                            gtok[(c * P + dy) * P + dx] += og[img_idx];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_unpatchify(RCRE_TensorTape* tape, RCRE_Tensor* tokens,
+                                      size_t channels, size_t height, size_t width, size_t patch_size) {
+    if (!tape || !ag_is_f32_contig(tokens) || tokens->ndim != 3 ||
+        channels == 0 || height == 0 || width == 0 || patch_size == 0 ||
+        (height % patch_size) != 0 || (width % patch_size) != 0) {
+        return nullptr;
+    }
+    size_t gh = height / patch_size, gw = width / patch_size;
+    size_t T  = gh * gw;
+    size_t D  = channels * patch_size * patch_size;
+    if (tokens->shape[1] != T || tokens->shape[2] != D) return nullptr;
+
+    size_t N = tokens->shape[0];
+    RCRE_Tensor* out = rcre_tensor_alloc_4d(tape->arena, N, channels, height, width);
+    if (!out) return nullptr;
+
+    const float* td = rcre_tensor_f32_data(tokens);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t n = 0; n < N; ++n) {
+        for (size_t py = 0; py < gh; ++py) {
+            for (size_t px = 0; px < gw; ++px) {
+                size_t t = py * gw + px;
+                const float* itok = td + (n * T + t) * D;
+                for (size_t c = 0; c < channels; ++c) {
+                    for (size_t dy = 0; dy < patch_size; ++dy) {
+                        for (size_t dx = 0; dx < patch_size; ++dx) {
+                            size_t img_idx = ((n * channels + c) * height + (py * patch_size + dy)) * width + (px * patch_size + dx);
+                            od[img_idx] = itok[(c * patch_size + dy) * patch_size + dx];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = tokens; node->num_inputs = 1;
+    node->aux[0] = patch_size;
+    node->backward = ag_backward_unpatchify;
+    return out;
+}
+
+static void ag_backward_mhsa(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* q   = node->inputs[0];
+    RCRE_Tensor* k   = node->inputs[1];
+    RCRE_Tensor* v   = node->inputs[2];
+    size_t H = node->aux[0];
+    float* workspace = (float*)(uintptr_t)node->aux[1];
+
+    size_t B  = q->shape[0];
+    size_t T  = q->shape[1];
+    size_t C  = q->shape[2];
+    size_t Dh = C / H;
+    float scale = 1.0f / sqrtf((float)Dh);
+
+    const float* qd = rcre_tensor_f32_data(q);
+    const float* kd = rcre_tensor_f32_data(k);
+    const float* vd = rcre_tensor_f32_data(v);
+    const float* og = out->grad;
+
+    float* probs = workspace;
+    float* dP    = workspace + B * H * T * T;
+
+    for (size_t b = 0; b < B; ++b) {
+        for (size_t h = 0; h < H; ++h) {
+            size_t h_off = h * Dh;
+            const float* P_bh = probs + (b * H + h) * T * T;
+
+            for (size_t i = 0; i < T; ++i) {
+                const float* p_row = P_bh + i * T;
+                const float* do_i  = og + (b * T + i) * C + h_off;
+                const float* q_i   = qd + (b * T + i) * C + h_off;
+                float* dq_i = q->grad ? (q->grad + (b * T + i) * C + h_off) : nullptr;
+
+                float row_dot = 0.0f;
+                for (size_t j = 0; j < T; ++j) {
+                    const float* v_j = vd + (b * T + j) * C + h_off;
+                    float* dv_j = v->grad ? (v->grad + (b * T + j) * C + h_off) : nullptr;
+                    float pij = p_row[j];
+                    float dp = 0.0f;
+                    for (size_t d = 0; d < Dh; ++d) {
+                        dp += do_i[d] * v_j[d];
+                        if (dv_j) dv_j[d] += pij * do_i[d];
+                    }
+                    dP[j] = dp;
+                    row_dot += pij * dp;
+                }
+
+                for (size_t j = 0; j < T; ++j) {
+                    float dS = p_row[j] * (dP[j] - row_dot) * scale;
+                    const float* k_j = kd + (b * T + j) * C + h_off;
+                    float* dk_j = k->grad ? (k->grad + (b * T + j) * C + h_off) : nullptr;
+                    for (size_t d = 0; d < Dh; ++d) {
+                        if (dq_i) dq_i[d] += dS * k_j[d];
+                        if (dk_j) dk_j[d] += dS * q_i[d];
+                    }
+                }
+            }
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_mhsa(RCRE_TensorTape* tape, RCRE_Tensor* q, RCRE_Tensor* k,
+                                RCRE_Tensor* v, size_t num_heads) {
+    if (!tape || !ag_is_f32_contig(q) || !ag_is_f32_contig(k) || !ag_is_f32_contig(v) ||
+        q->ndim != 3 || k->ndim != 3 || v->ndim != 3 || num_heads == 0 ||
+        q->shape[0] != k->shape[0] || q->shape[0] != v->shape[0] ||
+        q->shape[1] != k->shape[1] || q->shape[1] != v->shape[1] ||
+        q->shape[2] != k->shape[2] || q->shape[2] != v->shape[2] ||
+        q->shape[2] == 0 || (q->shape[2] % num_heads) != 0) {
+        return nullptr;
+    }
+    size_t B  = q->shape[0];
+    size_t T  = q->shape[1];
+    size_t C  = q->shape[2];
+    size_t Dh = C / num_heads;
+    float scale = 1.0f / sqrtf((float)Dh);
+
+    RCRE_Tensor* out = rcre_tensor_alloc_3d(tape->arena, B, T, C);
+    if (!out) return nullptr;
+
+    /* Zero-malloc arena workspace: [B * H * T * T] attention weights + [T] backward dP buffer */
+    size_t ws_elems = B * num_heads * T * T + T;
+    float* workspace = (float*)rcre_arena_alloc(tape->arena, ws_elems * sizeof(float), 64);
+    if (!workspace) return nullptr;
+
+    const float* qd = rcre_tensor_f32_data(q);
+    const float* kd = rcre_tensor_f32_data(k);
+    const float* vd = rcre_tensor_f32_data(v);
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t b = 0; b < B; ++b) {
+        for (size_t h = 0; h < num_heads; ++h) {
+            size_t h_off = h * Dh;
+            float* P_bh = workspace + (b * num_heads + h) * T * T;
+
+            for (size_t i = 0; i < T; ++i) {
+                const float* q_i = qd + (b * T + i) * C + h_off;
+                float* p_row = P_bh + i * T;
+
+                float mx = -1e30f;
+                for (size_t j = 0; j < T; ++j) {
+                    const float* k_j = kd + (b * T + j) * C + h_off;
+                    float s = 0.0f;
+                    for (size_t d = 0; d < Dh; ++d) s += q_i[d] * k_j[d];
+                    s *= scale;
+                    p_row[j] = s;
+                    if (s > mx) mx = s;
+                }
+
+                float sum = 0.0f;
+                for (size_t j = 0; j < T; ++j) {
+                    p_row[j] = expf(p_row[j] - mx);
+                    sum += p_row[j];
+                }
+                float inv_sum = 1.0f / sum;
+                for (size_t j = 0; j < T; ++j) p_row[j] *= inv_sum;
+
+                float* o_i = od + (b * T + i) * C + h_off;
+                for (size_t d = 0; d < Dh; ++d) o_i[d] = 0.0f;
+                for (size_t j = 0; j < T; ++j) {
+                    float pij = p_row[j];
+                    const float* v_j = vd + (b * T + j) * C + h_off;
+                    for (size_t d = 0; d < Dh; ++d) o_i[d] += pij * v_j[d];
+                }
+            }
+        }
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out        = out;
+    node->inputs[0]  = q;
+    node->inputs[1]  = k;
+    node->inputs[2]  = v;
+    node->num_inputs = 3;
+    node->aux[0]     = num_heads;
+    node->aux[1]     = (size_t)(uintptr_t)workspace;
+    node->backward   = ag_backward_mhsa;
+    return out;
+}
+
+/* --- VAE Reparameterization Trick: z = mu + eps * exp(0.5 * clamp(logvar, -20, 20)) --- */
+
+static void ag_backward_reparameterize(RCRE_TensorNode* node) {
+    RCRE_Tensor* out    = node->out;
+    RCRE_Tensor* mu     = node->inputs[0];
+    RCRE_Tensor* logvar = node->inputs[1];
+    RCRE_Tensor* eps    = node->inputs[2];
+
+    const float* lvd = rcre_tensor_f32_data(logvar);
+    const float* epd = rcre_tensor_f32_data(eps);
+    const float* og  = out->grad;
+
+    for (size_t i = 0; i < out->numel; ++i) {
+        float raw_lv = lvd[i];
+        float lv = raw_lv;
+        if (lv < -20.0f) lv = -20.0f;
+        if (lv >  20.0f) lv =  20.0f;
+        float std = expf(0.5f * lv);
+        float g   = og[i];
+        if (mu->grad) mu->grad[i] += g;
+        if (logvar->grad && raw_lv > -20.0f && raw_lv < 20.0f) {
+            logvar->grad[i] += g * epd[i] * 0.5f * std;
+        }
+        if (eps->grad) eps->grad[i] += g * std;
+    }
+}
+
+RCRE_Tensor* rcre_autograd_reparameterize(RCRE_TensorTape* tape, RCRE_Tensor* mu,
+                                          RCRE_Tensor* logvar, RCRE_Tensor* eps) {
+    if (!tape || !ag_is_f32_contig(mu) || !ag_is_f32_contig(logvar) || !ag_is_f32_contig(eps) ||
+        mu->numel != logvar->numel || mu->numel != eps->numel) {
+        return nullptr;
+    }
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, mu->shape, mu->ndim);
+    if (!out) return nullptr;
+
+    const float* md  = rcre_tensor_f32_data(mu);
+    const float* lvd = rcre_tensor_f32_data(logvar);
+    const float* epd = rcre_tensor_f32_data(eps);
+    float* od = rcre_tensor_f32_data(out);
+
+    for (size_t i = 0; i < out->numel; ++i) {
+        float lv = lvd[i];
+        if (lv < -20.0f) lv = -20.0f;
+        if (lv >  20.0f) lv =  20.0f;
+        od[i] = md[i] + epd[i] * expf(0.5f * lv);
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out;
+    node->inputs[0] = mu;
+    node->inputs[1] = logvar;
+    node->inputs[2] = eps;
+    node->num_inputs = 3;
+    node->backward = ag_backward_reparameterize;
+    return out;
+}
+
+/* --- ViT/DiT Helpers: add_pos_emb_3d, mean_pool_seq, embed_lookup --- */
+
+static void ag_backward_add_pos_emb_3d(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    RCRE_Tensor* pos = node->inputs[1];
+    size_t B = x->shape[0], TC = x->shape[1] * x->shape[2];
+    const float* og = out->grad;
+
+    for (size_t b = 0; b < B; ++b) {
+        const float* gb = og + b * TC;
+        float* xb = x->grad ? (x->grad + b * TC) : nullptr;
+        for (size_t i = 0; i < TC; ++i) {
+            if (xb) xb[i] += gb[i];
+            if (pos->grad) pos->grad[i] += gb[i];
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_add_pos_emb_3d(RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* pos_emb) {
+    if (!tape || !ag_is_f32_contig(x) || !ag_is_f32_contig(pos_emb) ||
+        x->ndim != 3 || pos_emb->ndim != 2 ||
+        pos_emb->shape[0] != x->shape[1] || pos_emb->shape[1] != x->shape[2]) {
+        return nullptr;
+    }
+    size_t B = x->shape[0], TC = x->shape[1] * x->shape[2];
+    RCRE_Tensor* out = rcre_tensor_alloc(tape->arena, x->shape, 3);
+    if (!out) return nullptr;
+
+    const float* xd = rcre_tensor_f32_data(x);
+    const float* pd = rcre_tensor_f32_data(pos_emb);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t b = 0; b < B; ++b) {
+        const float* xb = xd + b * TC;
+        float* ob = od + b * TC;
+        for (size_t i = 0; i < TC; ++i) ob[i] = xb[i] + pd[i];
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->inputs[1] = pos_emb; node->num_inputs = 2;
+    node->backward = ag_backward_add_pos_emb_3d;
+    return out;
+}
+
+static void ag_backward_mean_pool_seq(RCRE_TensorNode* node) {
+    RCRE_Tensor* out = node->out;
+    RCRE_Tensor* x   = node->inputs[0];
+    if (!x->grad) return;
+    size_t B = x->shape[0], T = x->shape[1], C = x->shape[2];
+    float inv_T = 1.0f / (float)T;
+    const float* og = out->grad;
+
+    for (size_t b = 0; b < B; ++b) {
+        const float* gb = og + b * C;
+        for (size_t t = 0; t < T; ++t) {
+            float* xbt = x->grad + (b * T + t) * C;
+            for (size_t c = 0; c < C; ++c) xbt[c] += gb[c] * inv_T;
+        }
+    }
+}
+
+RCRE_Tensor* rcre_autograd_mean_pool_seq(RCRE_TensorTape* tape, RCRE_Tensor* x) {
+    if (!tape || !ag_is_f32_contig(x) || x->ndim != 3 || x->shape[1] == 0) return nullptr;
+    size_t B = x->shape[0], T = x->shape[1], C = x->shape[2];
+    RCRE_Tensor* out = rcre_tensor_alloc_2d(tape->arena, B, C);
+    if (!out) return nullptr;
+
+    float inv_T = 1.0f / (float)T;
+    const float* xd = rcre_tensor_f32_data(x);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t b = 0; b < B; ++b) {
+        float* ob = od + b * C;
+        for (size_t c = 0; c < C; ++c) ob[c] = 0.0f;
+        for (size_t t = 0; t < T; ++t) {
+            const float* xbt = xd + (b * T + t) * C;
+            for (size_t c = 0; c < C; ++c) ob[c] += xbt[c];
+        }
+        for (size_t c = 0; c < C; ++c) ob[c] *= inv_T;
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = x; node->num_inputs = 1;
+    node->backward = ag_backward_mean_pool_seq;
+    return out;
+}
+
+static void ag_backward_embed_lookup(RCRE_TensorNode* node) {
+    RCRE_Tensor* out   = node->out;
+    RCRE_Tensor* table = node->inputs[0];
+    if (!table->grad) return;
+    size_t B = out->shape[0], D = out->shape[1];
+    const size_t* idx_copy = (const size_t*)(uintptr_t)node->aux[0];
+    const float* og = out->grad;
+
+    for (size_t b = 0; b < B; ++b) {
+        size_t row = idx_copy[b];
+        float* tg = table->grad + row * D;
+        const float* gb = og + b * D;
+        for (size_t d = 0; d < D; ++d) tg[d] += gb[d];
+    }
+}
+
+RCRE_Tensor* rcre_autograd_embed_lookup(RCRE_TensorTape* tape, RCRE_Tensor* table,
+                                        const size_t* indices, size_t batch_size) {
+    if (!tape || !ag_is_f32_contig(table) || table->ndim != 2 || !indices || batch_size == 0) {
+        return nullptr;
+    }
+    size_t V = table->shape[0], D = table->shape[1];
+    for (size_t b = 0; b < batch_size; ++b) {
+        if (indices[b] >= V) return nullptr;
+    }
+
+    RCRE_Tensor* out = rcre_tensor_alloc_2d(tape->arena, batch_size, D);
+    if (!out) return nullptr;
+
+    size_t* idx_copy = (size_t*)rcre_arena_alloc(tape->arena, batch_size * sizeof(size_t), alignof(size_t));
+    if (!idx_copy) return nullptr;
+    memcpy(idx_copy, indices, batch_size * sizeof(size_t));
+
+    const float* td = rcre_tensor_f32_data(table);
+    float* od = rcre_tensor_f32_data(out);
+    for (size_t b = 0; b < batch_size; ++b) {
+        memcpy(od + b * D, td + indices[b] * D, D * sizeof(float));
+    }
+
+    RCRE_TensorNode* node = tape_push_node(tape);
+    if (!node) return out;
+    node->out = out; node->inputs[0] = table; node->num_inputs = 1;
+    node->aux[0] = (size_t)(uintptr_t)idx_copy;
+    node->backward = ag_backward_embed_lookup;
+    return out;
+}
+
 /* --- Source: loss.c --- */
 /**
  * @file loss.c
@@ -42291,6 +44642,38 @@ float rcre_loss_kl_divergence(const RCRE_Tensor* mu, const RCRE_Tensor* logvar, 
         if (glv != nullptr) glv[i] = 0.5f * (var - 1.0f) / (float)n;
     }
     return kl_sum / (float)n;
+}
+
+float rcre_loss_kl_divergence_add(const RCRE_Tensor* mu, const RCRE_Tensor* logvar,
+                                  float beta, RCRE_Tensor* grad_mu, RCRE_Tensor* grad_logvar) {
+    if (!loss_is_f32(mu) || !loss_is_f32(logvar) ||
+        mu->numel != logvar->numel || mu->numel == 0) return 0.0f;
+
+    const float* md  = rcre_tensor_f32_data(mu);
+    const float* ldv = rcre_tensor_f32_data(logvar);
+    float* gm  = (grad_mu != nullptr) ? grad_mu->grad : nullptr;
+    float* glv = (grad_logvar != nullptr) ? grad_logvar->grad : nullptr;
+
+    size_t n = mu->numel;
+    float inv_n = 1.0f / (float)n;
+    float kl_sum = 0.0f;
+
+    for (size_t i = 0; i < n; ++i) {
+        float m = md[i];
+        float raw_lv = ldv[i];
+        float lv = raw_lv;
+        if (lv < -20.0f) lv = -20.0f;
+        if (lv >  20.0f) lv =  20.0f;
+        float var = expf(lv);
+
+        kl_sum += -0.5f * (1.0f + lv - m * m - var);
+
+        if (gm != nullptr)  gm[i]  += beta * m * inv_n;
+        if (glv != nullptr && raw_lv > -20.0f && raw_lv < 20.0f) {
+            glv[i] += beta * 0.5f * (var - 1.0f) * inv_n;
+        }
+    }
+    return kl_sum * inv_n;
 }
 
 int rcre_data_validate_labels(const size_t* targets, size_t n, size_t num_classes) {
@@ -42639,6 +45022,31 @@ void rcre_tensor_optim_zero_grad(RCRE_TensorOptim* opt) {
     for (size_t p = 0; p < opt->num_params; ++p) {
         rcre_tensor_zero_grad(opt->params[p]);
     }
+}
+
+float rcre_tensor_clip_grad_norm(RCRE_Tensor** params, size_t num_params, float max_norm) {
+    if (params == nullptr || num_params == 0) return 0.0f;
+    double sum_sq = 0.0;
+    for (size_t p = 0; p < num_params; ++p) {
+        RCRE_Tensor* t = params[p];
+        if (!t || !t->grad) continue;
+        for (size_t i = 0; i < t->numel; ++i) {
+            double g = (double)t->grad[i];
+            sum_sq += g * g;
+        }
+    }
+    float total_norm = (float)sqrt(sum_sq);
+    if (max_norm > 0.0f && total_norm > max_norm) {
+        float scale = max_norm / (total_norm + 1e-6f);
+        for (size_t p = 0; p < num_params; ++p) {
+            RCRE_Tensor* t = params[p];
+            if (!t || !t->grad) continue;
+            for (size_t i = 0; i < t->numel; ++i) {
+                t->grad[i] *= scale;
+            }
+        }
+    }
+    return total_norm;
 }
 
 /* Scalar Autograd Optimizer */
@@ -47555,6 +49963,2158 @@ void rcre_shard_stream_close(RCRE_ShardStream* stream) {
     if (!stream) return;
     rcre_io_mmap_close(&stream->active_map);
     memset(stream, 0, sizeof(*stream));
+}
+
+/* --- Source: ae.c --- */
+/**
+ * @file ae.c
+ * @brief Phase 1: Convolutional & Denoising Autoencoder (RCRE_ConvAE) + Shared Gen Utilities
+ *
+ * Part of Recep's Code Run Everywhere (RCRE).
+ * Strict ISO C23 compliant, zero external dependencies, zero hot-loop mallocs.
+ */
+
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+static void gen_ae_init_conv(RCRE_Tensor* w, size_t in_ch, size_t k, uint64_t* rng) {
+    rcre_tensor_init_he(w, in_ch * k * k, rng);
+}
+
+RCRE_ConvAE* rcre_convae_create(RCRE_Arena* arena, RCRE_ConvAEConfig cfg, uint64_t* rng) {
+    if (!arena || !rng || cfg.in_channels == 0 || cfg.base_channels == 0 ||
+        cfg.latent_dim == 0 || cfg.height < 4 || cfg.width < 4 ||
+        (cfg.height % 4U) != 0 || (cfg.width % 4U) != 0) {
+        return nullptr;
+    }
+
+    RCRE_ConvAE* m = (RCRE_ConvAE*)rcre_arena_alloc(arena, sizeof(RCRE_ConvAE), alignof(RCRE_ConvAE));
+    if (!m) return nullptr;
+    memset(m, 0, sizeof(*m));
+
+    m->cfg      = cfg;
+    m->feat_h   = cfg.height / 4U;
+    m->feat_w   = cfg.width / 4U;
+    size_t c1   = cfg.base_channels;
+    size_t c2   = cfg.base_channels * 2U;
+    m->flat_dim = c2 * m->feat_h * m->feat_w;
+
+    m->enc_conv1_w = rcre_tensor_alloc_4d(arena, c1, cfg.in_channels, 3, 3);
+    m->enc_conv1_b = rcre_tensor_alloc_1d(arena, c1);
+    m->enc_conv2_w = rcre_tensor_alloc_4d(arena, c2, c1, 3, 3);
+    m->enc_conv2_b = rcre_tensor_alloc_1d(arena, c2);
+    m->enc_fc_w    = rcre_tensor_alloc_2d(arena, m->flat_dim, cfg.latent_dim);
+    m->enc_fc_b    = rcre_tensor_alloc_1d(arena, cfg.latent_dim);
+
+    m->dec_fc_w    = rcre_tensor_alloc_2d(arena, cfg.latent_dim, m->flat_dim);
+    m->dec_fc_b    = rcre_tensor_alloc_1d(arena, m->flat_dim);
+    m->dec_conv1_w = rcre_tensor_alloc_4d(arena, c1, c2, 3, 3);
+    m->dec_conv1_b = rcre_tensor_alloc_1d(arena, c1);
+    m->dec_conv2_w = rcre_tensor_alloc_4d(arena, cfg.in_channels, c1, 3, 3);
+    m->dec_conv2_b = rcre_tensor_alloc_1d(arena, cfg.in_channels);
+
+    if (!m->enc_conv1_w || !m->enc_conv1_b || !m->enc_conv2_w || !m->enc_conv2_b ||
+        !m->enc_fc_w    || !m->enc_fc_b    || !m->dec_fc_w    || !m->dec_fc_b    ||
+        !m->dec_conv1_w || !m->dec_conv1_b || !m->dec_conv2_w || !m->dec_conv2_b) {
+        return nullptr;
+    }
+
+    gen_ae_init_conv(m->enc_conv1_w, cfg.in_channels, 3, rng);
+    gen_ae_init_conv(m->enc_conv2_w, c1, 3, rng);
+    rcre_tensor_init_xavier(m->enc_fc_w, m->flat_dim, cfg.latent_dim, rng);
+    rcre_tensor_init_xavier(m->dec_fc_w, cfg.latent_dim, m->flat_dim, rng);
+    gen_ae_init_conv(m->dec_conv1_w, c2, 3, rng);
+    gen_ae_init_conv(m->dec_conv2_w, c1, 3, rng);
+
+    m->enc_conv1_w->label = "ae.enc_conv1.w"; m->enc_conv1_b->label = "ae.enc_conv1.b";
+    m->enc_conv2_w->label = "ae.enc_conv2.w"; m->enc_conv2_b->label = "ae.enc_conv2.b";
+    m->enc_fc_w->label    = "ae.enc_fc.w";    m->enc_fc_b->label    = "ae.enc_fc.b";
+    m->dec_fc_w->label    = "ae.dec_fc.w";    m->dec_fc_b->label    = "ae.dec_fc.b";
+    m->dec_conv1_w->label = "ae.dec_conv1.w"; m->dec_conv1_b->label = "ae.dec_conv1.b";
+    m->dec_conv2_w->label = "ae.dec_conv2.w"; m->dec_conv2_b->label = "ae.dec_conv2.b";
+
+    return m;
+}
+
+size_t rcre_convae_params(const RCRE_ConvAE* m, RCRE_Tensor** out_params, size_t max_params) {
+    if (!m || !out_params || max_params < RCRE_CONVAE_NUM_PARAMS) return 0;
+    out_params[0]  = m->enc_conv1_w;
+    out_params[1]  = m->enc_conv1_b;
+    out_params[2]  = m->enc_conv2_w;
+    out_params[3]  = m->enc_conv2_b;
+    out_params[4]  = m->enc_fc_w;
+    out_params[5]  = m->enc_fc_b;
+    out_params[6]  = m->dec_fc_w;
+    out_params[7]  = m->dec_fc_b;
+    out_params[8]  = m->dec_conv1_w;
+    out_params[9]  = m->dec_conv1_b;
+    out_params[10] = m->dec_conv2_w;
+    out_params[11] = m->dec_conv2_b;
+    return RCRE_CONVAE_NUM_PARAMS;
+}
+
+RCRE_Tensor* rcre_convae_encode(const RCRE_ConvAE* m, RCRE_TensorTape* tape, RCRE_Tensor* x) {
+    if (!m || !tape || !x || x->ndim != 4 ||
+        x->shape[1] != m->cfg.in_channels ||
+        x->shape[2] != m->cfg.height ||
+        x->shape[3] != m->cfg.width) {
+        return nullptr;
+    }
+    size_t N = x->shape[0];
+    RCRE_Tensor* h = rcre_autograd_conv2d(tape, x, m->enc_conv1_w, 2, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, m->enc_conv1_b);
+    h = rcre_autograd_silu(tape, h);
+
+    h = rcre_autograd_conv2d(tape, h, m->enc_conv2_w, 2, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, m->enc_conv2_b);
+    h = rcre_autograd_silu(tape, h);
+
+    size_t flat_shape[2] = { N, m->flat_dim };
+    h = rcre_autograd_reshape(tape, h, flat_shape, 2);
+    return rcre_autograd_linear(tape, h, m->enc_fc_w, m->enc_fc_b);
+}
+
+RCRE_Tensor* rcre_convae_decode(const RCRE_ConvAE* m, RCRE_TensorTape* tape, RCRE_Tensor* z) {
+    if (!m || !tape || !z || z->ndim != 2 || z->shape[1] != m->cfg.latent_dim) {
+        return nullptr;
+    }
+    size_t N = z->shape[0];
+    size_t c2 = m->cfg.base_channels * 2U;
+
+    RCRE_Tensor* h = rcre_autograd_linear(tape, z, m->dec_fc_w, m->dec_fc_b);
+    h = rcre_autograd_silu(tape, h);
+
+    size_t map_shape[4] = { N, c2, m->feat_h, m->feat_w };
+    h = rcre_autograd_reshape(tape, h, map_shape, 4);
+
+    h = rcre_autograd_upsample2d_nearest(tape, h, 2);
+    h = rcre_autograd_conv2d(tape, h, m->dec_conv1_w, 1, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, m->dec_conv1_b);
+    h = rcre_autograd_silu(tape, h);
+
+    h = rcre_autograd_upsample2d_nearest(tape, h, 2);
+    h = rcre_autograd_conv2d(tape, h, m->dec_conv2_w, 1, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, m->dec_conv2_b);
+
+    return m->cfg.output_sigmoid ? rcre_autograd_sigmoid(tape, h)
+                                 : rcre_autograd_tanh(tape, h);
+}
+
+RCRE_Tensor* rcre_convae_forward(const RCRE_ConvAE* m, RCRE_TensorTape* tape, RCRE_Tensor* x) {
+    RCRE_Tensor* z = rcre_convae_encode(m, tape, x);
+    if (!z) return nullptr;
+    return rcre_convae_decode(m, tape, z);
+}
+
+float rcre_convae_train_step(
+    RCRE_ConvAE* m,
+    RCRE_TensorTape* tape,
+    RCRE_TensorOptim* opt,
+    RCRE_Tensor* x_clean,
+    float noise_std,
+    uint64_t* rng,
+    float max_grad_norm)
+{
+    if (!m || !tape || !opt || !x_clean) return -1.0f;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(tape->arena);
+    rcre_tensor_tape_reset(tape);
+    rcre_tensor_optim_zero_grad(opt);
+
+    RCRE_Tensor* x_in = x_clean;
+    if (noise_std > 0.0f && rng != nullptr) {
+        x_in = rcre_tensor_alloc(tape->arena, x_clean->shape, x_clean->ndim);
+        if (!x_in) {
+            rcre_arena_temp_end(tmp);
+            return -1.0f;
+        }
+        const float* cd = rcre_tensor_f32_data(x_clean);
+        float* nd = rcre_tensor_f32_data(x_in);
+        float lo = m->cfg.output_sigmoid ? 0.0f : -1.0f;
+        float hi = 1.0f;
+        for (size_t i = 0; i < x_clean->numel; ++i) {
+            float v = cd[i] + rcre_rng_gaussian_f32(rng, 0.0f, noise_std);
+            if (v < lo) v = lo;
+            if (v > hi) v = hi;
+            nd[i] = v;
+        }
+    }
+
+    RCRE_Tensor* x_hat = rcre_convae_forward(m, tape, x_in);
+    if (!x_hat) {
+        rcre_arena_temp_end(tmp);
+        return -1.0f;
+    }
+
+    float loss = rcre_loss_mse(x_hat, x_clean, x_hat);
+    rcre_tensor_tape_backward(tape);
+
+    if (max_grad_norm > 0.0f) {
+        (void)rcre_tensor_clip_grad_norm(opt->params, opt->num_params, max_grad_norm);
+    }
+    rcre_tensor_optim_step(opt);
+
+    rcre_arena_temp_end(tmp);
+    return loss;
+}
+
+float rcre_gen_psnr(const RCRE_Tensor* ref, const RCRE_Tensor* recon, float max_val) {
+    if (!ref || !recon || ref->numel != recon->numel || ref->numel == 0 || max_val <= 0.0f) {
+        return 0.0f;
+    }
+    const float* a = rcre_tensor_f32_data(ref);
+    const float* b = rcre_tensor_f32_data(recon);
+    double mse = 0.0;
+    for (size_t i = 0; i < ref->numel; ++i) {
+        double d = (double)a[i] - (double)b[i];
+        mse += d * d;
+    }
+    mse /= (double)ref->numel;
+    if (mse <= 1e-12) return 99.0f;
+    return (float)(10.0 * log10(((double)max_val * (double)max_val) / mse));
+}
+
+/* ========================================================================= */
+/* Shared Generative Utilities: Synthetic Shapes Dataset & SafeTensors I/O   */
+/* ========================================================================= */
+
+int rcre_gen_make_shapes_dataset(
+    RCRE_Arena* arena,
+    size_t num_samples,
+    size_t height,
+    size_t width,
+    bool zero_to_one,
+    uint64_t* rng,
+    RCRE_Tensor** out_images,
+    size_t** out_labels)
+{
+    if (!arena || !rng || !out_images || num_samples == 0 || height < 8 || width < 8) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_Tensor* imgs = rcre_tensor_alloc_4d(arena, num_samples, 1, height, width);
+    if (!imgs) return RCRE_ERR_OUT_OF_MEMORY;
+    size_t* labels = (size_t*)rcre_arena_alloc(arena, num_samples * sizeof(size_t), alignof(size_t));
+    if (!labels) return RCRE_ERR_OUT_OF_MEMORY;
+
+    float* data = rcre_tensor_f32_data(imgs);
+    float cy_base = 0.5f * (float)(height - 1U);
+    float cx_base = 0.5f * (float)(width - 1U);
+    float min_dim = (float)(height < width ? height : width);
+
+    for (size_t n = 0; n < num_samples; ++n) {
+        size_t cls = n % 4U;
+        labels[n] = cls;
+
+        /* Small controlled jitter for realistic generalization */
+        float jx = rcre_rng_uniform_f32(rng, -0.08f, 0.08f) * min_dim;
+        float jy = rcre_rng_uniform_f32(rng, -0.08f, 0.08f) * min_dim;
+        float scale = rcre_rng_uniform_f32(rng, 0.88f, 1.08f);
+        float cy = cy_base + jy;
+        float cx = cx_base + jx;
+        float rad = 0.30f * min_dim * scale;
+        float thick = 0.11f * min_dim * scale;
+        if (thick < 1.1f) thick = 1.1f;
+
+        float* plane = data + n * height * width;
+        for (size_t y = 0; y < height; ++y) {
+            for (size_t x = 0; x < width; ++x) {
+                float dy = (float)y - cy;
+                float dx = (float)x - cx;
+                float r  = sqrtf(dx * dx + dy * dy);
+                float val = 0.0f;
+
+                if (cls == 0) {
+                    /* Disk */
+                    float edge = rad - r;
+                    val = 1.0f / (1.0f + expf(-2.5f * edge));
+                } else if (cls == 1) {
+                    /* Square */
+                    float dmax = fmaxf(fabsf(dx), fabsf(dy));
+                    float edge = rad * 0.90f - dmax;
+                    val = 1.0f / (1.0f + expf(-2.5f * edge));
+                } else if (cls == 2) {
+                    /* Plus / Cross */
+                    float arm_h = fmaxf(fabsf(dy) - thick, fabsf(dx) - rad * 1.05f);
+                    float arm_v = fmaxf(fabsf(dx) - thick, fabsf(dy) - rad * 1.05f);
+                    float d = fminf(arm_h, arm_v);
+                    val = 1.0f / (1.0f + expf(2.5f * d));
+                } else {
+                    /* Ring */
+                    float d_ring = fabsf(r - rad * 0.85f) - thick * 0.85f;
+                    val = 1.0f / (1.0f + expf(2.5f * d_ring));
+                }
+
+                plane[y * width + x] = zero_to_one ? val : (2.0f * val - 1.0f);
+            }
+        }
+    }
+
+    *out_images = imgs;
+    if (out_labels) *out_labels = labels;
+    return RCRE_OK;
+}
+
+int rcre_gen_save_safetensors(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_Arena* scratch)
+{
+    if (!params || num_params == 0 || !filepath || !scratch) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    const char** names = (const char**)rcre_arena_alloc(scratch, num_params * sizeof(char*), alignof(char*));
+    RCRE_Tensor* vals  = (RCRE_Tensor*)rcre_arena_alloc(scratch, num_params * sizeof(RCRE_Tensor), alignof(RCRE_Tensor));
+    char* name_buf     = (char*)rcre_arena_alloc(scratch, num_params * 32U, 16);
+    if (!names || !vals || !name_buf) {
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!params[i] || params[i]->dtype != RCRE_DTYPE_F32) {
+            rcre_arena_temp_end(tmp);
+            return RCRE_ERR_INVALID_ARG;
+        }
+        if (params[i]->label && params[i]->label[0] != '\0') {
+            names[i] = params[i]->label;
+        } else {
+            snprintf(name_buf + i * 32U, 32U, "param_%zu", i);
+            names[i] = name_buf + i * 32U;
+        }
+        vals[i] = *params[i];
+    }
+
+    int rc = rcre_io_safetensors_save(filepath, names, vals, num_params, scratch);
+    rcre_arena_temp_end(tmp);
+    return rc;
+}
+
+int rcre_gen_load_safetensors(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath)
+{
+    if (!params || num_params == 0 || !filepath) return RCRE_ERR_INVALID_ARG;
+
+    RCRE_SafeTensorsArchive arch;
+    int rc = rcre_io_safetensors_open(filepath, &arch);
+    if (rc != RCRE_OK) return rc;
+
+    RCRE_Arena* tmp_arena = rcre_arena_create(4 * 1024 * 1024);
+    if (!tmp_arena) {
+        rcre_io_safetensors_close(&arch);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    char fallback_name[32];
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!params[i] || params[i]->dtype != RCRE_DTYPE_F32) {
+            rc = RCRE_ERR_INVALID_ARG;
+            break;
+        }
+        const char* nm = (params[i]->label && params[i]->label[0] != '\0')
+                             ? params[i]->label
+                             : (snprintf(fallback_name, sizeof(fallback_name), "param_%zu", i), fallback_name);
+        RCRE_ArenaTemp t = rcre_arena_temp_begin(tmp_arena);
+        RCRE_Tensor loaded = {0};
+        rc = rcre_io_safetensors_get_tensor_f32(&arch, nm, tmp_arena, &loaded);
+        if (rc != RCRE_OK || loaded.numel != params[i]->numel) {
+            rcre_arena_temp_end(t);
+            rc = (rc != RCRE_OK) ? rc : RCRE_ERR_SHAPE_MISMATCH;
+            break;
+        }
+        memcpy(params[i]->data, loaded.data, loaded.numel * sizeof(float));
+        rcre_arena_temp_end(t);
+    }
+
+    rcre_arena_destroy(tmp_arena);
+    rcre_io_safetensors_close(&arch);
+    return rc;
+}
+
+/* --- Source: vae.c --- */
+/**
+ * @file vae.c
+ * @brief Phase 2: Convolutional Variational Autoencoder (RCRE_ConvVAE / beta-VAE)
+ *
+ * Part of Recep's Code Run Everywhere (RCRE).
+ * Strict ISO C23 compliant, zero external dependencies, zero hot-loop mallocs.
+ */
+
+#include <math.h>
+#include <string.h>
+
+static void gen_vae_init_conv(RCRE_Tensor* w, size_t in_ch, size_t k, uint64_t* rng) {
+    rcre_tensor_init_he(w, in_ch * k * k, rng);
+}
+
+RCRE_ConvVAE* rcre_convvae_create(RCRE_Arena* arena, RCRE_ConvVAEConfig cfg, uint64_t* rng) {
+    if (!arena || !rng || cfg.in_channels == 0 || cfg.base_channels == 0 ||
+        cfg.latent_dim == 0 || cfg.height < 4 || cfg.width < 4 ||
+        (cfg.height % 4U) != 0 || (cfg.width % 4U) != 0) {
+        return nullptr;
+    }
+
+    RCRE_ConvVAE* m = (RCRE_ConvVAE*)rcre_arena_alloc(arena, sizeof(RCRE_ConvVAE), alignof(RCRE_ConvVAE));
+    if (!m) return nullptr;
+    memset(m, 0, sizeof(*m));
+
+    m->cfg      = cfg;
+    m->feat_h   = cfg.height / 4U;
+    m->feat_w   = cfg.width / 4U;
+    size_t c1   = cfg.base_channels;
+    size_t c2   = cfg.base_channels * 2U;
+    m->flat_dim = c2 * m->feat_h * m->feat_w;
+
+    m->enc_conv1_w = rcre_tensor_alloc_4d(arena, c1, cfg.in_channels, 3, 3);
+    m->enc_conv1_b = rcre_tensor_alloc_1d(arena, c1);
+    m->enc_conv2_w = rcre_tensor_alloc_4d(arena, c2, c1, 3, 3);
+    m->enc_conv2_b = rcre_tensor_alloc_1d(arena, c2);
+    m->fc_mu_w     = rcre_tensor_alloc_2d(arena, m->flat_dim, cfg.latent_dim);
+    m->fc_mu_b     = rcre_tensor_alloc_1d(arena, cfg.latent_dim);
+    m->fc_lv_w     = rcre_tensor_alloc_2d(arena, m->flat_dim, cfg.latent_dim);
+    m->fc_lv_b     = rcre_tensor_alloc_1d(arena, cfg.latent_dim);
+
+    m->dec_fc_w    = rcre_tensor_alloc_2d(arena, cfg.latent_dim, m->flat_dim);
+    m->dec_fc_b    = rcre_tensor_alloc_1d(arena, m->flat_dim);
+    m->dec_conv1_w = rcre_tensor_alloc_4d(arena, c1, c2, 3, 3);
+    m->dec_conv1_b = rcre_tensor_alloc_1d(arena, c1);
+    m->dec_conv2_w = rcre_tensor_alloc_4d(arena, cfg.in_channels, c1, 3, 3);
+    m->dec_conv2_b = rcre_tensor_alloc_1d(arena, cfg.in_channels);
+
+    if (!m->enc_conv1_w || !m->enc_conv1_b || !m->enc_conv2_w || !m->enc_conv2_b ||
+        !m->fc_mu_w     || !m->fc_mu_b     || !m->fc_lv_w     || !m->fc_lv_b     ||
+        !m->dec_fc_w    || !m->dec_fc_b    || !m->dec_conv1_w || !m->dec_conv1_b ||
+        !m->dec_conv2_w || !m->dec_conv2_b) {
+        return nullptr;
+    }
+
+    gen_vae_init_conv(m->enc_conv1_w, cfg.in_channels, 3, rng);
+    gen_vae_init_conv(m->enc_conv2_w, c1, 3, rng);
+    rcre_tensor_init_xavier(m->fc_mu_w, m->flat_dim, cfg.latent_dim, rng);
+    /* Initialize logvar head small so initial posterior starts near N(0, I) */
+    rcre_tensor_fill_normal(m->fc_lv_w, 0.0f, 0.02f, rng);
+    rcre_tensor_fill(m->fc_lv_b, -0.5f);
+
+    rcre_tensor_init_xavier(m->dec_fc_w, cfg.latent_dim, m->flat_dim, rng);
+    gen_vae_init_conv(m->dec_conv1_w, c2, 3, rng);
+    gen_vae_init_conv(m->dec_conv2_w, c1, 3, rng);
+
+    m->enc_conv1_w->label = "vae.enc_conv1.w"; m->enc_conv1_b->label = "vae.enc_conv1.b";
+    m->enc_conv2_w->label = "vae.enc_conv2.w"; m->enc_conv2_b->label = "vae.enc_conv2.b";
+    m->fc_mu_w->label     = "vae.fc_mu.w";     m->fc_mu_b->label     = "vae.fc_mu.b";
+    m->fc_lv_w->label     = "vae.fc_lv.w";     m->fc_lv_b->label     = "vae.fc_lv.b";
+    m->dec_fc_w->label    = "vae.dec_fc.w";    m->dec_fc_b->label    = "vae.dec_fc.b";
+    m->dec_conv1_w->label = "vae.dec_conv1.w"; m->dec_conv1_b->label = "vae.dec_conv1.b";
+    m->dec_conv2_w->label = "vae.dec_conv2.w"; m->dec_conv2_b->label = "vae.dec_conv2.b";
+
+    return m;
+}
+
+size_t rcre_convvae_params(const RCRE_ConvVAE* m, RCRE_Tensor** out_params, size_t max_params) {
+    if (!m || !out_params || max_params < RCRE_CONVVAE_NUM_PARAMS) return 0;
+    out_params[0]  = m->enc_conv1_w;
+    out_params[1]  = m->enc_conv1_b;
+    out_params[2]  = m->enc_conv2_w;
+    out_params[3]  = m->enc_conv2_b;
+    out_params[4]  = m->fc_mu_w;
+    out_params[5]  = m->fc_mu_b;
+    out_params[6]  = m->fc_lv_w;
+    out_params[7]  = m->fc_lv_b;
+    out_params[8]  = m->dec_fc_w;
+    out_params[9]  = m->dec_fc_b;
+    out_params[10] = m->dec_conv1_w;
+    out_params[11] = m->dec_conv1_b;
+    out_params[12] = m->dec_conv2_w;
+    out_params[13] = m->dec_conv2_b;
+    return RCRE_CONVVAE_NUM_PARAMS;
+}
+
+int rcre_convvae_encode(const RCRE_ConvVAE* m, RCRE_TensorTape* tape, RCRE_Tensor* x,
+                        RCRE_Tensor** out_mu, RCRE_Tensor** out_logvar) {
+    if (!m || !tape || !x || !out_mu || !out_logvar || x->ndim != 4 ||
+        x->shape[1] != m->cfg.in_channels ||
+        x->shape[2] != m->cfg.height ||
+        x->shape[3] != m->cfg.width) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t N = x->shape[0];
+    RCRE_Tensor* h = rcre_autograd_conv2d(tape, x, m->enc_conv1_w, 2, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, m->enc_conv1_b);
+    h = rcre_autograd_silu(tape, h);
+
+    h = rcre_autograd_conv2d(tape, h, m->enc_conv2_w, 2, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, m->enc_conv2_b);
+    h = rcre_autograd_silu(tape, h);
+
+    size_t flat_shape[2] = { N, m->flat_dim };
+    h = rcre_autograd_reshape(tape, h, flat_shape, 2);
+
+    RCRE_Tensor* mu = rcre_autograd_linear(tape, h, m->fc_mu_w, m->fc_mu_b);
+    RCRE_Tensor* lv = rcre_autograd_linear(tape, h, m->fc_lv_w, m->fc_lv_b);
+    if (!mu || !lv) return RCRE_ERR_OUT_OF_MEMORY;
+
+    *out_mu     = mu;
+    *out_logvar = lv;
+    return RCRE_OK;
+}
+
+RCRE_Tensor* rcre_convvae_decode(const RCRE_ConvVAE* m, RCRE_TensorTape* tape, RCRE_Tensor* z) {
+    if (!m || !tape || !z || z->ndim != 2 || z->shape[1] != m->cfg.latent_dim) {
+        return nullptr;
+    }
+    size_t N = z->shape[0];
+    size_t c2 = m->cfg.base_channels * 2U;
+
+    RCRE_Tensor* h = rcre_autograd_linear(tape, z, m->dec_fc_w, m->dec_fc_b);
+    h = rcre_autograd_silu(tape, h);
+
+    size_t map_shape[4] = { N, c2, m->feat_h, m->feat_w };
+    h = rcre_autograd_reshape(tape, h, map_shape, 4);
+
+    h = rcre_autograd_upsample2d_nearest(tape, h, 2);
+    h = rcre_autograd_conv2d(tape, h, m->dec_conv1_w, 1, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, m->dec_conv1_b);
+    h = rcre_autograd_silu(tape, h);
+
+    h = rcre_autograd_upsample2d_nearest(tape, h, 2);
+    h = rcre_autograd_conv2d(tape, h, m->dec_conv2_w, 1, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, m->dec_conv2_b);
+
+    return m->cfg.output_sigmoid ? rcre_autograd_sigmoid(tape, h)
+                                 : rcre_autograd_tanh(tape, h);
+}
+
+RCRE_Tensor* rcre_convvae_forward(const RCRE_ConvVAE* m, RCRE_TensorTape* tape, RCRE_Tensor* x,
+                                  uint64_t* rng, RCRE_Tensor** out_mu,
+                                  RCRE_Tensor** out_logvar, RCRE_Tensor** out_z) {
+    if (!m || !tape || !x || !rng) return nullptr;
+    RCRE_Tensor* mu = nullptr;
+    RCRE_Tensor* lv = nullptr;
+    if (rcre_convvae_encode(m, tape, x, &mu, &lv) != RCRE_OK) return nullptr;
+
+    RCRE_Tensor* eps = rcre_tensor_alloc_2d(tape->arena, x->shape[0], m->cfg.latent_dim);
+    if (!eps) return nullptr;
+    rcre_tensor_fill_normal(eps, 0.0f, 1.0f, rng);
+
+    RCRE_Tensor* z = rcre_autograd_reparameterize(tape, mu, lv, eps);
+    if (!z) return nullptr;
+
+    RCRE_Tensor* x_hat = rcre_convvae_decode(m, tape, z);
+    if (!x_hat) return nullptr;
+
+    if (out_mu)     *out_mu     = mu;
+    if (out_logvar) *out_logvar = lv;
+    if (out_z)      *out_z      = z;
+    return x_hat;
+}
+
+float rcre_convvae_train_step(
+    RCRE_ConvVAE* m,
+    RCRE_TensorTape* tape,
+    RCRE_TensorOptim* opt,
+    RCRE_Tensor* x,
+    float beta,
+    uint64_t* rng,
+    float max_grad_norm,
+    float* out_recon_loss,
+    float* out_kl_loss)
+{
+    if (!m || !tape || !opt || !x || !rng) return -1.0f;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(tape->arena);
+    rcre_tensor_tape_reset(tape);
+    rcre_tensor_optim_zero_grad(opt);
+
+    RCRE_Tensor* mu = nullptr;
+    RCRE_Tensor* lv = nullptr;
+    RCRE_Tensor* x_hat = rcre_convvae_forward(m, tape, x, rng, &mu, &lv, nullptr);
+    if (!x_hat) {
+        rcre_arena_temp_end(tmp);
+        return -1.0f;
+    }
+
+    float recon = rcre_loss_mse(x_hat, x, x_hat);
+    float kl    = rcre_loss_kl_divergence_add(mu, lv, beta, mu, lv);
+
+    rcre_tensor_tape_backward(tape);
+
+    if (max_grad_norm > 0.0f) {
+        (void)rcre_tensor_clip_grad_norm(opt->params, opt->num_params, max_grad_norm);
+    }
+    rcre_tensor_optim_step(opt);
+
+    rcre_arena_temp_end(tmp);
+    if (out_recon_loss) *out_recon_loss = recon;
+    if (out_kl_loss)    *out_kl_loss    = kl;
+    return recon + beta * kl;
+}
+
+RCRE_Tensor* rcre_convvae_sample(
+    const RCRE_ConvVAE* m, RCRE_Arena* scratch, size_t num_samples, uint64_t* rng)
+{
+    if (!m || !scratch || num_samples == 0 || !rng) return nullptr;
+    RCRE_TensorTape* tape = rcre_tensor_tape_create(scratch, 32);
+    if (!tape) return nullptr;
+
+    RCRE_Tensor* z = rcre_tensor_alloc_2d(scratch, num_samples, m->cfg.latent_dim);
+    if (!z) {
+        rcre_tensor_tape_destroy(tape);
+        return nullptr;
+    }
+    rcre_tensor_fill_normal(z, 0.0f, 1.0f, rng);
+    RCRE_Tensor* imgs = rcre_convvae_decode(m, tape, z);
+    rcre_tensor_tape_destroy(tape);
+    return imgs;
+}
+
+RCRE_Tensor* rcre_convvae_interpolate(
+    const RCRE_ConvVAE* m, RCRE_Arena* scratch,
+    const float* z_start, const float* z_end, size_t num_steps)
+{
+    if (!m || !scratch || !z_start || !z_end || num_steps < 2) return nullptr;
+    RCRE_TensorTape* tape = rcre_tensor_tape_create(scratch, 32);
+    if (!tape) return nullptr;
+
+    size_t D = m->cfg.latent_dim;
+    RCRE_Tensor* z = rcre_tensor_alloc_2d(scratch, num_steps, D);
+    if (!z) {
+        rcre_tensor_tape_destroy(tape);
+        return nullptr;
+    }
+    float* zd = rcre_tensor_f32_data(z);
+    for (size_t s = 0; s < num_steps; ++s) {
+        float alpha = (float)s / (float)(num_steps - 1U);
+        for (size_t d = 0; d < D; ++d) {
+            zd[s * D + d] = (1.0f - alpha) * z_start[d] + alpha * z_end[d];
+        }
+    }
+    RCRE_Tensor* imgs = rcre_convvae_decode(m, tape, z);
+    rcre_tensor_tape_destroy(tape);
+    return imgs;
+}
+
+/* --- Source: diffusion.c --- */
+/**
+ * @file diffusion.c
+ * @brief Phase 3: DDPM / DDIM Noise Scheduler & Time-Conditioned Tiny U-Net
+ *
+ * Part of Recep's Code Run Everywhere (RCRE).
+ * Strict ISO C23 compliant, zero external dependencies, zero hot-loop mallocs.
+ */
+
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Epsilon-prediction forward adapter for the shared DDPM/DDIM steppers. */
+static RCRE_Tensor* gen_tinyunet_fwd_wrap(const void* model, RCRE_TensorTape* tape,
+                                          RCRE_Tensor* x, const float* t, void* ctx) {
+    (void)ctx;
+    return rcre_tinyunet_forward((const RCRE_TinyUNet*)model, tape, x, t);
+}
+
+/* ========================================================================= */
+/* 1. Diffusion Noise Schedule (Linear & Cosine)                             */
+/* ========================================================================= */
+
+static float gen_diff_cosine_f(size_t t, size_t T) {
+    const double s = 0.008;
+    const double pi = 3.14159265358979323846;
+    double frac = ((double)t / (double)T + s) / (1.0 + s);
+    double c = cos(frac * (pi * 0.5));
+    return (float)(c * c);
+}
+
+RCRE_DiffSchedule* rcre_diff_schedule_create(
+    RCRE_Arena* arena, size_t num_steps, RCRE_DiffSchedType type,
+    float beta_start, float beta_end)
+{
+    if (!arena || num_steps < 2) return nullptr;
+    if (type == RCRE_DIFF_SCHED_LINEAR && (!(beta_start > 0.0f) || !(beta_end > beta_start) || beta_end >= 1.0f)) {
+        return nullptr;
+    }
+
+    RCRE_DiffSchedule* s = (RCRE_DiffSchedule*)rcre_arena_alloc(
+        arena, sizeof(RCRE_DiffSchedule), alignof(RCRE_DiffSchedule));
+    if (!s) return nullptr;
+
+    s->num_steps                = num_steps;
+    s->type                     = type;
+    s->betas                    = (float*)rcre_arena_alloc(arena, num_steps * sizeof(float), 64);
+    s->alphas                   = (float*)rcre_arena_alloc(arena, num_steps * sizeof(float), 64);
+    s->alpha_bar                = (float*)rcre_arena_alloc(arena, num_steps * sizeof(float), 64);
+    s->sqrt_alpha_bar           = (float*)rcre_arena_alloc(arena, num_steps * sizeof(float), 64);
+    s->sqrt_one_minus_alpha_bar = (float*)rcre_arena_alloc(arena, num_steps * sizeof(float), 64);
+    s->posterior_variance       = (float*)rcre_arena_alloc(arena, num_steps * sizeof(float), 64);
+
+    if (!s->betas || !s->alphas || !s->alpha_bar ||
+        !s->sqrt_alpha_bar || !s->sqrt_one_minus_alpha_bar || !s->posterior_variance) {
+        return nullptr;
+    }
+
+    if (type == RCRE_DIFF_SCHED_LINEAR) {
+        for (size_t t = 0; t < num_steps; ++t) {
+            float frac = (float)t / (float)(num_steps - 1U);
+            s->betas[t] = beta_start + frac * (beta_end - beta_start);
+        }
+    } else {
+        float f0 = gen_diff_cosine_f(0, num_steps);
+        float ab_prev = 1.0f;
+        for (size_t t = 0; t < num_steps; ++t) {
+            float ab_next = gen_diff_cosine_f(t + 1U, num_steps) / f0;
+            float b = 1.0f - (ab_next / ab_prev);
+            if (b < 1e-4f) b = 1e-4f;
+            if (b > 0.999f) b = 0.999f;
+            s->betas[t] = b;
+            ab_prev = ab_next;
+        }
+    }
+
+    double prod = 1.0;
+    for (size_t t = 0; t < num_steps; ++t) {
+        s->alphas[t] = 1.0f - s->betas[t];
+        prod *= (double)s->alphas[t];
+        s->alpha_bar[t] = (float)prod;
+        s->sqrt_alpha_bar[t] = sqrtf(s->alpha_bar[t]);
+        float omab = 1.0f - s->alpha_bar[t];
+        if (omab < 0.0f) omab = 0.0f;
+        s->sqrt_one_minus_alpha_bar[t] = sqrtf(omab);
+
+        if (t == 0) {
+            s->posterior_variance[0] = s->betas[0];
+        } else {
+            float denom = 1.0f - s->alpha_bar[t];
+            float pv = s->betas[t] * (1.0f - s->alpha_bar[t - 1U]) / (denom > 1e-12f ? denom : 1e-12f);
+            s->posterior_variance[t] = pv > 1e-20f ? pv : 1e-20f;
+        }
+    }
+
+    return s;
+}
+
+int rcre_diff_q_sample(
+    const RCRE_DiffSchedule* sched,
+    const RCRE_Tensor* x0,
+    const size_t* t_indices,
+    const RCRE_Tensor* noise,
+    RCRE_Tensor* x_t_out)
+{
+    if (!sched || !x0 || !t_indices || !noise || !x_t_out ||
+        x0->ndim != 4 || x0->numel != noise->numel || x0->numel != x_t_out->numel) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t N = x0->shape[0];
+    size_t sample_elems = x0->numel / N;
+    const float* x0d = rcre_tensor_f32_data(x0);
+    const float* nd  = rcre_tensor_f32_data(noise);
+    float* xtd       = rcre_tensor_f32_data(x_t_out);
+
+    for (size_t n = 0; n < N; ++n) {
+        size_t t = t_indices[n];
+        if (t >= sched->num_steps) return RCRE_ERR_INVALID_ARG;
+        float sa  = sched->sqrt_alpha_bar[t];
+        float som = sched->sqrt_one_minus_alpha_bar[t];
+        const float* x0_n = x0d + n * sample_elems;
+        const float* e_n  = nd  + n * sample_elems;
+        float* xt_n       = xtd + n * sample_elems;
+        for (size_t i = 0; i < sample_elems; ++i) {
+            xt_n[i] = sa * x0_n[i] + som * e_n[i];
+        }
+    }
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 2. Time-Conditioned Tiny U-Net (GroupNorm + SiLU + FiLM + Skip Conns)     */
+/* ========================================================================= */
+
+static const char* gen_diff_fmt_label(RCRE_Arena* arena, const char* prefix, const char* suffix) {
+    char* buf = (char*)rcre_arena_alloc(arena, 48, 8);
+    if (!buf) return nullptr;
+    snprintf(buf, 48, "unet.%s.%s", prefix, suffix);
+    return buf;
+}
+
+static bool gen_diff_resblock_init(
+    RCRE_Arena* arena, RCRE_UNetResBlock* blk,
+    size_t in_ch, size_t out_ch, size_t num_groups, size_t time_dim,
+    const char* name, uint64_t* rng)
+{
+    memset(blk, 0, sizeof(*blk));
+    blk->in_ch      = in_ch;
+    blk->out_ch     = out_ch;
+    blk->num_groups = num_groups;
+
+    blk->gn1_g   = rcre_tensor_alloc_1d(arena, in_ch);
+    blk->gn1_b   = rcre_tensor_alloc_1d(arena, in_ch);
+    blk->conv1_w = rcre_tensor_alloc_4d(arena, out_ch, in_ch, 3, 3);
+    blk->conv1_b = rcre_tensor_alloc_1d(arena, out_ch);
+    blk->time_w  = rcre_tensor_alloc_2d(arena, time_dim, 2U * out_ch);
+    blk->time_b  = rcre_tensor_alloc_1d(arena, 2U * out_ch);
+    blk->gn2_g   = rcre_tensor_alloc_1d(arena, out_ch);
+    blk->gn2_b   = rcre_tensor_alloc_1d(arena, out_ch);
+    blk->conv2_w = rcre_tensor_alloc_4d(arena, out_ch, out_ch, 3, 3);
+    blk->conv2_b = rcre_tensor_alloc_1d(arena, out_ch);
+
+    if (!blk->gn1_g || !blk->gn1_b || !blk->conv1_w || !blk->conv1_b ||
+        !blk->time_w || !blk->time_b || !blk->gn2_g || !blk->gn2_b ||
+        !blk->conv2_w || !blk->conv2_b) {
+        return false;
+    }
+
+    rcre_tensor_ones(blk->gn1_g);
+    rcre_tensor_ones(blk->gn2_g);
+    rcre_tensor_init_he(blk->conv1_w, in_ch * 9U, rng);
+    rcre_tensor_init_xavier(blk->time_w, time_dim, 2U * out_ch, rng);
+    /* Small residual branch output init improves early U-Net stability */
+    rcre_tensor_fill_normal(blk->conv2_w, 0.0f, 0.02f, rng);
+
+    blk->gn1_g->label   = gen_diff_fmt_label(arena, name, "gn1.g");
+    blk->gn1_b->label   = gen_diff_fmt_label(arena, name, "gn1.b");
+    blk->conv1_w->label = gen_diff_fmt_label(arena, name, "conv1.w");
+    blk->conv1_b->label = gen_diff_fmt_label(arena, name, "conv1.b");
+    blk->time_w->label  = gen_diff_fmt_label(arena, name, "time.w");
+    blk->time_b->label  = gen_diff_fmt_label(arena, name, "time.b");
+    blk->gn2_g->label   = gen_diff_fmt_label(arena, name, "gn2.g");
+    blk->gn2_b->label   = gen_diff_fmt_label(arena, name, "gn2.b");
+    blk->conv2_w->label = gen_diff_fmt_label(arena, name, "conv2.w");
+    blk->conv2_b->label = gen_diff_fmt_label(arena, name, "conv2.b");
+
+    if (in_ch != out_ch) {
+        blk->skip_w = rcre_tensor_alloc_4d(arena, out_ch, in_ch, 1, 1);
+        blk->skip_b = rcre_tensor_alloc_1d(arena, out_ch);
+        if (!blk->skip_w || !blk->skip_b) return false;
+        rcre_tensor_init_he(blk->skip_w, in_ch, rng);
+        blk->skip_w->label = gen_diff_fmt_label(arena, name, "skip.w");
+        blk->skip_b->label = gen_diff_fmt_label(arena, name, "skip.b");
+    }
+    return true;
+}
+
+static size_t gen_diff_resblock_collect(const RCRE_UNetResBlock* blk, RCRE_Tensor** out, size_t pos, size_t max_p) {
+    RCRE_Tensor* list[12] = {
+        blk->gn1_g, blk->gn1_b, blk->conv1_w, blk->conv1_b,
+        blk->time_w, blk->time_b, blk->gn2_g, blk->gn2_b,
+        blk->conv2_w, blk->conv2_b, blk->skip_w, blk->skip_b
+    };
+    size_t count = (blk->skip_w != nullptr) ? 12U : 10U;
+    for (size_t i = 0; i < count && pos < max_p; ++i) {
+        out[pos++] = list[i];
+    }
+    return pos;
+}
+
+static RCRE_Tensor* gen_diff_resblock_forward(
+    const RCRE_UNetResBlock* blk, RCRE_TensorTape* tape, RCRE_Tensor* x, RCRE_Tensor* t_emb)
+{
+    RCRE_Tensor* h = rcre_autograd_groupnorm(tape, x, blk->gn1_g, blk->gn1_b, blk->num_groups, 1e-5f);
+    h = rcre_autograd_silu(tape, h);
+    h = rcre_autograd_conv2d(tape, h, blk->conv1_w, 1, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, blk->conv1_b);
+
+    /* FiLM time conditioning: scale & shift projected from SiLU(t_emb) */
+    RCRE_Tensor* ts = rcre_autograd_silu(tape, t_emb);
+    RCRE_Tensor* ss = rcre_autograd_linear(tape, ts, blk->time_w, blk->time_b);
+    RCRE_Tensor* scale = rcre_autograd_slice_cols(tape, ss, 0, blk->out_ch);
+    RCRE_Tensor* shift = rcre_autograd_slice_cols(tape, ss, blk->out_ch, blk->out_ch);
+
+    h = rcre_autograd_groupnorm(tape, h, blk->gn2_g, blk->gn2_b, blk->num_groups, 1e-5f);
+    h = rcre_autograd_film_4d(tape, h, scale, shift);
+    h = rcre_autograd_silu(tape, h);
+    h = rcre_autograd_conv2d(tape, h, blk->conv2_w, 1, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, blk->conv2_b);
+
+    RCRE_Tensor* res = x;
+    if (blk->skip_w != nullptr) {
+        res = rcre_autograd_conv2d(tape, x, blk->skip_w, 1, 0);
+        res = rcre_autograd_add_bias_4d(tape, res, blk->skip_b);
+    }
+    return rcre_autograd_add(tape, h, res);
+}
+
+RCRE_TinyUNet* rcre_tinyunet_create(RCRE_Arena* arena, RCRE_TinyUNetConfig cfg, uint64_t* rng) {
+    if (!arena || !rng || cfg.in_channels == 0 || cfg.base_channels == 0 ||
+        cfg.num_groups == 0 || (cfg.base_channels % cfg.num_groups) != 0 ||
+        cfg.time_dim < 2 || (cfg.time_dim & 1U) != 0 ||
+        cfg.height < 4 || cfg.width < 4 ||
+        (cfg.height % 4U) != 0 || (cfg.width % 4U) != 0) {
+        return nullptr;
+    }
+
+    RCRE_TinyUNet* m = (RCRE_TinyUNet*)rcre_arena_alloc(arena, sizeof(RCRE_TinyUNet), alignof(RCRE_TinyUNet));
+    if (!m) return nullptr;
+    memset(m, 0, sizeof(*m));
+    m->cfg = cfg;
+
+    size_t C  = cfg.base_channels;
+    size_t C2 = C * 2U;
+    size_t G  = cfg.num_groups;
+    size_t TD = cfg.time_dim;
+
+    m->time_fc1_w = rcre_tensor_alloc_2d(arena, TD, TD);
+    m->time_fc1_b = rcre_tensor_alloc_1d(arena, TD);
+    m->time_fc2_w = rcre_tensor_alloc_2d(arena, TD, TD);
+    m->time_fc2_b = rcre_tensor_alloc_1d(arena, TD);
+    m->in_conv_w  = rcre_tensor_alloc_4d(arena, C, cfg.in_channels, 3, 3);
+    m->in_conv_b  = rcre_tensor_alloc_1d(arena, C);
+
+    m->out_gn_g   = rcre_tensor_alloc_1d(arena, C);
+    m->out_gn_b   = rcre_tensor_alloc_1d(arena, C);
+    m->out_conv_w = rcre_tensor_alloc_4d(arena, cfg.in_channels, C, 3, 3);
+    m->out_conv_b = rcre_tensor_alloc_1d(arena, cfg.in_channels);
+
+    if (!m->time_fc1_w || !m->time_fc1_b || !m->time_fc2_w || !m->time_fc2_b ||
+        !m->in_conv_w  || !m->in_conv_b  || !m->out_gn_g   || !m->out_gn_b   ||
+        !m->out_conv_w || !m->out_conv_b) {
+        return nullptr;
+    }
+
+    rcre_tensor_init_xavier(m->time_fc1_w, TD, TD, rng);
+    rcre_tensor_init_xavier(m->time_fc2_w, TD, TD, rng);
+    rcre_tensor_init_he(m->in_conv_w, cfg.in_channels * 9U, rng);
+    rcre_tensor_ones(m->out_gn_g);
+    rcre_tensor_fill_normal(m->out_conv_w, 0.0f, 0.02f, rng);
+
+    m->time_fc1_w->label = "unet.time_fc1.w"; m->time_fc1_b->label = "unet.time_fc1.b";
+    m->time_fc2_w->label = "unet.time_fc2.w"; m->time_fc2_b->label = "unet.time_fc2.b";
+    m->in_conv_w->label  = "unet.in_conv.w";  m->in_conv_b->label  = "unet.in_conv.b";
+    m->out_gn_g->label   = "unet.out_gn.g";   m->out_gn_b->label   = "unet.out_gn.b";
+    m->out_conv_w->label = "unet.out_conv.w"; m->out_conv_b->label = "unet.out_conv.b";
+
+    if (!gen_diff_resblock_init(arena, &m->enc1, C,      C,  G, TD, "enc1", rng) ||
+        !gen_diff_resblock_init(arena, &m->enc2, C,      C2, G, TD, "enc2", rng) ||
+        !gen_diff_resblock_init(arena, &m->mid,  C2,     C2, G, TD, "mid",  rng) ||
+        !gen_diff_resblock_init(arena, &m->dec2, C2 + C2, C, G, TD, "dec2", rng) ||
+        !gen_diff_resblock_init(arena, &m->dec1, C + C,  C,  G, TD, "dec1", rng)) {
+        return nullptr;
+    }
+    return m;
+}
+
+size_t rcre_tinyunet_params(const RCRE_TinyUNet* m, RCRE_Tensor** out_params, size_t max_params) {
+    if (!m || !out_params || max_params < 66U) return 0;
+    size_t pos = 0;
+    out_params[pos++] = m->time_fc1_w;
+    out_params[pos++] = m->time_fc1_b;
+    out_params[pos++] = m->time_fc2_w;
+    out_params[pos++] = m->time_fc2_b;
+    out_params[pos++] = m->in_conv_w;
+    out_params[pos++] = m->in_conv_b;
+    pos = gen_diff_resblock_collect(&m->enc1, out_params, pos, max_params);
+    pos = gen_diff_resblock_collect(&m->enc2, out_params, pos, max_params);
+    pos = gen_diff_resblock_collect(&m->mid,  out_params, pos, max_params);
+    pos = gen_diff_resblock_collect(&m->dec2, out_params, pos, max_params);
+    pos = gen_diff_resblock_collect(&m->dec1, out_params, pos, max_params);
+    out_params[pos++] = m->out_gn_g;
+    out_params[pos++] = m->out_gn_b;
+    out_params[pos++] = m->out_conv_w;
+    out_params[pos++] = m->out_conv_b;
+    return pos;
+}
+
+RCRE_Tensor* rcre_tinyunet_forward(
+    const RCRE_TinyUNet* m, RCRE_TensorTape* tape, RCRE_Tensor* x_t, const float* timesteps)
+{
+    if (!m || !tape || !x_t || !timesteps || x_t->ndim != 4 ||
+        x_t->shape[1] != m->cfg.in_channels ||
+        x_t->shape[2] != m->cfg.height ||
+        x_t->shape[3] != m->cfg.width) {
+        return nullptr;
+    }
+
+    size_t N = x_t->shape[0];
+    RCRE_Tensor* temb = rcre_sinusoidal_timestep_embed(tape->arena, timesteps, N, m->cfg.time_dim);
+    temb = rcre_autograd_linear(tape, temb, m->time_fc1_w, m->time_fc1_b);
+    temb = rcre_autograd_silu(tape, temb);
+    temb = rcre_autograd_linear(tape, temb, m->time_fc2_w, m->time_fc2_b);
+
+    RCRE_Tensor* h0 = rcre_autograd_conv2d(tape, x_t, m->in_conv_w, 1, 1);
+    h0 = rcre_autograd_add_bias_4d(tape, h0, m->in_conv_b);
+
+    RCRE_Tensor* skip1 = gen_diff_resblock_forward(&m->enc1, tape, h0, temb);
+    RCRE_Tensor* d1    = rcre_autograd_avgpool2d(tape, skip1, 2, 2);
+
+    RCRE_Tensor* skip2 = gen_diff_resblock_forward(&m->enc2, tape, d1, temb);
+    RCRE_Tensor* d2    = rcre_autograd_avgpool2d(tape, skip2, 2, 2);
+
+    RCRE_Tensor* h     = gen_diff_resblock_forward(&m->mid, tape, d2, temb);
+
+    h = rcre_autograd_upsample2d_nearest(tape, h, 2);
+    h = rcre_autograd_concat_channels(tape, h, skip2);
+    h = gen_diff_resblock_forward(&m->dec2, tape, h, temb);
+
+    h = rcre_autograd_upsample2d_nearest(tape, h, 2);
+    h = rcre_autograd_concat_channels(tape, h, skip1);
+    h = gen_diff_resblock_forward(&m->dec1, tape, h, temb);
+
+    h = rcre_autograd_groupnorm(tape, h, m->out_gn_g, m->out_gn_b, m->cfg.num_groups, 1e-5f);
+    h = rcre_autograd_silu(tape, h);
+    h = rcre_autograd_conv2d(tape, h, m->out_conv_w, 1, 1);
+    h = rcre_autograd_add_bias_4d(tape, h, m->out_conv_b);
+    return h;
+}
+
+float rcre_tinyunet_train_step(
+    RCRE_TinyUNet* m,
+    const RCRE_DiffSchedule* sched,
+    RCRE_TensorTape* tape,
+    RCRE_TensorOptim* opt,
+    const RCRE_Tensor* x0,
+    uint64_t* rng,
+    float max_grad_norm)
+{
+    if (!m || !sched || !tape || !opt || !x0 || !rng || x0->ndim != 4) return -1.0f;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(tape->arena);
+    rcre_tensor_tape_reset(tape);
+    rcre_tensor_optim_zero_grad(opt);
+
+    size_t N = x0->shape[0];
+    size_t* t_idx = (size_t*)rcre_arena_alloc(tape->arena, N * sizeof(size_t), alignof(size_t));
+    float*  t_flt = (float*)rcre_arena_alloc(tape->arena, N * sizeof(float), 16);
+    RCRE_Tensor* noise = rcre_tensor_alloc(tape->arena, x0->shape, 4);
+    RCRE_Tensor* x_t   = rcre_tensor_alloc(tape->arena, x0->shape, 4);
+    if (!t_idx || !t_flt || !noise || !x_t) {
+        rcre_arena_temp_end(tmp);
+        return -1.0f;
+    }
+
+    for (size_t n = 0; n < N; ++n) {
+        t_idx[n] = (size_t)(rcre_rng_next(rng) % (uint64_t)sched->num_steps);
+        t_flt[n] = (float)t_idx[n];
+    }
+    rcre_tensor_fill_normal(noise, 0.0f, 1.0f, rng);
+    if (rcre_diff_q_sample(sched, x0, t_idx, noise, x_t) != RCRE_OK) {
+        rcre_arena_temp_end(tmp);
+        return -1.0f;
+    }
+
+    RCRE_Tensor* eps_pred = rcre_tinyunet_forward(m, tape, x_t, t_flt);
+    if (!eps_pred) {
+        rcre_arena_temp_end(tmp);
+        return -1.0f;
+    }
+
+    float loss = rcre_loss_mse(eps_pred, noise, eps_pred);
+    rcre_tensor_tape_backward(tape);
+
+    if (max_grad_norm > 0.0f) {
+        (void)rcre_tensor_clip_grad_norm(opt->params, opt->num_params, max_grad_norm);
+    }
+    rcre_tensor_optim_step(opt);
+
+    rcre_arena_temp_end(tmp);
+    return loss;
+}
+
+RCRE_Tensor* rcre_tinyunet_sample_ddpm(
+    const RCRE_TinyUNet* m, const RCRE_DiffSchedule* sched,
+    RCRE_Arena* out_arena, RCRE_Arena* scratch,
+    size_t num_samples, uint64_t* rng)
+{
+    if (!m) return nullptr;
+    return gen_diff_sample_ddpm(m, gen_tinyunet_fwd_wrap, nullptr, sched,
+                                m->cfg.in_channels, m->cfg.height, m->cfg.width,
+                                out_arena, scratch, num_samples, rng, 64);
+}
+
+RCRE_Tensor* rcre_tinyunet_sample_ddim(
+    const RCRE_TinyUNet* m, const RCRE_DiffSchedule* sched,
+    RCRE_Arena* out_arena, RCRE_Arena* scratch,
+    size_t num_samples, size_t ddim_steps, float eta, uint64_t* rng)
+{
+    if (!m) return nullptr;
+    return gen_diff_sample_ddim(m, gen_tinyunet_fwd_wrap, nullptr, sched,
+                                m->cfg.in_channels, m->cfg.height, m->cfg.width,
+                                out_arena, scratch, num_samples, ddim_steps, eta, rng, 64);
+}
+
+/* --- Source: vit_dit.c --- */
+/**
+ * @file vit_dit.c
+ * @brief Phase 4: Vision Transformer (RCRE_ViT) & Diffusion Transformer (RCRE_DiT w/ AdaLN-Zero)
+ *
+ * Part of Recep's Code Run Everywhere (RCRE).
+ * Strict ISO C23 compliant, zero external dependencies, zero hot-loop mallocs.
+ */
+
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Epsilon-prediction forward adapter for the shared DDIM stepper
+ * (class_labels arrive through the ctx pointer). */
+static RCRE_Tensor* gen_dit_fwd_wrap(const void* model, RCRE_TensorTape* tape,
+                                     RCRE_Tensor* x, const float* t, void* ctx) {
+    return rcre_dit_forward((const RCRE_DiT*)model, tape, x, t,
+                            (const size_t*)ctx);
+}
+
+static const char* gen_vt_fmt_label(RCRE_Arena* arena, const char* model, size_t layer, const char* name) {
+    char* buf = (char*)rcre_arena_alloc(arena, 48, 8);
+    if (!buf) return nullptr;
+    snprintf(buf, 48, "%s.b%zu.%s", model, layer, name);
+    return buf;
+}
+
+/* ========================================================================= */
+/* 1. Vision Transformer (RCRE_ViT)                                          */
+/* ========================================================================= */
+
+RCRE_ViT* rcre_vit_create(RCRE_Arena* arena, RCRE_ViTConfig cfg, uint64_t* rng) {
+    if (!arena || !rng || cfg.in_channels == 0 || cfg.patch_size == 0 ||
+        cfg.height == 0 || cfg.width == 0 ||
+        (cfg.height % cfg.patch_size) != 0 || (cfg.width % cfg.patch_size) != 0 ||
+        cfg.embed_dim == 0 || cfg.num_heads == 0 || (cfg.embed_dim % cfg.num_heads) != 0 ||
+        cfg.num_layers == 0 || cfg.mlp_dim == 0 || cfg.num_classes == 0) {
+        return nullptr;
+    }
+
+    RCRE_ViT* m = (RCRE_ViT*)rcre_arena_alloc(arena, sizeof(RCRE_ViT), alignof(RCRE_ViT));
+    if (!m) return nullptr;
+    memset(m, 0, sizeof(*m));
+
+    m->cfg         = cfg;
+    m->num_patches = (cfg.height / cfg.patch_size) * (cfg.width / cfg.patch_size);
+    m->patch_dim   = cfg.in_channels * cfg.patch_size * cfg.patch_size;
+    size_t C       = cfg.embed_dim;
+    size_t M       = cfg.mlp_dim;
+
+    m->patch_w = rcre_tensor_alloc_2d(arena, m->patch_dim, C);
+    m->patch_b = rcre_tensor_alloc_1d(arena, C);
+    m->pos_emb = rcre_tensor_alloc_2d(arena, m->num_patches, C);
+    m->blocks  = (RCRE_ViTBlock*)rcre_arena_alloc(arena, cfg.num_layers * sizeof(RCRE_ViTBlock), alignof(RCRE_ViTBlock));
+    m->ln_f_g  = rcre_tensor_alloc_1d(arena, C);
+    m->ln_f_b  = rcre_tensor_alloc_1d(arena, C);
+    m->head_w  = rcre_tensor_alloc_2d(arena, C, cfg.num_classes);
+    m->head_b  = rcre_tensor_alloc_1d(arena, cfg.num_classes);
+
+    if (!m->patch_w || !m->patch_b || !m->pos_emb || !m->blocks ||
+        !m->ln_f_g  || !m->ln_f_b  || !m->head_w  || !m->head_b) {
+        return nullptr;
+    }
+
+    rcre_tensor_init_xavier(m->patch_w, m->patch_dim, C, rng);
+    rcre_tensor_fill_normal(m->pos_emb, 0.0f, 0.02f, rng);
+    rcre_tensor_ones(m->ln_f_g);
+    rcre_tensor_init_xavier(m->head_w, C, cfg.num_classes, rng);
+
+    m->patch_w->label = "vit.patch.w"; m->patch_b->label = "vit.patch.b";
+    m->pos_emb->label = "vit.pos_emb";
+    m->ln_f_g->label  = "vit.ln_f.g";  m->ln_f_b->label  = "vit.ln_f.b";
+    m->head_w->label  = "vit.head.w";  m->head_b->label  = "vit.head.b";
+
+    for (size_t l = 0; l < cfg.num_layers; ++l) {
+        RCRE_ViTBlock* b = &m->blocks[l];
+        b->ln1_g = rcre_tensor_alloc_1d(arena, C);
+        b->ln1_b = rcre_tensor_alloc_1d(arena, C);
+        b->wq    = rcre_tensor_alloc_2d(arena, C, C); b->bq = rcre_tensor_alloc_1d(arena, C);
+        b->wk    = rcre_tensor_alloc_2d(arena, C, C); b->bk = rcre_tensor_alloc_1d(arena, C);
+        b->wv    = rcre_tensor_alloc_2d(arena, C, C); b->bv = rcre_tensor_alloc_1d(arena, C);
+        b->wo    = rcre_tensor_alloc_2d(arena, C, C); b->bo = rcre_tensor_alloc_1d(arena, C);
+        b->ln2_g = rcre_tensor_alloc_1d(arena, C);
+        b->ln2_b = rcre_tensor_alloc_1d(arena, C);
+        b->fc1_w = rcre_tensor_alloc_2d(arena, C, M); b->fc1_b = rcre_tensor_alloc_1d(arena, M);
+        b->fc2_w = rcre_tensor_alloc_2d(arena, M, C); b->fc2_b = rcre_tensor_alloc_1d(arena, C);
+
+        if (!b->ln1_g || !b->ln1_b || !b->wq || !b->bq || !b->wk || !b->bk ||
+            !b->wv || !b->bv || !b->wo || !b->bo || !b->ln2_g || !b->ln2_b ||
+            !b->fc1_w || !b->fc1_b || !b->fc2_w || !b->fc2_b) {
+            return nullptr;
+        }
+
+        rcre_tensor_ones(b->ln1_g);
+        rcre_tensor_ones(b->ln2_g);
+        rcre_tensor_init_xavier(b->wq, C, C, rng);
+        rcre_tensor_init_xavier(b->wk, C, C, rng);
+        rcre_tensor_init_xavier(b->wv, C, C, rng);
+        rcre_tensor_init_xavier(b->wo, C, C, rng);
+        rcre_tensor_init_xavier(b->fc1_w, C, M, rng);
+        rcre_tensor_init_xavier(b->fc2_w, M, C, rng);
+
+        b->ln1_g->label = gen_vt_fmt_label(arena, "vit", l, "ln1.g");
+        b->ln1_b->label = gen_vt_fmt_label(arena, "vit", l, "ln1.b");
+        b->wq->label    = gen_vt_fmt_label(arena, "vit", l, "wq");
+        b->bq->label    = gen_vt_fmt_label(arena, "vit", l, "bq");
+        b->wk->label    = gen_vt_fmt_label(arena, "vit", l, "wk");
+        b->bk->label    = gen_vt_fmt_label(arena, "vit", l, "bk");
+        b->wv->label    = gen_vt_fmt_label(arena, "vit", l, "wv");
+        b->bv->label    = gen_vt_fmt_label(arena, "vit", l, "bv");
+        b->wo->label    = gen_vt_fmt_label(arena, "vit", l, "wo");
+        b->bo->label    = gen_vt_fmt_label(arena, "vit", l, "bo");
+        b->ln2_g->label = gen_vt_fmt_label(arena, "vit", l, "ln2.g");
+        b->ln2_b->label = gen_vt_fmt_label(arena, "vit", l, "ln2.b");
+        b->fc1_w->label = gen_vt_fmt_label(arena, "vit", l, "fc1.w");
+        b->fc1_b->label = gen_vt_fmt_label(arena, "vit", l, "fc1.b");
+        b->fc2_w->label = gen_vt_fmt_label(arena, "vit", l, "fc2.w");
+        b->fc2_b->label = gen_vt_fmt_label(arena, "vit", l, "fc2.b");
+    }
+
+    return m;
+}
+
+size_t rcre_vit_param_count(const RCRE_ViT* m) {
+    if (!m) return 0;
+    return 7U + m->cfg.num_layers * 16U;
+}
+
+size_t rcre_vit_params(const RCRE_ViT* m, RCRE_Tensor** out_params, size_t max_params) {
+    size_t needed = rcre_vit_param_count(m);
+    if (!m || !out_params || max_params < needed) return 0;
+    size_t pos = 0;
+    out_params[pos++] = m->patch_w;
+    out_params[pos++] = m->patch_b;
+    out_params[pos++] = m->pos_emb;
+    for (size_t l = 0; l < m->cfg.num_layers; ++l) {
+        const RCRE_ViTBlock* b = &m->blocks[l];
+        out_params[pos++] = b->ln1_g; out_params[pos++] = b->ln1_b;
+        out_params[pos++] = b->wq;    out_params[pos++] = b->bq;
+        out_params[pos++] = b->wk;    out_params[pos++] = b->bk;
+        out_params[pos++] = b->wv;    out_params[pos++] = b->bv;
+        out_params[pos++] = b->wo;    out_params[pos++] = b->bo;
+        out_params[pos++] = b->ln2_g; out_params[pos++] = b->ln2_b;
+        out_params[pos++] = b->fc1_w; out_params[pos++] = b->fc1_b;
+        out_params[pos++] = b->fc2_w; out_params[pos++] = b->fc2_b;
+    }
+    out_params[pos++] = m->ln_f_g;
+    out_params[pos++] = m->ln_f_b;
+    out_params[pos++] = m->head_w;
+    out_params[pos++] = m->head_b;
+    return pos;
+}
+
+RCRE_Tensor* rcre_vit_forward(const RCRE_ViT* m, RCRE_TensorTape* tape, RCRE_Tensor* img) {
+    if (!m || !tape || !img || img->ndim != 4 ||
+        img->shape[1] != m->cfg.in_channels ||
+        img->shape[2] != m->cfg.height ||
+        img->shape[3] != m->cfg.width) {
+        return nullptr;
+    }
+
+    RCRE_Tensor* x = rcre_autograd_patchify(tape, img, m->cfg.patch_size);
+    x = rcre_autograd_linear(tape, x, m->patch_w, m->patch_b);
+    x = rcre_autograd_add_pos_emb_3d(tape, x, m->pos_emb);
+
+    for (size_t l = 0; l < m->cfg.num_layers; ++l) {
+        const RCRE_ViTBlock* b = &m->blocks[l];
+        RCRE_Tensor* h = rcre_autograd_layernorm(tape, x, b->ln1_g, b->ln1_b, 1e-5f);
+        RCRE_Tensor* q = rcre_autograd_linear(tape, h, b->wq, b->bq);
+        RCRE_Tensor* k = rcre_autograd_linear(tape, h, b->wk, b->bk);
+        RCRE_Tensor* v = rcre_autograd_linear(tape, h, b->wv, b->bv);
+        RCRE_Tensor* a = rcre_autograd_mhsa(tape, q, k, v, m->cfg.num_heads);
+        a = rcre_autograd_linear(tape, a, b->wo, b->bo);
+        x = rcre_autograd_add(tape, x, a);
+
+        RCRE_Tensor* h2 = rcre_autograd_layernorm(tape, x, b->ln2_g, b->ln2_b, 1e-5f);
+        RCRE_Tensor* mlp = rcre_autograd_linear(tape, h2, b->fc1_w, b->fc1_b);
+        mlp = rcre_autograd_gelu(tape, mlp);
+        mlp = rcre_autograd_linear(tape, mlp, b->fc2_w, b->fc2_b);
+        x = rcre_autograd_add(tape, x, mlp);
+    }
+
+    x = rcre_autograd_layernorm(tape, x, m->ln_f_g, m->ln_f_b, 1e-5f);
+    RCRE_Tensor* pooled = rcre_autograd_mean_pool_seq(tape, x);
+    return rcre_autograd_linear(tape, pooled, m->head_w, m->head_b);
+}
+
+float rcre_vit_train_step(
+    RCRE_ViT* m, RCRE_TensorTape* tape, RCRE_TensorOptim* opt,
+    RCRE_Tensor* img, const size_t* labels, float max_grad_norm)
+{
+    if (!m || !tape || !opt || !img || !labels || img->ndim != 4) return -1.0f;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(tape->arena);
+    rcre_tensor_tape_reset(tape);
+    rcre_tensor_optim_zero_grad(opt);
+
+    RCRE_Tensor* logits = rcre_vit_forward(m, tape, img);
+    if (!logits) {
+        rcre_arena_temp_end(tmp);
+        return -1.0f;
+    }
+
+    float loss = rcre_loss_cross_entropy_logits(logits, labels, img->shape[0], m->cfg.num_classes, logits);
+    rcre_tensor_tape_backward(tape);
+
+    if (max_grad_norm > 0.0f) {
+        (void)rcre_tensor_clip_grad_norm(opt->params, opt->num_params, max_grad_norm);
+    }
+    rcre_tensor_optim_step(opt);
+
+    rcre_arena_temp_end(tmp);
+    return loss;
+}
+
+int rcre_vit_predict(const RCRE_ViT* m, RCRE_Arena* scratch, RCRE_Tensor* img, size_t* out_preds) {
+    if (!m || !scratch || !img || !out_preds || img->ndim != 4) return RCRE_ERR_INVALID_ARG;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    RCRE_TensorTape* tape = rcre_tensor_tape_create(scratch, 64);
+    if (!tape) {
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    RCRE_Tensor* logits = rcre_vit_forward(m, tape, img);
+    if (!logits) {
+        rcre_tensor_tape_destroy(tape);
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    size_t N = img->shape[0];
+    size_t K = m->cfg.num_classes;
+    const float* ld = rcre_tensor_f32_data(logits);
+    for (size_t n = 0; n < N; ++n) {
+        size_t best = 0;
+        float best_v = ld[n * K];
+        for (size_t c = 1; c < K; ++c) {
+            if (ld[n * K + c] > best_v) {
+                best_v = ld[n * K + c];
+                best = c;
+            }
+        }
+        out_preds[n] = best;
+    }
+
+    rcre_tensor_tape_destroy(tape);
+    rcre_arena_temp_end(tmp);
+    return RCRE_OK;
+}
+
+/* ========================================================================= */
+/* 2. Diffusion Transformer with AdaLN-Zero (RCRE_DiT)                       */
+/* ========================================================================= */
+
+RCRE_DiT* rcre_dit_create(RCRE_Arena* arena, RCRE_DiTConfig cfg, uint64_t* rng) {
+    if (!arena || !rng || cfg.in_channels == 0 || cfg.patch_size == 0 ||
+        cfg.height == 0 || cfg.width == 0 ||
+        (cfg.height % cfg.patch_size) != 0 || (cfg.width % cfg.patch_size) != 0 ||
+        cfg.embed_dim < 2 || (cfg.embed_dim & 1U) != 0 ||
+        cfg.num_heads == 0 || (cfg.embed_dim % cfg.num_heads) != 0 ||
+        cfg.num_layers == 0 || cfg.mlp_dim == 0) {
+        return nullptr;
+    }
+
+    RCRE_DiT* m = (RCRE_DiT*)rcre_arena_alloc(arena, sizeof(RCRE_DiT), alignof(RCRE_DiT));
+    if (!m) return nullptr;
+    memset(m, 0, sizeof(*m));
+
+    m->cfg         = cfg;
+    m->num_patches = (cfg.height / cfg.patch_size) * (cfg.width / cfg.patch_size);
+    m->patch_dim   = cfg.in_channels * cfg.patch_size * cfg.patch_size;
+    size_t C       = cfg.embed_dim;
+    size_t M       = cfg.mlp_dim;
+
+    m->patch_w    = rcre_tensor_alloc_2d(arena, m->patch_dim, C);
+    m->patch_b    = rcre_tensor_alloc_1d(arena, C);
+    m->pos_emb    = rcre_tensor_alloc_2d(arena, m->num_patches, C);
+    m->time_fc1_w = rcre_tensor_alloc_2d(arena, C, C);
+    m->time_fc1_b = rcre_tensor_alloc_1d(arena, C);
+    m->time_fc2_w = rcre_tensor_alloc_2d(arena, C, C);
+    m->time_fc2_b = rcre_tensor_alloc_1d(arena, C);
+
+    if (cfg.num_classes > 0) {
+        m->class_emb = rcre_tensor_alloc_2d(arena, cfg.num_classes, C);
+        if (!m->class_emb) return nullptr;
+        rcre_tensor_fill_normal(m->class_emb, 0.0f, 0.02f, rng);
+        m->class_emb->label = "dit.class_emb";
+    }
+
+    m->blocks      = (RCRE_DiTBlock*)rcre_arena_alloc(arena, cfg.num_layers * sizeof(RCRE_DiTBlock), alignof(RCRE_DiTBlock));
+    m->final_ada_w = rcre_tensor_alloc_2d(arena, C, 2U * C);
+    m->final_ada_b = rcre_tensor_alloc_1d(arena, 2U * C);
+    m->final_w     = rcre_tensor_alloc_2d(arena, C, m->patch_dim);
+    m->final_b     = rcre_tensor_alloc_1d(arena, m->patch_dim);
+
+    if (!m->patch_w || !m->patch_b || !m->pos_emb ||
+        !m->time_fc1_w || !m->time_fc1_b || !m->time_fc2_w || !m->time_fc2_b ||
+        !m->blocks || !m->final_ada_w || !m->final_ada_b || !m->final_w || !m->final_b) {
+        return nullptr;
+    }
+
+    rcre_tensor_init_xavier(m->patch_w, m->patch_dim, C, rng);
+    rcre_tensor_fill_normal(m->pos_emb, 0.0f, 0.02f, rng);
+    rcre_tensor_init_xavier(m->time_fc1_w, C, C, rng);
+    rcre_tensor_init_xavier(m->time_fc2_w, C, C, rng);
+    /* AdaLN-Zero: final_ada_w/b and final_w/b remain zero-initialized */
+
+    m->patch_w->label     = "dit.patch.w";     m->patch_b->label     = "dit.patch.b";
+    m->pos_emb->label     = "dit.pos_emb";
+    m->time_fc1_w->label  = "dit.time_fc1.w";  m->time_fc1_b->label  = "dit.time_fc1.b";
+    m->time_fc2_w->label  = "dit.time_fc2.w";  m->time_fc2_b->label  = "dit.time_fc2.b";
+    m->final_ada_w->label = "dit.final_ada.w"; m->final_ada_b->label = "dit.final_ada.b";
+    m->final_w->label     = "dit.final.w";     m->final_b->label     = "dit.final.b";
+
+    for (size_t l = 0; l < cfg.num_layers; ++l) {
+        RCRE_DiTBlock* b = &m->blocks[l];
+        b->ada_w = rcre_tensor_alloc_2d(arena, C, 6U * C);
+        b->ada_b = rcre_tensor_alloc_1d(arena, 6U * C);
+        b->wq    = rcre_tensor_alloc_2d(arena, C, C); b->bq = rcre_tensor_alloc_1d(arena, C);
+        b->wk    = rcre_tensor_alloc_2d(arena, C, C); b->bk = rcre_tensor_alloc_1d(arena, C);
+        b->wv    = rcre_tensor_alloc_2d(arena, C, C); b->bv = rcre_tensor_alloc_1d(arena, C);
+        b->wo    = rcre_tensor_alloc_2d(arena, C, C); b->bo = rcre_tensor_alloc_1d(arena, C);
+        b->fc1_w = rcre_tensor_alloc_2d(arena, C, M); b->fc1_b = rcre_tensor_alloc_1d(arena, M);
+        b->fc2_w = rcre_tensor_alloc_2d(arena, M, C); b->fc2_b = rcre_tensor_alloc_1d(arena, C);
+
+        if (!b->ada_w || !b->ada_b || !b->wq || !b->bq || !b->wk || !b->bk ||
+            !b->wv || !b->bv || !b->wo || !b->bo || !b->fc1_w || !b->fc1_b ||
+            !b->fc2_w || !b->fc2_b) {
+            return nullptr;
+        }
+
+        /* ada_w / ada_b stay zero-initialized (AdaLN-Zero identity initialization) */
+        rcre_tensor_init_xavier(b->wq, C, C, rng);
+        rcre_tensor_init_xavier(b->wk, C, C, rng);
+        rcre_tensor_init_xavier(b->wv, C, C, rng);
+        rcre_tensor_init_xavier(b->wo, C, C, rng);
+        rcre_tensor_init_xavier(b->fc1_w, C, M, rng);
+        rcre_tensor_init_xavier(b->fc2_w, M, C, rng);
+
+        b->ada_w->label = gen_vt_fmt_label(arena, "dit", l, "ada.w");
+        b->ada_b->label = gen_vt_fmt_label(arena, "dit", l, "ada.b");
+        b->wq->label    = gen_vt_fmt_label(arena, "dit", l, "wq");
+        b->bq->label    = gen_vt_fmt_label(arena, "dit", l, "bq");
+        b->wk->label    = gen_vt_fmt_label(arena, "dit", l, "wk");
+        b->bk->label    = gen_vt_fmt_label(arena, "dit", l, "bk");
+        b->wv->label    = gen_vt_fmt_label(arena, "dit", l, "wv");
+        b->bv->label    = gen_vt_fmt_label(arena, "dit", l, "bv");
+        b->wo->label    = gen_vt_fmt_label(arena, "dit", l, "wo");
+        b->bo->label    = gen_vt_fmt_label(arena, "dit", l, "bo");
+        b->fc1_w->label = gen_vt_fmt_label(arena, "dit", l, "fc1.w");
+        b->fc1_b->label = gen_vt_fmt_label(arena, "dit", l, "fc1.b");
+        b->fc2_w->label = gen_vt_fmt_label(arena, "dit", l, "fc2.w");
+        b->fc2_b->label = gen_vt_fmt_label(arena, "dit", l, "fc2.b");
+    }
+
+    return m;
+}
+
+size_t rcre_dit_param_count(const RCRE_DiT* m) {
+    if (!m) return 0;
+    size_t base = 11U + (m->class_emb != nullptr ? 1U : 0U);
+    return base + m->cfg.num_layers * 14U;
+}
+
+size_t rcre_dit_params(const RCRE_DiT* m, RCRE_Tensor** out_params, size_t max_params) {
+    size_t needed = rcre_dit_param_count(m);
+    if (!m || !out_params || max_params < needed) return 0;
+    size_t pos = 0;
+    out_params[pos++] = m->patch_w;
+    out_params[pos++] = m->patch_b;
+    out_params[pos++] = m->pos_emb;
+    out_params[pos++] = m->time_fc1_w;
+    out_params[pos++] = m->time_fc1_b;
+    out_params[pos++] = m->time_fc2_w;
+    out_params[pos++] = m->time_fc2_b;
+    if (m->class_emb != nullptr) {
+        out_params[pos++] = m->class_emb;
+    }
+    for (size_t l = 0; l < m->cfg.num_layers; ++l) {
+        const RCRE_DiTBlock* b = &m->blocks[l];
+        out_params[pos++] = b->ada_w; out_params[pos++] = b->ada_b;
+        out_params[pos++] = b->wq;    out_params[pos++] = b->bq;
+        out_params[pos++] = b->wk;    out_params[pos++] = b->bk;
+        out_params[pos++] = b->wv;    out_params[pos++] = b->bv;
+        out_params[pos++] = b->wo;    out_params[pos++] = b->bo;
+        out_params[pos++] = b->fc1_w; out_params[pos++] = b->fc1_b;
+        out_params[pos++] = b->fc2_w; out_params[pos++] = b->fc2_b;
+    }
+    out_params[pos++] = m->final_ada_w;
+    out_params[pos++] = m->final_ada_b;
+    out_params[pos++] = m->final_w;
+    out_params[pos++] = m->final_b;
+    return pos;
+}
+
+RCRE_Tensor* rcre_dit_forward(
+    const RCRE_DiT* m, RCRE_TensorTape* tape, RCRE_Tensor* x_t,
+    const float* timesteps, const size_t* class_labels)
+{
+    if (!m || !tape || !x_t || !timesteps || x_t->ndim != 4 ||
+        x_t->shape[1] != m->cfg.in_channels ||
+        x_t->shape[2] != m->cfg.height ||
+        x_t->shape[3] != m->cfg.width) {
+        return nullptr;
+    }
+    if (m->class_emb != nullptr && class_labels == nullptr) return nullptr;
+
+    size_t N = x_t->shape[0];
+    size_t C = m->cfg.embed_dim;
+
+    /* 1. Patchify + linear embed + positional embedding */
+    RCRE_Tensor* x = rcre_autograd_patchify(tape, x_t, m->cfg.patch_size);
+    x = rcre_autograd_linear(tape, x, m->patch_w, m->patch_b);
+    x = rcre_autograd_add_pos_emb_3d(tape, x, m->pos_emb);
+
+    /* 2. Conditioning vector c = MLP(sinusoidal(t)) [+ class_emb(y)] */
+    RCRE_Tensor* c = rcre_sinusoidal_timestep_embed(tape->arena, timesteps, N, C);
+    c = rcre_autograd_linear(tape, c, m->time_fc1_w, m->time_fc1_b);
+    c = rcre_autograd_silu(tape, c);
+    c = rcre_autograd_linear(tape, c, m->time_fc2_w, m->time_fc2_b);
+    if (m->class_emb != nullptr) {
+        RCRE_Tensor* y_emb = rcre_autograd_embed_lookup(tape, m->class_emb, class_labels, N);
+        c = rcre_autograd_add(tape, c, y_emb);
+    }
+    RCRE_Tensor* c_act = rcre_autograd_silu(tape, c);
+
+    /* 3. DiT Blocks with AdaLN-Zero modulation */
+    for (size_t l = 0; l < m->cfg.num_layers; ++l) {
+        const RCRE_DiTBlock* b = &m->blocks[l];
+        RCRE_Tensor* mod = rcre_autograd_linear(tape, c_act, b->ada_w, b->ada_b);
+        RCRE_Tensor* shift_msa = rcre_autograd_slice_cols(tape, mod, 0U * C, C);
+        RCRE_Tensor* scale_msa = rcre_autograd_slice_cols(tape, mod, 1U * C, C);
+        RCRE_Tensor* gate_msa  = rcre_autograd_slice_cols(tape, mod, 2U * C, C);
+        RCRE_Tensor* shift_mlp = rcre_autograd_slice_cols(tape, mod, 3U * C, C);
+        RCRE_Tensor* scale_mlp = rcre_autograd_slice_cols(tape, mod, 4U * C, C);
+        RCRE_Tensor* gate_mlp  = rcre_autograd_slice_cols(tape, mod, 5U * C, C);
+
+        RCRE_Tensor* h1 = rcre_autograd_layernorm(tape, x, nullptr, nullptr, 1e-5f);
+        h1 = rcre_autograd_adaln_3d(tape, h1, scale_msa, shift_msa);
+        RCRE_Tensor* q = rcre_autograd_linear(tape, h1, b->wq, b->bq);
+        RCRE_Tensor* k = rcre_autograd_linear(tape, h1, b->wk, b->bk);
+        RCRE_Tensor* v = rcre_autograd_linear(tape, h1, b->wv, b->bv);
+        RCRE_Tensor* a = rcre_autograd_mhsa(tape, q, k, v, m->cfg.num_heads);
+        a = rcre_autograd_linear(tape, a, b->wo, b->bo);
+        x = rcre_autograd_add(tape, x, rcre_autograd_gate_3d(tape, a, gate_msa));
+
+        RCRE_Tensor* h2 = rcre_autograd_layernorm(tape, x, nullptr, nullptr, 1e-5f);
+        h2 = rcre_autograd_adaln_3d(tape, h2, scale_mlp, shift_mlp);
+        RCRE_Tensor* mlp = rcre_autograd_linear(tape, h2, b->fc1_w, b->fc1_b);
+        mlp = rcre_autograd_gelu(tape, mlp);
+        mlp = rcre_autograd_linear(tape, mlp, b->fc2_w, b->fc2_b);
+        x = rcre_autograd_add(tape, x, rcre_autograd_gate_3d(tape, mlp, gate_mlp));
+    }
+
+    /* 4. Final AdaLN-Zero + linear projection + unpatchify */
+    RCRE_Tensor* fmod    = rcre_autograd_linear(tape, c_act, m->final_ada_w, m->final_ada_b);
+    RCRE_Tensor* shift_f = rcre_autograd_slice_cols(tape, fmod, 0, C);
+    RCRE_Tensor* scale_f = rcre_autograd_slice_cols(tape, fmod, C, C);
+
+    RCRE_Tensor* hf = rcre_autograd_layernorm(tape, x, nullptr, nullptr, 1e-5f);
+    hf = rcre_autograd_adaln_3d(tape, hf, scale_f, shift_f);
+    RCRE_Tensor* patches = rcre_autograd_linear(tape, hf, m->final_w, m->final_b);
+    return rcre_autograd_unpatchify(tape, patches, m->cfg.in_channels, m->cfg.height, m->cfg.width, m->cfg.patch_size);
+}
+
+float rcre_dit_train_step(
+    RCRE_DiT* m,
+    const RCRE_DiffSchedule* sched,
+    RCRE_TensorTape* tape,
+    RCRE_TensorOptim* opt,
+    const RCRE_Tensor* x0,
+    const size_t* class_labels,
+    uint64_t* rng,
+    float max_grad_norm)
+{
+    if (!m || !sched || !tape || !opt || !x0 || !rng || x0->ndim != 4) return -1.0f;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(tape->arena);
+    rcre_tensor_tape_reset(tape);
+    rcre_tensor_optim_zero_grad(opt);
+
+    size_t N = x0->shape[0];
+    size_t* t_idx = (size_t*)rcre_arena_alloc(tape->arena, N * sizeof(size_t), alignof(size_t));
+    float*  t_flt = (float*)rcre_arena_alloc(tape->arena, N * sizeof(float), 16);
+    RCRE_Tensor* noise = rcre_tensor_alloc(tape->arena, x0->shape, 4);
+    RCRE_Tensor* x_t   = rcre_tensor_alloc(tape->arena, x0->shape, 4);
+    if (!t_idx || !t_flt || !noise || !x_t) {
+        rcre_arena_temp_end(tmp);
+        return -1.0f;
+    }
+
+    for (size_t n = 0; n < N; ++n) {
+        t_idx[n] = (size_t)(rcre_rng_next(rng) % (uint64_t)sched->num_steps);
+        t_flt[n] = (float)t_idx[n];
+    }
+    rcre_tensor_fill_normal(noise, 0.0f, 1.0f, rng);
+    if (rcre_diff_q_sample(sched, x0, t_idx, noise, x_t) != RCRE_OK) {
+        rcre_arena_temp_end(tmp);
+        return -1.0f;
+    }
+
+    RCRE_Tensor* eps_pred = rcre_dit_forward(m, tape, x_t, t_flt, class_labels);
+    if (!eps_pred) {
+        rcre_arena_temp_end(tmp);
+        return -1.0f;
+    }
+
+    float loss = rcre_loss_mse(eps_pred, noise, eps_pred);
+    rcre_tensor_tape_backward(tape);
+
+    if (max_grad_norm > 0.0f) {
+        (void)rcre_tensor_clip_grad_norm(opt->params, opt->num_params, max_grad_norm);
+    }
+    rcre_tensor_optim_step(opt);
+
+    rcre_arena_temp_end(tmp);
+    return loss;
+}
+
+RCRE_Tensor* rcre_dit_sample_ddim(
+    const RCRE_DiT* m, const RCRE_DiffSchedule* sched,
+    RCRE_Arena* out_arena, RCRE_Arena* scratch,
+    size_t num_samples, const size_t* class_labels,
+    size_t ddim_steps, float eta, uint64_t* rng)
+{
+    if (!m || !sched || !out_arena || !scratch || num_samples == 0 ||
+        ddim_steps == 0 || ddim_steps > sched->num_steps || !rng) {
+        return nullptr;
+    }
+    if (m->class_emb != nullptr && class_labels == nullptr) return nullptr;
+    return gen_diff_sample_ddim(m, gen_dit_fwd_wrap, (void*)class_labels, sched,
+                                m->cfg.in_channels, m->cfg.height, m->cfg.width,
+                                out_arena, scratch, num_samples, ddim_steps, eta, rng, 128);
+}
+
+/* --- Source: lifecycle.c --- */
+/**
+ * @file lifecycle.c
+ * @brief Model Lifecycle Engine: Magnitude Pruning, Lossless RCRZ Compression ("RGC1")
+ *        & Post-Training Quantization (F16 / BF16 / Q8_0 / Q4_0, "RGQ1")
+ *
+ * Applies uniformly across all RCRE generative & vision models:
+ *   RCRE_ConvAE, RCRE_ConvVAE, RCRE_TinyUNet, RCRE_ViT, RCRE_DiT.
+ *
+ * Strict ISO C23 compliant, zero external dependencies.
+ */
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+    uint8_t  magic[4];       /* "RGC1" */
+    uint32_t version;        /* 1      */
+    uint32_t num_params;
+    uint32_t reserved;
+    uint64_t total_floats;
+    uint64_t compressed_nbytes;
+} GenRgc1Header;
+
+typedef struct {
+    uint8_t  magic[4];       /* "RGQ1" */
+    uint32_t version;        /* 1      */
+    uint32_t qtype;          /* RCRE_GenQuantType */
+    uint32_t num_params;
+    uint64_t total_floats;
+    uint64_t padded_floats;
+    uint64_t payload_nbytes;
+} GenRgq1Header;
+
+static int gen_lc_cmp_f32_asc(const void* a, const void* b) {
+    float fa = *(const float*)a;
+    float fb = *(const float*)b;
+    return (fa > fb) - (fa < fb);
+}
+
+static size_t gen_lc_count_total(RCRE_Tensor* const* params, size_t num_params) {
+    size_t total = 0;
+    for (size_t i = 0; i < num_params; ++i) {
+        if (!params[i] || params[i]->dtype != RCRE_DTYPE_F32) return 0;
+        total += params[i]->numel;
+    }
+    return total;
+}
+
+static void gen_lc_compute_error_stats(
+    const float* orig, const float* approx, size_t n,
+    float* out_rmse, float* out_max_err, float* out_sqnr_db)
+{
+    double sig_pow = 0.0;
+    double err_pow = 0.0;
+    float  max_err = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        double o = (double)orig[i];
+        double d = (double)approx[i] - o;
+        sig_pow += o * o;
+        err_pow += d * d;
+        float ad = fabsf(approx[i] - orig[i]);
+        if (ad > max_err) max_err = ad;
+    }
+    *out_rmse    = (n > 0) ? (float)sqrt(err_pow / (double)n) : 0.0f;
+    *out_max_err = max_err;
+    if (err_pow <= 1e-20) {
+        *out_sqnr_db = 99.0f;
+    } else if (sig_pow <= 1e-20) {
+        *out_sqnr_db = 0.0f;
+    } else {
+        *out_sqnr_db = (float)(10.0 * log10(sig_pow / err_pow));
+    }
+}
+
+int rcre_gen_prune_magnitude(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    float target_sparsity,
+    bool skip_1d_tensors,
+    RCRE_Arena* scratch,
+    RCRE_GenModelStats* out_stats)
+{
+    if (!params || num_params == 0 || !scratch ||
+        !(target_sparsity >= 0.0f && target_sparsity < 1.0f)) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t total_all = gen_lc_count_total(params, num_params);
+    if (total_all == 0) return RCRE_ERR_INVALID_ARG;
+
+    size_t prunable = 0;
+    for (size_t p = 0; p < num_params; ++p) {
+        if (skip_1d_tensors && params[p]->ndim <= 1) continue;
+        prunable += params[p]->numel;
+    }
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    float* mags = nullptr;
+    float threshold = 0.0f;
+
+    if (prunable > 0 && target_sparsity > 0.0f) {
+        mags = (float*)rcre_arena_alloc(scratch, prunable * sizeof(float), 64);
+        if (!mags) {
+            rcre_arena_temp_end(tmp);
+            return RCRE_ERR_OUT_OF_MEMORY;
+        }
+        size_t idx = 0;
+        for (size_t p = 0; p < num_params; ++p) {
+            if (skip_1d_tensors && params[p]->ndim <= 1) continue;
+            const float* d = rcre_tensor_f32_data(params[p]);
+            for (size_t i = 0; i < params[p]->numel; ++i) {
+                mags[idx++] = fabsf(d[i]);
+            }
+        }
+        qsort(mags, prunable, sizeof(float), gen_lc_cmp_f32_asc);
+        size_t cut = (size_t)((double)target_sparsity * (double)prunable);
+        if (cut >= prunable) cut = prunable - 1U;
+        threshold = mags[cut];
+    }
+
+    double sig_pow = 0.0;
+    double err_pow = 0.0;
+    float  max_err = 0.0f;
+    size_t zeros   = 0;
+
+    for (size_t p = 0; p < num_params; ++p) {
+        float* d = rcre_tensor_f32_data(params[p]);
+        bool can_prune = !(skip_1d_tensors && params[p]->ndim <= 1) && (target_sparsity > 0.0f);
+        for (size_t i = 0; i < params[p]->numel; ++i) {
+            float v = d[i];
+            sig_pow += (double)v * (double)v;
+            if (can_prune && fabsf(v) <= threshold) {
+                err_pow += (double)v * (double)v;
+                if (fabsf(v) > max_err) max_err = fabsf(v);
+                d[i] = 0.0f;
+            }
+            if (d[i] == 0.0f) zeros++;
+        }
+    }
+
+    rcre_arena_temp_end(tmp);
+
+    if (out_stats) {
+        memset(out_stats, 0, sizeof(*out_stats));
+        out_stats->total_params      = total_all;
+        out_stats->zero_params       = zeros;
+        out_stats->sparsity          = (float)zeros / (float)total_all;
+        out_stats->raw_bytes         = total_all * sizeof(float);
+        out_stats->artifact_bytes    = out_stats->raw_bytes;
+        out_stats->compression_ratio = 1.0f;
+        out_stats->rmse              = (float)sqrt(err_pow / (double)total_all);
+        out_stats->max_abs_err       = max_err;
+        out_stats->sqnr_db           = (err_pow <= 1e-20)
+                                           ? 99.0f
+                                           : (float)(10.0 * log10(fmax(sig_pow, 1e-20) / err_pow));
+    }
+    return RCRE_OK;
+}
+
+int rcre_gen_save_compressed(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_Arena* scratch,
+    RCRE_GenModelStats* out_stats)
+{
+    if (!params || num_params == 0 || !filepath || !scratch) return RCRE_ERR_INVALID_ARG;
+    size_t total = gen_lc_count_total(params, num_params);
+    if (total == 0) return RCRE_ERR_INVALID_ARG;
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    size_t flat_shape[1] = { total };
+    RCRE_Tensor flat = rcre_tensor_create(flat_shape, 1, RCRE_DTYPE_F32, RCRE_LAYOUT_TABULAR, scratch);
+    uint64_t* numels = (uint64_t*)rcre_arena_alloc(scratch, num_params * sizeof(uint64_t), alignof(uint64_t));
+    if (!flat.data || !numels) {
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    float* fd = (float*)flat.data;
+    size_t pos = 0;
+    size_t zeros = 0;
+    for (size_t p = 0; p < num_params; ++p) {
+        numels[p] = (uint64_t)params[p]->numel;
+        const float* pd = rcre_tensor_f32_data(params[p]);
+        memcpy(fd + pos, pd, params[p]->numel * sizeof(float));
+        for (size_t i = 0; i < params[p]->numel; ++i) {
+            if (pd[i] == 0.0f) zeros++;
+        }
+        pos += params[p]->numel;
+    }
+
+    RCRE_Slice comp = {0};
+    int rc = rcre_io_compress_tensor(&flat, scratch, &comp);
+    if (rc != RCRE_OK) {
+        rcre_arena_temp_end(tmp);
+        return rc;
+    }
+
+    GenRgc1Header hdr;
+    hdr.magic[0]          = 'R';
+    hdr.magic[1]          = 'G';
+    hdr.magic[2]          = 'C';
+    hdr.magic[3]          = '1';
+    hdr.version           = 1U;
+    hdr.num_params        = (uint32_t)num_params;
+    hdr.reserved          = 0U;
+    hdr.total_floats      = (uint64_t)total;
+    hdr.compressed_nbytes = (uint64_t)comp.len;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) {
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_IO;
+    }
+
+    bool ok = (fwrite(&hdr, sizeof(hdr), 1, fp) == 1) &&
+              (fwrite(numels, sizeof(uint64_t), num_params, fp) == num_params) &&
+              (fwrite(comp.data, 1, comp.len, fp) == comp.len);
+    fclose(fp);
+    rcre_arena_temp_end(tmp);
+
+    if (!ok) return RCRE_ERR_IO;
+
+    if (out_stats) {
+        size_t file_bytes = sizeof(hdr) + num_params * sizeof(uint64_t) + comp.len;
+        memset(out_stats, 0, sizeof(*out_stats));
+        out_stats->total_params      = total;
+        out_stats->zero_params       = zeros;
+        out_stats->sparsity          = (float)zeros / (float)total;
+        out_stats->raw_bytes         = total * sizeof(float);
+        out_stats->artifact_bytes    = file_bytes;
+        out_stats->compression_ratio = (float)out_stats->raw_bytes / (float)file_bytes;
+        out_stats->rmse              = 0.0f;
+        out_stats->max_abs_err       = 0.0f;
+        out_stats->sqnr_db           = 99.0f; /* Lossless 0-ULP */
+    }
+    return RCRE_OK;
+}
+
+int rcre_gen_load_compressed(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_Arena* scratch)
+{
+    if (!params || num_params == 0 || !filepath || !scratch) return RCRE_ERR_INVALID_ARG;
+    size_t total = gen_lc_count_total(params, num_params);
+    if (total == 0) return RCRE_ERR_INVALID_ARG;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return RCRE_ERR_IO;
+
+    GenRgc1Header hdr;
+    if (fread(&hdr, sizeof(hdr), 1, fp) != 1 ||
+        memcmp(hdr.magic, "RGC1", 4) != 0 ||
+        hdr.version != 1U ||
+        hdr.num_params != (uint32_t)num_params ||
+        hdr.total_floats != (uint64_t)total ||
+        hdr.compressed_nbytes == 0) {
+        fclose(fp);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    uint64_t* numels = (uint64_t*)rcre_arena_alloc(scratch, num_params * sizeof(uint64_t), alignof(uint64_t));
+    uint8_t*  cbuf   = (uint8_t*)rcre_arena_alloc(scratch, (size_t)hdr.compressed_nbytes, 64);
+    if (!numels || !cbuf) {
+        fclose(fp);
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    bool ok = (fread(numels, sizeof(uint64_t), num_params, fp) == num_params) &&
+              (fread(cbuf, 1, (size_t)hdr.compressed_nbytes, fp) == (size_t)hdr.compressed_nbytes);
+    fclose(fp);
+    if (!ok) {
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_IO;
+    }
+
+    for (size_t p = 0; p < num_params; ++p) {
+        if (numels[p] != (uint64_t)params[p]->numel) {
+            rcre_arena_temp_end(tmp);
+            return RCRE_ERR_SHAPE_MISMATCH;
+        }
+    }
+
+    RCRE_Slice frame = rcre_slice_from_parts(cbuf, (size_t)hdr.compressed_nbytes);
+    RCRE_Tensor flat = {0};
+    int rc = rcre_io_decompress_tensor(frame, scratch, &flat);
+    if (rc != RCRE_OK || flat.numel != total || flat.dtype != RCRE_DTYPE_F32) {
+        rcre_arena_temp_end(tmp);
+        return (rc != RCRE_OK) ? rc : RCRE_ERR_SHAPE_MISMATCH;
+    }
+
+    const float* fd = (const float*)flat.data;
+    size_t pos = 0;
+    for (size_t p = 0; p < num_params; ++p) {
+        memcpy(params[p]->data, fd + pos, params[p]->numel * sizeof(float));
+        pos += params[p]->numel;
+    }
+
+    rcre_arena_temp_end(tmp);
+    return RCRE_OK;
+}
+
+static size_t gen_lc_quant_payload_bytes(RCRE_GenQuantType qtype, size_t padded_floats) {
+    switch (qtype) {
+        case RCRE_GEN_QUANT_F16:  return padded_floats * sizeof(uint16_t);
+        case RCRE_GEN_QUANT_BF16: return padded_floats * sizeof(uint16_t);
+        case RCRE_GEN_QUANT_Q8_0: return (padded_floats / RCRE_QK8_0) * sizeof(RCRE_BlockQ8_0);
+        case RCRE_GEN_QUANT_Q4_0: return (padded_floats / RCRE_QK4_0) * sizeof(RCRE_BlockQ4_0);
+        default: return 0;
+    }
+}
+
+int rcre_gen_save_quantized(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    RCRE_GenQuantType qtype,
+    const char* filepath,
+    RCRE_Arena* scratch,
+    RCRE_GenModelStats* out_stats)
+{
+    if (!params || num_params == 0 || !filepath || !scratch) return RCRE_ERR_INVALID_ARG;
+    if (qtype != RCRE_GEN_QUANT_F16 && qtype != RCRE_GEN_QUANT_BF16 &&
+        qtype != RCRE_GEN_QUANT_Q8_0 && qtype != RCRE_GEN_QUANT_Q4_0) {
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t total = gen_lc_count_total(params, num_params);
+    if (total == 0) return RCRE_ERR_INVALID_ARG;
+
+    /* Pad to block size 32 for Q8_0 / Q4_0 */
+    size_t padded = (qtype == RCRE_GEN_QUANT_Q8_0 || qtype == RCRE_GEN_QUANT_Q4_0)
+                        ? ((total + 31U) & ~((size_t)31U))
+                        : total;
+    size_t payload_bytes = gen_lc_quant_payload_bytes(qtype, padded);
+
+    RCRE_ArenaTemp tmp = rcre_arena_temp_begin(scratch);
+    float*    flat    = (float*)rcre_arena_alloc(scratch, padded * sizeof(float), 64);
+    uint8_t*  payload = (uint8_t*)rcre_arena_alloc(scratch, payload_bytes, 64);
+    uint64_t* numels  = (uint64_t*)rcre_arena_alloc(scratch, num_params * sizeof(uint64_t), alignof(uint64_t));
+    if (!flat || !payload || !numels) {
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+    memset(flat, 0, padded * sizeof(float));
+
+    size_t pos = 0;
+    size_t zeros = 0;
+    for (size_t p = 0; p < num_params; ++p) {
+        numels[p] = (uint64_t)params[p]->numel;
+        const float* pd = rcre_tensor_f32_data(params[p]);
+        memcpy(flat + pos, pd, params[p]->numel * sizeof(float));
+        for (size_t i = 0; i < params[p]->numel; ++i) {
+            if (pd[i] == 0.0f) zeros++;
+        }
+        pos += params[p]->numel;
+    }
+
+    if (qtype == RCRE_GEN_QUANT_F16) {
+        rcre_f32_to_f16(flat, payload, padded);
+    } else if (qtype == RCRE_GEN_QUANT_BF16) {
+        rcre_f32_to_bf16(flat, payload, padded);
+    } else if (qtype == RCRE_GEN_QUANT_Q8_0) {
+        rcre_quantize_q8_0(flat, payload, padded);
+    } else {
+        rcre_quantize_q4_0(flat, payload, padded);
+    }
+
+    GenRgq1Header hdr;
+    hdr.magic[0]       = 'R';
+    hdr.magic[1]       = 'G';
+    hdr.magic[2]       = 'Q';
+    hdr.magic[3]       = '1';
+    hdr.version        = 1U;
+    hdr.qtype          = (uint32_t)qtype;
+    hdr.num_params     = (uint32_t)num_params;
+    hdr.total_floats   = (uint64_t)total;
+    hdr.padded_floats  = (uint64_t)padded;
+    hdr.payload_nbytes = (uint64_t)payload_bytes;
+
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) {
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_IO;
+    }
+    bool ok = (fwrite(&hdr, sizeof(hdr), 1, fp) == 1) &&
+              (fwrite(numels, sizeof(uint64_t), num_params, fp) == num_params) &&
+              (fwrite(payload, 1, payload_bytes, fp) == payload_bytes);
+    fclose(fp);
+
+    if (!ok) {
+        rcre_arena_temp_end(tmp);
+        return RCRE_ERR_IO;
+    }
+
+    if (out_stats) {
+        float* deq = (float*)rcre_arena_alloc(scratch, padded * sizeof(float), 64);
+        memset(out_stats, 0, sizeof(*out_stats));
+        size_t file_bytes = sizeof(hdr) + num_params * sizeof(uint64_t) + payload_bytes;
+        out_stats->total_params      = total;
+        out_stats->zero_params       = zeros;
+        out_stats->sparsity          = (float)zeros / (float)total;
+        out_stats->raw_bytes         = total * sizeof(float);
+        out_stats->artifact_bytes    = file_bytes;
+        out_stats->compression_ratio = (float)out_stats->raw_bytes / (float)file_bytes;
+
+        if (deq) {
+            if (qtype == RCRE_GEN_QUANT_F16)       rcre_f16_to_f32(payload, deq, padded);
+            else if (qtype == RCRE_GEN_QUANT_BF16) rcre_bf16_to_f32(payload, deq, padded);
+            else if (qtype == RCRE_GEN_QUANT_Q8_0) rcre_dequantize_q8_0(payload, deq, padded);
+            else                                   rcre_dequantize_q4_0(payload, deq, padded);
+            gen_lc_compute_error_stats(flat, deq, total,
+                                       &out_stats->rmse, &out_stats->max_abs_err, &out_stats->sqnr_db);
+        }
+    }
+
+    rcre_arena_temp_end(tmp);
+    return RCRE_OK;
+}
+
+int rcre_gen_load_quantized(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_GenQuantType* out_qtype)
+{
+    if (!params || num_params == 0 || !filepath) return RCRE_ERR_INVALID_ARG;
+    size_t total = gen_lc_count_total(params, num_params);
+    if (total == 0) return RCRE_ERR_INVALID_ARG;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return RCRE_ERR_IO;
+
+    GenRgq1Header hdr;
+    if (fread(&hdr, sizeof(hdr), 1, fp) != 1 ||
+        memcmp(hdr.magic, "RGQ1", 4) != 0 ||
+        hdr.version != 1U ||
+        hdr.num_params != (uint32_t)num_params ||
+        hdr.total_floats != (uint64_t)total ||
+        hdr.padded_floats < (uint64_t)total) {
+        fclose(fp);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    RCRE_GenQuantType qtype = (RCRE_GenQuantType)hdr.qtype;
+    size_t expected_bytes = gen_lc_quant_payload_bytes(qtype, (size_t)hdr.padded_floats);
+    if (expected_bytes == 0 || hdr.payload_nbytes != (uint64_t)expected_bytes) {
+        fclose(fp);
+        return RCRE_ERR_INVALID_ARG;
+    }
+
+    size_t need = num_params * sizeof(uint64_t) + expected_bytes + (size_t)hdr.padded_floats * sizeof(float) + 4096U;
+    RCRE_Arena* tmp_arena = rcre_arena_create(need);
+    if (!tmp_arena) {
+        fclose(fp);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    uint64_t* numels  = (uint64_t*)rcre_arena_alloc(tmp_arena, num_params * sizeof(uint64_t), alignof(uint64_t));
+    uint8_t*  payload = (uint8_t*)rcre_arena_alloc(tmp_arena, expected_bytes, 64);
+    float*    deq     = (float*)rcre_arena_alloc(tmp_arena, (size_t)hdr.padded_floats * sizeof(float), 64);
+    if (!numels || !payload || !deq) {
+        fclose(fp);
+        rcre_arena_destroy(tmp_arena);
+        return RCRE_ERR_OUT_OF_MEMORY;
+    }
+
+    bool ok = (fread(numels, sizeof(uint64_t), num_params, fp) == num_params) &&
+              (fread(payload, 1, expected_bytes, fp) == expected_bytes);
+    fclose(fp);
+    if (!ok) {
+        rcre_arena_destroy(tmp_arena);
+        return RCRE_ERR_IO;
+    }
+
+    for (size_t p = 0; p < num_params; ++p) {
+        if (numels[p] != (uint64_t)params[p]->numel) {
+            rcre_arena_destroy(tmp_arena);
+            return RCRE_ERR_SHAPE_MISMATCH;
+        }
+    }
+
+    if (qtype == RCRE_GEN_QUANT_F16)       rcre_f16_to_f32(payload, deq, (size_t)hdr.padded_floats);
+    else if (qtype == RCRE_GEN_QUANT_BF16) rcre_bf16_to_f32(payload, deq, (size_t)hdr.padded_floats);
+    else if (qtype == RCRE_GEN_QUANT_Q8_0) rcre_dequantize_q8_0(payload, deq, (size_t)hdr.padded_floats);
+    else                                   rcre_dequantize_q4_0(payload, deq, (size_t)hdr.padded_floats);
+
+    size_t pos = 0;
+    for (size_t p = 0; p < num_params; ++p) {
+        memcpy(params[p]->data, deq + pos, params[p]->numel * sizeof(float));
+        pos += params[p]->numel;
+    }
+
+    rcre_arena_destroy(tmp_arena);
+    if (out_qtype) *out_qtype = qtype;
+    return RCRE_OK;
+}
+
+int rcre_gen_load_any(
+    RCRE_Tensor* const* params,
+    size_t num_params,
+    const char* filepath,
+    RCRE_Arena* scratch,
+    char* out_format,
+    size_t max_fmt)
+{
+    if (!params || num_params == 0 || !filepath || !scratch) return RCRE_ERR_INVALID_ARG;
+
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return RCRE_ERR_IO;
+    uint8_t magic[4] = {0};
+    size_t nread = fread(magic, 1, 4, fp);
+    fclose(fp);
+    if (nread < 4) return RCRE_ERR_IO;
+
+    if (memcmp(magic, "RGC1", 4) == 0) {
+        if (out_format && max_fmt > 0) snprintf(out_format, max_fmt, "RGC1/RCRZ");
+        return rcre_gen_load_compressed(params, num_params, filepath, scratch);
+    }
+    if (memcmp(magic, "RGQ1", 4) == 0) {
+        RCRE_GenQuantType qt = RCRE_GEN_QUANT_Q8_0;
+        int rc = rcre_gen_load_quantized(params, num_params, filepath, &qt);
+        if (rc == RCRE_OK && out_format && max_fmt > 0) {
+            const char* tag = (qt == RCRE_GEN_QUANT_F16)  ? "RGQ1/F16"  :
+                              (qt == RCRE_GEN_QUANT_BF16) ? "RGQ1/BF16" :
+                              (qt == RCRE_GEN_QUANT_Q8_0) ? "RGQ1/Q8_0" : "RGQ1/Q4_0";
+            snprintf(out_format, max_fmt, "%s", tag);
+        }
+        return rc;
+    }
+
+    if (out_format && max_fmt > 0) snprintf(out_format, max_fmt, "SafeTensors/F32");
+    return rcre_gen_load_safetensors(params, num_params, filepath);
 }
 
 #endif /* RCRE_IMPLEMENTATION */

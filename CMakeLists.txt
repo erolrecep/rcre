@@ -67,6 +67,11 @@ set(RCRE_CORE_SRCS
     src/transformer/generate.c
     src/transformer/gguf.c
     src/transformer/llm.c
+    src/gen/ae.c
+    src/gen/vae.c
+    src/gen/diffusion.c
+    src/gen/vit_dit.c
+    src/gen/lifecycle.c
 )
 
 if(APPLE)

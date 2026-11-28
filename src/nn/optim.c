@@ -281,6 +281,31 @@ void rcre_tensor_optim_zero_grad(RCRE_TensorOptim* opt) {
     }
 }
 
+float rcre_tensor_clip_grad_norm(RCRE_Tensor** params, size_t num_params, float max_norm) {
+    if (params == nullptr || num_params == 0) return 0.0f;
+    double sum_sq = 0.0;
+    for (size_t p = 0; p < num_params; ++p) {
+        RCRE_Tensor* t = params[p];
+        if (!t || !t->grad) continue;
+        for (size_t i = 0; i < t->numel; ++i) {
+            double g = (double)t->grad[i];
+            sum_sq += g * g;
+        }
+    }
+    float total_norm = (float)sqrt(sum_sq);
+    if (max_norm > 0.0f && total_norm > max_norm) {
+        float scale = max_norm / (total_norm + 1e-6f);
+        for (size_t p = 0; p < num_params; ++p) {
+            RCRE_Tensor* t = params[p];
+            if (!t || !t->grad) continue;
+            for (size_t i = 0; i < t->numel; ++i) {
+                t->grad[i] *= scale;
+            }
+        }
+    }
+    return total_norm;
+}
+
 /* Scalar Autograd Optimizer */
 RCRE_ScalarOptim* rcre_scalar_optim_adamw_create(RCRE_Arena* arena, RCRE_ScalarVal** params, size_t num_params, double lr, double beta1, double beta2, double eps, double weight_decay) {
     if (arena == nullptr || params == nullptr || num_params == 0) return nullptr;

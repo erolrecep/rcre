@@ -27,7 +27,7 @@ extern "C" {
 /* ========================================================================= */
 
 #define RCRE_VERSION_MAJOR 2
-#define RCRE_VERSION_MINOR 6
+#define RCRE_VERSION_MINOR 7
 #define RCRE_VERSION_PATCH 0
 
 #ifndef RCRE_NODISCARD
@@ -2694,6 +2694,13 @@ RCRE_NODISCARD int rcre_rng_philox4x32_fill(uint32_t* out, size_t n,
 /* ========================================================================= */
 #ifndef RCRE_NO_METRIC
 #include "rcre_metric.h"
+#endif
+
+/* ========================================================================= */
+/* Generative & Vision Deep Learning Suite (AE, VAE, Diffusion, ViT, DiT)    */
+/* ========================================================================= */
+#ifndef RCRE_NO_GEN
+#include "rcre_gen.h"
 #endif
 
 /* ========================================================================= */

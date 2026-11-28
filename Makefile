@@ -168,7 +168,12 @@ SRCS = src/core/arena.c \
        src/transformer/optim.c \
        src/transformer/generate.c \
        src/transformer/gguf.c \
-       src/transformer/llm.c
+       src/transformer/llm.c \
+       src/gen/ae.c \
+       src/gen/vae.c \
+       src/gen/diffusion.c \
+       src/gen/vit_dit.c \
+       src/gen/lifecycle.c
 SRCS += $(ZSTD_SRC)
 # H6: GPU bridge registry + CPU reference backend (zero-dependency, always
 # linked; the cuda backend objects are opt-in via HAVE_CUDA above).
@@ -197,7 +202,7 @@ LIB = lib/librcre.a
 DYLIB = lib/librcre.dylib
 AMALGAMATED_HEADER = dist/rcre.h
 
-TESTS = test_arena test_slice test_str test_nlp test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_emeans test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse test_io test_df test_stat test_metric test_sota test_linalg test_rng test_fft_f64 test_direct test_h4 test_zarr test_pde test_nbody test_mcmc test_stream test_h8 test_h9 test_gpu
+TESTS = test_arena test_slice test_str test_nlp test_tensor_strides test_adapt_spec test_threadpool test_cv_filters test_fft test_nn test_ml_linear test_hal test_cluster test_emeans test_gbdt test_hnsw test_cam test_amalgamated test_autograd_scalar test_autograd_tensor test_nn_train test_gen test_merger_report test_transformer_nn test_transformer_kv_cache test_transformer_bpe test_transformer_merge test_cv_geom test_cv_features test_cv_homography test_cv_optical_flow test_profiler test_sparse test_io test_df test_stat test_metric test_sota test_linalg test_rng test_fft_f64 test_direct test_h4 test_zarr test_pde test_nbody test_mcmc test_stream test_h8 test_h9 test_gpu
 TEST_BINS = $(addprefix bin/,$(TESTS))
 SAN_BINS = $(addprefix bin/,$(addsuffix _asan,$(TESTS)))
 
@@ -206,7 +211,7 @@ EXAMPLE_BINS = $(addprefix bin/,$(EXAMPLES))
 
 .DEFAULT_GOAL := help
 
-.PHONY: default help prep all clean test test-sanitizers test-parity test-portable test-all bench bench_h5 bench_io conformance-zarr profile bench_h6 bench_h7 bench_h8 examples dist docs up_docs sync_blog up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo gpt_train sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench project_omnisearch_test project_omnisearch_demo project_omnisearch_bench project_galton_test project_galton_demo project_galton_bench project_emeans_test project_emeans_demo project_emeans_bench project_manifold_test project_manifold_demo project_manifold_animate project_manifold_swiss project_manifold_pacmap project_manifold_san
+.PHONY: default help prep all clean test test-sanitizers test-parity test-portable test-all bench bench_h5 bench_io conformance-zarr profile bench_h6 bench_h7 bench_h8 examples dist docs up_docs sync_blog up_web_app webcam_test webcam_test_gui webcam_test_terminal webcam_test_dummy gbdt_test hnsw_test mlp_train gpt_demo gpt_train sparse_bench project_lens_test project_lens_demo project_facex_test project_facex_demo project_mobilenet_test project_mobilenet_demo project_perf_test project_perf_demo project_perf_bench project_sr_test project_sr_demo project_wavelet_test project_wavelet_demo project_xgb_test project_xgb_demo project_xgb_bench project_omnisearch_test project_omnisearch_demo project_omnisearch_bench project_galton_test project_galton_demo project_galton_bench project_emeans_test project_emeans_demo project_emeans_bench project_manifold_test project_manifold_demo project_manifold_animate project_manifold_swiss project_manifold_pacmap project_manifold_san project_gen_test project_gen_demo project_gen_san project_gen_pipeline project_gen_deploy
 
 default: help
 
@@ -218,7 +223,7 @@ all: $(LIB) $(DYLIB) $(AMALGAMATED_HEADER) $(EXAMPLE_BINS)
 
 dist: $(AMALGAMATED_HEADER)
 
-$(AMALGAMATED_HEADER): $(SRCS) include/rcre.h include/rcre_str.h include/rcre_nlp.h scripts/amalgamate.py
+$(AMALGAMATED_HEADER): $(SRCS) include/rcre.h include/rcre_str.h include/rcre_nlp.h include/rcre_gen.h scripts/amalgamate.py
 	@mkdir -p dist
 	python3 scripts/amalgamate.py
 
@@ -439,6 +444,21 @@ project_manifold_pacmap: $(LIB)
 
 project_manifold_san: $(LIB)
 	@$(MAKE) -C projects/rcre_manifold san
+
+project_gen_test: $(LIB)
+	@$(MAKE) -C projects/rcre_gen_studio test
+
+project_gen_demo: $(LIB)
+	@$(MAKE) -C projects/rcre_gen_studio demo
+
+project_gen_san: $(LIB)
+	@$(MAKE) -C projects/rcre_gen_studio san
+
+project_gen_pipeline: $(LIB)
+	@$(MAKE) -C projects/rcre_gen_studio pipeline
+
+project_gen_deploy: $(LIB)
+	@$(MAKE) -C projects/rcre_gen_studio deploy
 
 
 bin/bench_hal: benchmarks/bench_hal.c $(LIB)
@@ -733,6 +753,8 @@ endif
 	@bin/test_autograd_scalar_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_autograd_tensor.c -lm -lpthread -o bin/test_autograd_tensor_asan
 	@bin/test_autograd_tensor_asan
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_gen.c -lm -lpthread -o bin/test_gen_asan
+	@bin/test_gen_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_nn_train.c -lm -lpthread -o bin/test_nn_train_asan
 	@bin/test_nn_train_asan
 	$(CC) $(SANITIZER_FLAGS) $(SRCS) tests/test_merger_report.c -lm -lpthread -o bin/test_merger_report_asan
