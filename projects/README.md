@@ -23,6 +23,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-emeans`** | [`rcre_emeans/`](rcre_emeans/) | Fast mini-batch EMA k-means clustering with scaling-law recipes & dead-cluster revival | EMA Updates, Gumbel-Max Revival, Dual-Kernel Argmin, ThreadPool Determinism |
 | **`rcre-manifold`** | [`rcre_manifold/`](rcre_manifold/) | Multi-dimensional manifold learning, UMAP, Barnes-Hut t-SNE & PaCMAP untangling | Fuzzy Simplicial Sets, Barnes-Hut 2D Quadtree, 3-Tier Pair Annealing, WebAssembly |
 | **`rcre-gen-studio`** | [`rcre_gen_studio/`](rcre_gen_studio/) | End-to-end generative & vision AI studio (ConvAE, ConvVAE, Diffusion Tiny U-Net, ViT, DiT) | Tensor Tape Autograd, Reparameterization, DDPM/DDIM, Batched MHSA, AdaLN-Zero, PNG/SafeTensors |
+| **`rcre-cv-ops`** | [`rcre_cv_ops/`](rcre_cv_ops/) | **[TODO / Planned]** Turnkey Image & Computer Vision CLI (absorbing retired `rcvc` ops) | Continuous GM Resizing (16 Filters), Convolutions, Colorimetry, e-Means Palette, Sixel/Kitty Display |
 
 ---
 
@@ -387,6 +388,23 @@ make project_gen_san
 ```
 
 For full CLI options, quantization tables, HTTP server, and Docker deployment instructions, see [`projects/rcre_gen_studio/README.md`](rcre_gen_studio/README.md) and [`projects/rcre_gen_studio/DEPLOYMENT.md`](rcre_gen_studio/DEPLOYMENT.md).
+
+---
+
+## 14. `rcre-cv-ops` (Turnkey Image & Computer Vision CLI) — [TODO / Planned]
+
+A dedicated, lightweight, zero-dependency C23 command-line utility designed to provide turnkey CLI access to the full computer vision operation suite originally developed and validated in the retired `rcvc` project.
+
+### Key Objectives & Roadmap
+* **Turnkey Image Processing CLI**: Intuitive command-line interface for common image operations:
+  ```bash
+  rcre-cv-ops input.png -resize 800x600 -filter lanczos -blur 2.0 -modulate 110,120,0 -o output.png
+  ```
+* **Continuous Subpixel Resampling**: Full exposure of `rcre_cv_resize_gm` with its 16 GraphicsMagick-exact windowed filter kernels (`Point`, `Box`, `Triangle`, `Hermite`, `Hanning`, `Hamming`, `Blackman`, `Gaussian`, `Quadratic`, `Cubic`, `Catrom`, `Mitchell`, `Lanczos`, `Bessel`, `Sinc`).
+* **Palette Quantization**: Mini-batch e-means clustering quantization (`rcre-cv-ops -palette 256`) generating optimal discrete color palettes.
+* **In-Terminal Previews**: Native terminal display protocols (Sixel and Kitty graphics protocols) for instant visual feedback over SSH and terminal emulators.
+* **Zero-Heap Arena Execution**: All image pipelines execute strictly within caller-allocated scratchpad memory arenas (`RCRE_Arena`).
+
 
 
 

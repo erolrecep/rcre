@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Regenerated `dist/rcre.h` with `resize_gm.c` bundled: **52,666 lines, 1.96 MB**.
 - **Documentation**:
   - Added [docs/cv_resampling.md](docs/cv_resampling.md) detailing the mathematical model, filter window formulations, and pass ordering optimizations.
+- **Roadmap / Planned (Project 14)**:
+  - Added specification and roadmap TODO in `projects/README.md` for `rcre-cv-ops` (`projects/rcre_cv_ops/`), a planned turnkey C23 CLI utility providing command-line access to continuous image operations, GM-exact filters, e-means palette quantization, and terminal display backends migrating from the retired `rcvc` project.
 
 ---
 

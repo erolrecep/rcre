@@ -113,7 +113,7 @@
 
 ## 🛠️ Turnkey Production Projects (`projects/`)
 
-In addition to modular core kernels and unit benchmarks, RCRE includes twelve self-contained, turnkey production applications built 100% on RCRE and ISO C23:
+In addition to modular core kernels and unit benchmarks, RCRE includes thirteen self-contained, turnkey production applications (plus planned CLI toolings) built 100% on RCRE and ISO C23:
 
 | Project | Directory | Purpose | Core RCRE Technologies | Live Launch |
 | :--- | :--- | :--- | :--- | :--- |
@@ -129,6 +129,8 @@ In addition to modular core kernels and unit benchmarks, RCRE includes twelve se
 | **`rcre-galton`** | [`projects/rcre_galtonboard/`](projects/rcre_galtonboard/) | High-speed Galton Board (Quincunx) flow simulator, Bernoulli trials & CLT | SIMD Bit-Level Popcount, Dynamic Histograms, Chi-Square Goodness-of-Fit, WebAssembly | `make project_galton_demo` |
 | **`rcre-emeans`** | [`projects/rcre_emeans/`](projects/rcre_emeans/) | Ultra-fast mini-batch EMA k-means clustering with scaling-law recipes & dead-cluster revival | EMA Updates, Gumbel-Max Revival, Dual-Kernel Argmin, Deterministic Slabs | `make project_emeans_demo` |
 | **`rcre-manifold`** | [`projects/rcre_manifold/`](projects/rcre_manifold/) | Multi-dimensional manifold learning, UMAP, Barnes-Hut t-SNE & PaCMAP untangling | Fuzzy Simplicial Sets, 2D Quadtree Repulsion, 3-Tier Pair Annealing, WebAssembly | `make project_manifold_demo` |
+| **`rcre-gen-studio`** | [`projects/rcre_gen_studio/`](projects/rcre_gen_studio/) | End-to-end generative & vision AI studio (ConvAE, ConvVAE, Diffusion Tiny U-Net, ViT, DiT) | Tensor Tape Autograd, Reparameterization, DDPM/DDIM, Batched MHSA, AdaLN-Zero, PNG/SafeTensors | `make project_gen_demo` |
+| **`rcre-cv-ops`** | [`projects/rcre_cv_ops/`](projects/rcre_cv_ops/) | **[TODO / Planned]** Turnkey computer vision & image processing CLI (absorbing retired `rcvc` ops) | Continuous GM Resizing (16 Filters), Convolutions, Colorimetry, e-Means Palette, Sixel/Kitty Display | *Planned (Roadmap)* |
 
 📖 *For complete CLI documentation and architectural guides, see [`projects/README.md`](projects/README.md).*
 

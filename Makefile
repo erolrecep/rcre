@@ -462,17 +462,17 @@ project_gen_deploy: $(LIB)
 	@$(MAKE) -C projects/rcre_gen_studio deploy
 
 # ---------------------------------------------------------------------------
-# RCVC: High-Performance Computer Vision Engine Integration
+# RCVC: High-Performance Computer Vision Engine (Archived / Retired)
 # ---------------------------------------------------------------------------
 project_rcvc_sync: dist
-	@cp dist/rcre.h ../rcvc/include/rcre.h
-	@echo "✅ Synced dist/rcre.h to apps/rcvc/include/rcre.h"
+	@cp dist/rcre.h ../_retired/rcvc/include/rcre.h
+	@echo "✅ Synced dist/rcre.h to apps/_retired/rcvc/include/rcre.h"
 
-project_rcvc_test: project_rcvc_sync
-	@$(MAKE) -C ../rcvc test
+project_rcvc_test:
+	@$(MAKE) -C ../_retired/rcvc test
 
-project_rcvc_san: project_rcvc_sync
-	@$(MAKE) -C ../rcvc san
+project_rcvc_san:
+	@$(MAKE) -C ../_retired/rcvc san
 
 project_rcvc_all: project_rcvc_test project_rcvc_san
 
