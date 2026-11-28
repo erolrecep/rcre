@@ -6,7 +6,9 @@
 #ifndef RCRE_CAM_INTERNAL_H
 #define RCRE_CAM_INTERNAL_H
 
+#include <pthread.h>
 #include "extras/rcre_cam.h"
+#include "extras/rcre_ringbuf.h"
 
 struct RCRE_Camera {
     RCRE_CamConfig config;
@@ -14,6 +16,11 @@ struct RCRE_Camera {
     void*          backend_handle;
     int (*grab_fn)(RCRE_Camera* cam, RCRE_Tensor* out_frame);
     void (*close_fn)(RCRE_Camera* cam);
+    RCRE_RingBuf*  stream_ring;
+    pthread_t      stream_thread;
+    volatile int   stream_active;
+    RCRE_Tensor    stream_temp_frame;
+    uint8_t*       stream_temp_data;
 };
 
 /* Synthetic / Test Pattern Backend */

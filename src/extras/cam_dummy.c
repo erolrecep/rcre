@@ -7,6 +7,7 @@
 
 #include "cam_internal.h"
 #include <math.h>
+#include <string.h>
 
 typedef struct {
     size_t frame_index;
@@ -54,6 +55,8 @@ RCRE_Camera* rcre_cam_dummy_open(const RCRE_CamConfig* config, RCRE_Arena* arena
     DummyCamContext* ctx = (DummyCamContext*)rcre_arena_alloc(arena, sizeof(DummyCamContext), 64);
 
     if (!cam || !ctx) return NULL;
+    memset(cam, 0, sizeof(RCRE_Camera));
+    memset(ctx, 0, sizeof(DummyCamContext));
 
     cam->config = *config;
     cam->backend_name = "Synthetic Test Pattern (Dummy)";

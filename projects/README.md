@@ -24,6 +24,7 @@ Unlike the unit benchmarks in `examples/`, each project here is a fully function
 | **`rcre-manifold`** | [`rcre_manifold/`](rcre_manifold/) | Multi-dimensional manifold learning, UMAP, Barnes-Hut t-SNE & PaCMAP untangling | Fuzzy Simplicial Sets, Barnes-Hut 2D Quadtree, 3-Tier Pair Annealing, WebAssembly |
 | **`rcre-gen-studio`** | [`rcre_gen_studio/`](rcre_gen_studio/) | End-to-end generative & vision AI studio (ConvAE, ConvVAE, Diffusion Tiny U-Net, ViT, DiT) | Tensor Tape Autograd, Reparameterization, DDPM/DDIM, Batched MHSA, AdaLN-Zero, PNG/SafeTensors |
 | **`rcre-server-bench`** | [`rcre_server_vs_go_benchmark/`](rcre_server_vs_go_benchmark/) | High-performance C23 HTTP/1.1 kqueue reactor vs Go 1.27 web server benchmark | Zero-malloc SPSC kqueue reactor, BM25 Index, GBDT Inference, Arena Allocator |
+| **`rcre-cam-stream`** | [`rcre_cam_stream/`](rcre_cam_stream/) | Zero-copy camera stream & live studio with GPU shaders & lock-free SPSC ring buffer | SPSC Atomic Ring, AVFoundation/V4L2 HAL, OpenGL 3.3 Fragment Filters, Snapshot Codec |
 | **`rcre-cv-ops`** | [`rcre_cv_ops/`](rcre_cv_ops/) | **[TODO / Planned]** Turnkey Image & Computer Vision CLI (absorbing retired `rcvc` ops) | Continuous GM Resizing (16 Filters), Convolutions, Colorimetry, e-Means Palette, Sixel/Kitty Display |
 
 ---
@@ -426,7 +427,54 @@ For full architectural comparison, memory model breakdowns, and benchmark result
 
 ---
 
-## 15. `rcre-cv-ops` (Turnkey Image & Computer Vision CLI) — [TODO / Planned]
+## 15. `rcre-cam-stream` (Zero-Copy Camera Stream & Live Studio)
+
+A real-time, hardware-accelerated video streaming studio and capture suite built on RCRE and pure ISO C23.
+
+### Key Capabilities
+* **Lock-Free Thread Decoupling**: Background capture worker feeding a wait-free / lock-free single-producer single-consumer circular triple-buffer (`rcre_ringbuf.h` backed by `RCRE_Arena`). Render thread always retrieves the freshest frame without blocking on exposure latency.
+* **Multi-Platform Hardware Capture**:
+  * **macOS**: Native AVFoundation capture with zero-copy `CVPixelBufferRef` tensor adaptation.
+  * **Linux**: Video4Linux2 (V4L2) kernel MMAP buffer streaming.
+  * **Synthetic Dummy Generator**: Built-in animated test pattern generator for headless CI and containerized environments.
+* **Hardware-Accelerated OpenGL 3.3 Core Renderer**:
+  * GPU fragment shader pipeline for real-time video filters:
+    * **Normal** (Clean Passthrough)
+    * **Grayscale** (Luminance preserving)
+    * **High Contrast** (Dynamic stretch)
+    * **Sepia** (Warm tone matrix)
+    * **Color Invert** (Negative image)
+  * **Mirror Mode**: Instant horizontal selfie flipping (`M` key or toolbar button).
+  * **Freeze Frame**: Pause and resume live video preview without dropping the window.
+* **Interactive Control Toolbar & Telemetry HUD**:
+  * Floating bottom toolbar with hover animations and click interactions.
+  * Real-time metrics HUD: Live FPS counter, frame latency in milliseconds, resolution, and pixel format.
+* **Full-Resolution Snapshot Codec**:
+  * Instant capture to `snapshots/webcam-snapshot-YYYYMMDD-HHMMSS.bmp` with realistic camera shutter flash animation.
+
+### Quick Start
+```bash
+# Build release studio binary:
+make project_cam_stream_build
+
+# Run automated headless verification (synthetic camera, 60 frames):
+make project_cam_stream_demo
+
+# Run live video studio with GUI toolbar and telemetry HUD:
+make project_cam_stream_run
+
+# Run under AddressSanitizer and UBSan:
+make project_cam_stream_san
+
+# Clean build artifacts:
+make project_cam_stream_clean
+```
+
+For full documentation and control shortcuts, see [`projects/rcre_cam_stream/README.md`](rcre_cam_stream/README.md).
+
+---
+
+## 16. `rcre-cv-ops` (Turnkey Image & Computer Vision CLI) — [TODO / Planned]
 
 A dedicated, lightweight, zero-dependency C23 command-line utility designed to provide turnkey CLI access to the full computer vision operation suite originally developed and validated in the retired `rcvc` project.
 

@@ -113,7 +113,7 @@
 
 ## 🛠️ Turnkey Production Projects (`projects/`)
 
-In addition to modular core kernels and unit benchmarks, RCRE includes fourteen self-contained, turnkey production applications (plus planned CLI toolings) built 100% on RCRE and ISO C23:
+In addition to modular core kernels and unit benchmarks, RCRE includes fifteen self-contained, turnkey production applications (plus planned CLI toolings) built 100% on RCRE and ISO C23:
 
 | Project | Directory | Purpose | Core RCRE Technologies | Live Launch |
 | :--- | :--- | :--- | :--- | :--- |
@@ -131,6 +131,7 @@ In addition to modular core kernels and unit benchmarks, RCRE includes fourteen 
 | **`rcre-manifold`** | [`projects/rcre_manifold/`](projects/rcre_manifold/) | Multi-dimensional manifold learning, UMAP, Barnes-Hut t-SNE & PaCMAP untangling | Fuzzy Simplicial Sets, 2D Quadtree Repulsion, 3-Tier Pair Annealing, WebAssembly | `make project_manifold_demo` |
 | **`rcre-gen-studio`** | [`projects/rcre_gen_studio/`](projects/rcre_gen_studio/) | End-to-end generative & vision AI studio (ConvAE, ConvVAE, Diffusion Tiny U-Net, ViT, DiT) | Tensor Tape Autograd, Reparameterization, DDPM/DDIM, Batched MHSA, AdaLN-Zero, PNG/SafeTensors | `make project_gen_demo` |
 | **`rcre-server-bench`** | [`projects/rcre_server_vs_go_benchmark/`](projects/rcre_server_vs_go_benchmark/) | High-performance C23 HTTP/1.1 kqueue reactor vs Go 1.27 web server benchmark | Zero-malloc SPSC kqueue reactor, BM25 Index, GBDT Inference, Arena Allocator | `make project_server_bench_verify` |
+| **`rcre-cam-stream`** | [`projects/rcre_cam_stream/`](projects/rcre_cam_stream/) | Zero-copy camera stream & live studio with GPU shaders & lock-free SPSC ring buffer | SPSC Atomic Ring, AVFoundation/V4L2 HAL, OpenGL 3.3 Fragment Filters, Snapshot Codec | `make project_cam_stream_demo` |
 | **`rcre-cv-ops`** | [`projects/rcre_cv_ops/`](projects/rcre_cv_ops/) | **[TODO / Planned]** Turnkey computer vision & image processing CLI (absorbing retired `rcvc` ops) | Continuous GM Resizing (16 Filters), Convolutions, Colorimetry, e-Means Palette, Sixel/Kitty Display | *Planned (Roadmap)* |
 
 📖 *For complete CLI documentation and architectural guides, see [`projects/README.md`](projects/README.md).*

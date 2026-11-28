@@ -188,6 +188,8 @@ RCRE_Camera* rcre_cam_avf_open(const RCRE_CamConfig* config, RCRE_Arena* arena) 
             [session stopRunning];
             return NULL;
         }
+        memset(cam, 0, sizeof(RCRE_Camera));
+        memset((void*)ctx, 0, sizeof(AVFCamContext));
 
         ctx->session = session;
         ctx->receiver = receiver;

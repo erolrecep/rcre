@@ -74,6 +74,26 @@ void rcre_cam_close(RCRE_Camera* cam);
  */
 const char* rcre_cam_backend_name(const RCRE_Camera* cam);
 
+struct RCRE_RingBuf;
+
+/**
+ * @brief Starts an asynchronous background capture worker that pushes live frames into a ring buffer.
+ * @param cam Active camera handle.
+ * @param ring Lock-free SPSC frame ring buffer.
+ * @return RCRE_OK on success, error code on failure.
+ */
+int rcre_cam_start_async(RCRE_Camera* cam, struct RCRE_RingBuf* ring);
+
+/**
+ * @brief Stops the asynchronous background capture worker.
+ */
+void rcre_cam_stop_async(RCRE_Camera* cam);
+
+/**
+ * @brief Returns 1 if asynchronous streaming is currently active, 0 otherwise.
+ */
+int rcre_cam_is_streaming(const RCRE_Camera* cam);
+
 #ifdef __cplusplus
 }
 #endif

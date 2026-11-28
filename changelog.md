@@ -25,11 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Regenerated `dist/rcre.h` with `resize_gm.c` bundled: **52,666 lines, 1.96 MB**.
 - **Documentation**:
   - Added [docs/cv_resampling.md](docs/cv_resampling.md) detailing the mathematical model, filter window formulations, and pass ordering optimizations.
-- **Turnkey Production Projects (Project 14)**:
-  - Migrated `rcre_server_vs_go_benchmark` into `projects/rcre_server_vs_go_benchmark/` as **`rcre-server-bench`**.
-  - Added `project_server_bench_build`, `project_server_bench_verify`, `project_server_bench_test`, `project_server_bench_san`, `project_server_bench_bench`, and `project_server_bench_clean` to `Makefile`.
-  - Added comprehensive architectural documentation in `projects/README.md` (Section 14).
-- **Roadmap / Planned (Project 15)**:
+- **Turnkey Production Projects (Project 14 & 15)**:
+  - Migrated `rcre_server_vs_go_benchmark` into `projects/rcre_server_vs_go_benchmark/` as **`rcre-server-bench`** (Project 14).
+  - Added **`rcre-cam-stream`** (Project 15) in `projects/rcre_cam_stream/`: turnkey zero-copy camera stream studio with lock-free SPSC frame ring buffer (`rcre_ringbuf.h`), background capture worker, OpenGL 3.3 fragment shader filters, interactive toolbar, telemetry HUD, and full-resolution snapshot codec.
+  - Added `project_cam_stream_build`, `project_cam_stream_demo`, `project_cam_stream_run`, `project_cam_stream_san`, and `project_cam_stream_clean` to `Makefile`.
+  - Added comprehensive architectural documentation in `projects/README.md` (Sections 14 and 15).
+- **Roadmap / Planned (Project 16)**:
   - Added specification and roadmap TODO in `projects/README.md` for `rcre-cv-ops` (`projects/rcre_cv_ops/`), a planned turnkey C23 CLI utility providing command-line access to continuous image operations, GM-exact filters, e-means palette quantization, and terminal display backends migrating from the retired `rcvc` project.
 
 ---

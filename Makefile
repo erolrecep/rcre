@@ -10,20 +10,20 @@ SANITIZER_FLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address,u
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
-    CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/cam_avf.m src/extras/gui_mac.m src/extras/gpu_metal.m
-    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_avf.o src/extras/gui_mac.o src/extras/gpu_metal.o
+    CAM_SRCS = src/extras/cam_core.c src/extras/rcre_ringbuf.c src/extras/cam_dummy.c src/extras/cam_avf.m src/extras/gui_mac.m src/extras/gpu_metal.m
+    CAM_OBJS = src/extras/cam_core.o src/extras/rcre_ringbuf.o src/extras/cam_dummy.o src/extras/cam_avf.o src/extras/gui_mac.o src/extras/gpu_metal.o
     CAM_LDFLAGS = -framework AVFoundation -framework CoreVideo -framework CoreMedia -framework Foundation -framework Cocoa -framework Metal
     OPEN_CMD = open
 else ifeq ($(UNAME_S),Linux)
-    CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/cam_v4l2.c src/extras/gui_stub.c src/extras/gpu_stub.c
-    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/cam_v4l2.o src/extras/gui_stub.o src/extras/gpu_stub.o
+    CAM_SRCS = src/extras/cam_core.c src/extras/rcre_ringbuf.c src/extras/cam_dummy.c src/extras/cam_v4l2.c src/extras/gui_stub.c src/extras/gpu_stub.c
+    CAM_OBJS = src/extras/cam_core.o src/extras/rcre_ringbuf.o src/extras/cam_dummy.o src/extras/cam_v4l2.o src/extras/gui_stub.o src/extras/gpu_stub.o
     CAM_LDFLAGS =
     OPEN_CMD = xdg-open
     CFLAGS += -D_GNU_SOURCE
     SANITIZER_FLAGS += -D_GNU_SOURCE
 else
-    CAM_SRCS = src/extras/cam_core.c src/extras/cam_dummy.c src/extras/gui_stub.c src/extras/gpu_stub.c
-    CAM_OBJS = src/extras/cam_core.o src/extras/cam_dummy.o src/extras/gui_stub.o src/extras/gpu_stub.o
+    CAM_SRCS = src/extras/cam_core.c src/extras/rcre_ringbuf.c src/extras/cam_dummy.c src/extras/gui_stub.c src/extras/gpu_stub.c
+    CAM_OBJS = src/extras/cam_core.o src/extras/rcre_ringbuf.o src/extras/cam_dummy.o src/extras/gui_stub.o src/extras/gpu_stub.o
     CAM_LDFLAGS =
     OPEN_CMD = echo
 endif
@@ -481,6 +481,24 @@ project_server_bench_clean:
 	@$(MAKE) -C projects/rcre_server_vs_go_benchmark clean
 
 # ---------------------------------------------------------------------------
+# Project 15: RCRE Zero-Copy Camera Stream & Live Studio (rcre-cam-stream)
+# ---------------------------------------------------------------------------
+project_cam_stream_build: $(LIB)
+	@$(MAKE) -C projects/rcre_cam_stream build
+
+project_cam_stream_demo: $(LIB)
+	@$(MAKE) -C projects/rcre_cam_stream demo
+
+project_cam_stream_run: $(LIB)
+	@$(MAKE) -C projects/rcre_cam_stream run
+
+project_cam_stream_san: $(LIB)
+	@$(MAKE) -C projects/rcre_cam_stream san
+
+project_cam_stream_clean:
+	@$(MAKE) -C projects/rcre_cam_stream clean
+
+# ---------------------------------------------------------------------------
 # RCVC: High-Performance Computer Vision Engine (Archived / Retired)
 # ---------------------------------------------------------------------------
 project_rcvc_sync: dist
@@ -628,6 +646,14 @@ test-fuzz: $(LIB)
 	@bin/fuzz_io_standalone
 	$(CC) $(SANITIZER_FLAGS) -DFUZZ_STANDALONE $(SRCS) tests/fuzz/fuzz_str.c -lm -lpthread -o bin/fuzz_str_standalone
 	@bin/fuzz_str_standalone
+
+bin/test_cam_asan: $(SRCS) $(CAM_SRCS) tests/test_cam.c
+	@mkdir -p bin
+ifeq ($(UNAME_S),Darwin)
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) $(CAM_SRCS) tests/test_cam.c -Isrc/extras -fobjc-arc $(CAM_LDFLAGS) $(ZSTD_LDFLAGS) -lm -lpthread -o $@
+else
+	$(CC) $(SANITIZER_FLAGS) $(SRCS) $(CAM_SRCS) tests/test_cam.c -Isrc/extras $(CAM_LDFLAGS) $(ZSTD_LDFLAGS) -lm -lpthread -o $@
+endif
 	$(CC) $(SANITIZER_FLAGS) -DFUZZ_STANDALONE $(SRCS) tests/fuzz/fuzz_nlp.c -lm -lpthread -o bin/fuzz_nlp_standalone
 	@bin/fuzz_nlp_standalone
 	$(CC) $(SANITIZER_FLAGS) -DFUZZ_STANDALONE $(SRCS) tests/fuzz/fuzz_codec.c -lm -lpthread -o bin/fuzz_codec_standalone

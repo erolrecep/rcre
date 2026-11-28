@@ -8,6 +8,7 @@
 
 #include "rcre.h"
 #include "extras/rcre_cam.h"
+#include "extras/rcre_ringbuf.h"
 #include "test_framework.h"
 
 static void test_camera_dummy_pipeline(void) {
@@ -98,9 +99,78 @@ static void test_camera_auto_backend(void) {
     rcre_arena_destroy(arena);
 }
 
+static void test_ringbuf_and_async_streaming(void) {
+    const size_t arena_size = 32 * 1024 * 1024;
+    RCRE_Arena* arena = rcre_arena_create(arena_size);
+    ASSERT_NOT_NULL(arena);
+
+    /* 1. Test isolated SPSC Ring Buffer */
+    size_t frame_bytes = 640 * 480 * 3;
+    RCRE_RingBuf* rb = rcre_ringbuf_create(3, frame_bytes, arena);
+    ASSERT_NOT_NULL(rb);
+
+    uint8_t sample[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    int push_res = rcre_ringbuf_push(rb, sample, sizeof(sample), 4, 4, 0);
+    ASSERT_INT_EQ(RCRE_OK, push_res);
+    ASSERT_UINT_EQ(1, (uint64_t)rcre_ringbuf_pushed_count(rb));
+
+    uint8_t out_buf[16] = {0};
+    size_t out_size = 0, out_w = 0, out_h = 0;
+    int out_fmt = 0;
+    int pull_res = rcre_ringbuf_pull_latest(rb, out_buf, sizeof(out_buf), &out_size, &out_w, &out_h, &out_fmt);
+    ASSERT_INT_EQ(1, pull_res);
+    ASSERT_UINT_EQ(sizeof(sample), out_size);
+    ASSERT_UINT_EQ(4, out_w);
+    ASSERT_UINT_EQ(4, out_h);
+    ASSERT_INT_EQ(0, memcmp(sample, out_buf, sizeof(sample)));
+
+    /* Second pull without push returns 0 */
+    pull_res = rcre_ringbuf_pull_latest(rb, out_buf, sizeof(out_buf), &out_size, &out_w, &out_h, &out_fmt);
+    ASSERT_INT_EQ(0, pull_res);
+
+    /* 2. Test Asynchronous Hardware Capture Streaming */
+    RCRE_CamConfig cfg = {
+        .width = 640,
+        .height = 480,
+        .fps = 60,
+        .device_index = 0,
+        .backend = RCRE_CAM_BACKEND_DUMMY
+    };
+    RCRE_Camera* cam = rcre_cam_open(&cfg, arena);
+    ASSERT_NOT_NULL(cam);
+
+    RCRE_RingBuf* cam_ring = rcre_ringbuf_create(3, frame_bytes, arena);
+    ASSERT_NOT_NULL(cam_ring);
+
+    int start_status = rcre_cam_start_async(cam, cam_ring);
+    ASSERT_INT_EQ(RCRE_OK, start_status);
+    ASSERT_INT_EQ(1, rcre_cam_is_streaming(cam));
+
+    /* Wait a short duration to let background worker generate frames */
+    usleep(50 * 1000); /* 50 ms */
+
+    ASSERT_TRUE(rcre_ringbuf_pushed_count(cam_ring) > 0);
+
+    uint8_t* frame_rx = (uint8_t*)malloc(frame_bytes);
+    ASSERT_NOT_NULL(frame_rx);
+    pull_res = rcre_ringbuf_pull_latest(cam_ring, frame_rx, frame_bytes, &out_size, &out_w, &out_h, &out_fmt);
+    ASSERT_INT_EQ(1, pull_res);
+    ASSERT_UINT_EQ(frame_bytes, out_size);
+    ASSERT_UINT_EQ(640, out_w);
+    ASSERT_UINT_EQ(480, out_h);
+
+    free(frame_rx);
+    rcre_cam_stop_async(cam);
+    ASSERT_INT_EQ(0, rcre_cam_is_streaming(cam));
+
+    rcre_cam_close(cam);
+    rcre_arena_destroy(arena);
+}
+
 int main(void) {
     test_suite_begin("RCRE Camera Companion & CV Pipeline (EXTRAS-CAM-01)");
     TEST_RUN(test_camera_dummy_pipeline);
     TEST_RUN(test_camera_auto_backend);
+    TEST_RUN(test_ringbuf_and_async_streaming);
     return test_suite_report();
 }

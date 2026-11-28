@@ -1,0 +1,4 @@
+bin/
+*.o
+snapshots/*.bmp
+!snapshots/.gitkeep
